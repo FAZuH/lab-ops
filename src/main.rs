@@ -3,7 +3,7 @@ use std::process;
 use clap::Parser as _;
 use lab_ops::cli::Cli;
 use lab_ops::cli::Command;
-use lab_ops::dns::cf2ansible;
+use lab_ops::cmd::cf2ansible;
 
 fn main() {
     let cli = Cli::parse();
