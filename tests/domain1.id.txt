@@ -1,0 +1,69 @@
+;;
+;; Domain:     domain1.id.
+;; Exported:   2026-05-06 15:11:14
+;;
+;; This file is intended for use for informational and archival
+;; purposes ONLY and MUST be edited before use on a production
+;; DNS server.  In particular, you must:
+;;   -- update the SOA record with the correct authoritative name server
+;;   -- update the SOA record with the contact e-mail address information
+;;   -- update the NS record(s) with the authoritative name servers for this domain.
+;;
+;; For further information, please consult the BIND documentation
+;; located on the following website:
+;;
+;; http://www.isc.org/
+;;
+;; And RFC 1035:
+;;
+;; http://www.ietf.org/rfc/rfc1035.txt
+;;
+;; Please note that we do NOT offer technical support for any use
+;; of this zone data, the BIND name server, or any other third-party
+;; DNS software.
+;;
+;; Use at your own risk.
+;; SOA Record
+domain1.id	3600	IN	SOA	foobar.ns.cloudflare.com. dns.cloudflare.com. 2052974687 10000 2400 604800 3600
+
+;; NS Records
+domain1.id.	86400	IN	NS	foobar.ns.cloudflare.com.
+domain1.id.	86400	IN	NS	barbaz.ns.cloudflare.com.
+
+;; A Records
+domain1.id.	1	IN	A	203.0.113.2 ; cf_tags=cf-proxied:false
+mail.domain1.id.	1	IN	A	203.0.113.2 ; cf_tags=cf-proxied:false
+
+;; CNAME Records
+autoconfig.domain1.id.	1	IN	CNAME	mail.domain1.id. ; cf_tags=cf-proxied:false
+autodiscover.domain1.id.	1	IN	CNAME	mail.domain1.id. ; cf_tags=cf-proxied:false
+imap.domain1.id.	1	IN	CNAME	mail.domain1.id. ; cf_tags=cf-proxied:false
+smtp.domain1.id.	1	IN	CNAME	mail.domain1.id. ; cf_tags=cf-proxied:false
+sso.domain1.id.	1	IN	CNAME	domain1.id. ; cf_tags=cf-proxied:false
+www.domain1.id.	1	IN	CNAME	domain1.id. ; cf_tags=cf-proxied:false
+
+;; MX Records
+domain1.id.	1	IN	MX	5 mail.domain1.id.
+
+;; SRV Records
+_autodiscover._tcp.domain1.id.	1	IN	SRV	0 1 443 mail.domain1.id.
+_caldavs._tcp.domain1.id.	1	IN	SRV	0 1 443 mail.domain1.id.
+_carddavs._tcp.domain1.id.	1	IN	SRV	0 1 443 mail.domain1.id.
+_imaps._tcp.domain1.id.	1	IN	SRV	0 1 993 mail.domain1.id.
+_imap._tcp.domain1.id.	1	IN	SRV	0 1 143 mail.domain1.id.
+_pop3s._tcp.domain1.id.	1	IN	SRV	0 1 995 mail.domain1.id.
+_pop3._tcp.domain1.id.	1	IN	SRV	0 1 110 mail.domain1.id.
+_sieve._tcp.domain1.id.	1	IN	SRV	0 1 4190 mail.domain1.id.
+_smtps._tcp.domain1.id.	1	IN	SRV	0 1 465 mail.domain1.id.
+_submissions._tcp.domain1.id.	1	IN	SRV	0 1 465 mail.domain1.id.
+_submission._tcp.domain1.id.	1	IN	SRV	0 1 587 mail.domain1.id.
+
+;; TLSA Records
+_25._tcp.mail.domain1.id.	1	IN	TLSA	3 1 1 TRUNCATED
+
+;; TXT Records
+domain1.id.	1	IN	TXT	"TRUNCATED"
+_caldavs._tcp.domain1.id.	1	IN	TXT	"path=/SOGo/dav/"
+_carddavs._tcp.domain1.id.	1	IN	TXT	"path=/SOGo/dav/"
+dkim._domainkey.domain1.id.	1	IN	TXT	"TRUNCATED" "TRUNCATED"
+_dmarc.domain1.id.	1	IN	TXT	"TRUNCATED"

@@ -1,0 +1,82 @@
+;;
+;; Domain:     domain0.com.
+;; Exported:   2026-05-06 15:08:40
+;;
+;; This file is intended for use for informational and archival
+;; purposes ONLY and MUST be edited before use on a production
+;; DNS server.  In particular, you must:
+;;   -- update the SOA record with the correct authoritative name server
+;;   -- update the SOA record with the contact e-mail address information
+;;   -- update the NS record(s) with the authoritative name servers for this domain.
+;;
+;; For further information, please consult the BIND documentation
+;; located on the following website:
+;;
+;; http://www.isc.org/
+;;
+;; And RFC 1035:
+;;
+;; http://www.ietf.org/rfc/rfc1035.txt
+;;
+;; Please note that we do NOT offer technical support for any use
+;; of this zone data, the BIND name server, or any other third-party
+;; DNS software.
+;;
+;; Use at your own risk.
+;; SOA Record
+domain0.com	3600	IN	SOA	foobar.ns.cloudflare.com. dns.cloudflare.com. 2052974672 10000 2400 604800 3600
+
+;; NS Records
+domain0.com.	86400	IN	NS	foobar.ns.cloudflare.com.
+domain0.com.	86400	IN	NS	barbaz.ns.cloudflare.com.
+
+;; A Records
+domain0.com.	1	IN	A	203.0.113.3 ; cf_tags=cf-proxied:false
+domain0-sg-proxmox-1.server.domain0.com.	1	IN	A	203.0.113.3 ; cf_tags=cf-proxied:false
+mail.domain0.com.	1	IN	A	203.0.113.3 ; cf_tags=cf-proxied:false
+
+;; AAAA Records
+domain0.com.	1	IN	AAAA	2402:1f00:8001:82b::1 ; cf_tags=cf-proxied:false
+
+;; CNAME Records
+autoconfig.domain0.com.	1	IN	CNAME	mail.domain0.com. ; cf_tags=cf-proxied:false
+autodiscover.domain0.com.	1	IN	CNAME	mail.domain0.com. ; cf_tags=cf-proxied:false
+code.domain0.com.	1	IN	CNAME	domain0-sg-proxmox-1.server.domain0.com. ; cf_tags=cf-proxied:false
+drive.domain0.com.	1	IN	CNAME	domain0-sg-proxmox-1.server.domain0.com. ; cf_tags=cf-proxied:false
+imap.domain0.com.	1	IN	CNAME	mail.domain0.com. ; cf_tags=cf-proxied:false
+mc.domain0.com.	1	IN	CNAME	domain0-sg-proxmox-1.server.domain0.com. ; cf_tags=cf-proxied:false
+notes.domain0.com.	1	IN	CNAME	domain0.github.io. ; cf_tags=cf-proxied:false
+pwr-mon.domain0.com.	1	IN	CNAME	domain0-sg-proxmox-1.server.domain0.com. ; cf_tags=cf-proxied:false
+smtp.domain0.com.	1	IN	CNAME	mail.domain0.com. ; cf_tags=cf-proxied:false
+sso.domain0.com.	1	IN	CNAME	domain0-sg-proxmox-1.server.domain0.com. ; cf_tags=cf-proxied:false
+terraria.domain0.com.	1	IN	CNAME	domain0-sg-proxmox-1.server.domain0.com. ; cf_tags=cf-proxied:false
+vpn.domain0.com.	1	IN	CNAME	domain0-sg-proxmox-1.server.domain0.com. ; cf_tags=cf-proxied:false
+www.domain0.com.	1	IN	CNAME	domain0-sg-proxmox-1.server.domain0.com. ; cf_tags=cf-proxied:false
+
+;; MX Records
+domain0.com.	1	IN	MX	5 mail.domain0.com.
+
+;; SRV Records
+_autodiscover._tcp.domain0.com.	1	IN	SRV	0 1 443 mail.domain0.com.
+_caldavs._tcp.domain0.com.	1	IN	SRV	0 1 443 mail.domain0.com.
+_carddavs._tcp.domain0.com.	1	IN	SRV	0 1 443 mail.domain0.com.
+_imaps._tcp.domain0.com.	1	IN	SRV	0 1 993 mail.domain0.com.
+_imap._tcp.domain0.com.	1	IN	SRV	0 1 143 mail.domain0.com.
+_minecraft._tcp.mc.domain0.com.	1	IN	SRV	0 5 25565 mc.domain0.com.
+_pop3s._tcp.domain0.com.	1	IN	SRV	0 1 995 mail.domain0.com.
+_pop3._tcp.domain0.com.	1	IN	SRV	0 1 110 mail.domain0.com.
+_sieve._tcp.domain0.com.	1	IN	SRV	0 1 4190 mail.domain0.com.
+_smtps._tcp.domain0.com.	1	IN	SRV	0 1 465 mail.domain0.com.
+_submissions._tcp.domain0.com.	1	IN	SRV	0 1 465 mail.domain0.com.
+_submission._tcp.domain0.com.	1	IN	SRV	0 1 587 mail.domain0.com.
+
+;; TLSA Records
+_25._tcp.mail.domain0.com.	1	IN	TLSA	3 1 1 TRUNCATED
+
+;; TXT Records
+_caldavs._tcp.domain0.com.	1	IN	TXT	"path=/SOGo/dav/"
+_carddavs._tcp.domain0.com.	1	IN	TXT	"path=/SOGo/dav/"
+_discord.domain0.com.	1	IN	TXT	"TRUNCATED"
+dkim._domainkey.domain0.com.	1	IN	TXT	"TRUNCATED" "TRUNCATED"
+_dmarc.domain0.com.	1	IN	TXT	"TRUNCATED"
+domain0.com.	1	IN	TXT	"TRUNCATED"

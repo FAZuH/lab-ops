@@ -1,0 +1,57 @@
+;;
+;; Domain:     domain2.com.
+;; Exported:   2026-05-06 15:11:21
+;;
+;; This file is intended for use for informational and archival
+;; purposes ONLY and MUST be edited before use on a production
+;; DNS server.  In particular, you must:
+;;   -- update the SOA record with the correct authoritative name server
+;;   -- update the SOA record with the contact e-mail address information
+;;   -- update the NS record(s) with the authoritative name servers for this domain.
+;;
+;; For further information, please consult the BIND documentation
+;; located on the following website:
+;;
+;; http://www.isc.org/
+;;
+;; And RFC 1035:
+;;
+;; http://www.ietf.org/rfc/rfc1035.txt
+;;
+;; Please note that we do NOT offer technical support for any use
+;; of this zone data, the BIND name server, or any other third-party
+;; DNS software.
+;;
+;; Use at your own risk.
+;; SOA Record
+domain2.com	3600	IN	SOA	foobar.ns.cloudflare.com. dns.cloudflare.com. 2052974688 10000 2400 604800 3600
+
+;; NS Records
+domain2.com.	86400	IN	NS	foobar.ns.cloudflare.com.
+domain2.com.	86400	IN	NS	barbaz.ns.cloudflare.com.
+
+;; A Records
+domain2.com.	1	IN	A	203.0.113.1 ; cf_tags=cf-proxied:true
+mail.domain2.com.	1	IN	A	203.0.113.1 ; cf_tags=cf-proxied:false
+
+;; CNAME Records
+autoconfig.domain2.com.	1	IN	CNAME	mail.domain2.com. ; cf_tags=cf-proxied:false
+autodiscover.domain2.com.	1	IN	CNAME	mail.domain2.com. ; cf_tags=cf-proxied:false
+drive.domain2.com.	1	IN	CNAME	domain2.com. ; cf_tags=cf-proxied:false
+sso.domain2.com.	1	IN	CNAME	domain2.com. ; cf_tags=cf-proxied:false
+www.domain2.com.	1	IN	CNAME	domain2.com. ; cf_tags=cf-proxied:true
+
+;; MX Records
+domain2.com.	1	IN	MX	5 mail.domain2.com.
+
+;; SRV Records
+_autodiscover._tcp.domain2.com.	1	IN	SRV	0 1 443 mail.domain2.com.
+
+;; TLSA Records
+_25._tcp.mail.domain2.com.	1	IN	TLSA	3 1 1 TRUNCATED
+
+;; TXT Records
+dkim._domainkey.domain2.com.	1	IN	TXT	"TRUNCATED" "TRUNCATED"
+_dmarc.domain2.com.	1	IN	TXT	"TRUNCATED"
+domain2.com.	3600	IN	TXT	"TRUNCATED"
+domain2.com.	1	IN	TXT	"TRUNCATED"
