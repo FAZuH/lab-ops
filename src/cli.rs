@@ -23,6 +23,7 @@ pub enum Command {
         /// Zone name (defaults to name extracted from SOA record)
         zone_name: Option<String>,
     },
+    /// View addresses and binds of Docker containers
     #[command(name = CMD_DOCKERNET)]
     DockerNet,
 }
