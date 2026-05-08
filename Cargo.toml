@@ -1,3 +1,6 @@
+[workspace]
+members = ["crates/dockernatmap"]
+
 [package]
 name = "lab-ops"
 version = "0.1.0"
@@ -10,3 +13,4 @@ bollard = "0.21.0"
 color-eyre = "0.6.5"
 comfy-table = "7.2.2"
 tokio = { version = "1.52.2", features = ["rt"] }
+dockernatmap = { path = "./crates/dockernatmap" }

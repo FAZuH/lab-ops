@@ -10,6 +10,7 @@ use comfy_table::Table;
 
 pub async fn run() -> Result<()> {
     let mut table = Table::new();
+    let mut rows = Vec::new();
     table.set_header(vec!["Name", "Status", "IP", "Binds"]);
 
     let docker = Docker::connect_with_local_defaults()?;
@@ -17,28 +18,43 @@ pub async fn run() -> Result<()> {
 
     for cont in docker.list_containers(opt).await? {
         let Some(id) = cont.id else { continue };
-        let name = cont
-            .names
-            .unwrap_or_default()
-            .into_iter()
-            .next()
-            .unwrap_or_default();
         let status = cont.status.unwrap_or_default();
+        if is_exit(&status) {
+            continue;
+        }
+
+        let name = format_name(cont.names);
 
         let Some(network) = docker.inspect_container(&id, None).await?.network_settings else {
             continue;
         };
 
-        table.add_row(vec![
-            name,
-            status,
-            format_ips(network.networks),
-            format_binds(network.ports),
-        ]);
+        let ips = format_ips(network.networks);
+        let binds = format_binds(network.ports);
+
+        rows.push([name, status, ips, binds]);
     }
+
+    rows.sort_by_key(|r| r[0].clone());
+    rows.sort_by_key(|r| r[1].clone());
+    rows.sort_by_key(|r| r[3].clone());
+
+    table.add_rows(rows);
 
     println!("{table}");
     Ok(())
+}
+
+fn is_exit(status: impl AsRef<str>) -> bool {
+    status.as_ref().contains("Exited (0)")
+}
+
+fn format_name(names: Option<Vec<String>>) -> String {
+    names
+        .unwrap_or_default()
+        .into_iter()
+        .next()
+        .unwrap_or_default()
 }
 
 fn format_ips(networks: Option<HashMap<String, EndpointSettings>>) -> String {
