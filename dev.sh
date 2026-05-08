@@ -41,6 +41,7 @@ Commands:
   lint      - Run linter with "cargo clippy --all-targets --all-features --fix --allow-dirty"
   test      - Run tests with "cargo test --all-features"
   docs      - Compile Mermaid diagrams to images
+  demo      - Build release, alias, and run vhs demo tape
   all       - Run format, lint, and test in sequence
   help      - Show this help message
 
@@ -51,6 +52,7 @@ Examples:
   ./dev.sh lint                    # Run linter
   ./dev.sh test                    # Run tests
   ./dev.sh docs                    # Compile Mermaid diagrams
+  ./dev.sh demo                    # Build release, alias, and run demo tape
   ./dev.sh format lint             # Format then lint
   ./dev.sh all                     # Run format, lint, and test
 
@@ -102,6 +104,32 @@ cmd_docs() {
     print_success "Mermaid diagrams compiled to docs/diagrams/"
 }
 
+cmd_demo() {
+    print_info "Building release binary..."
+    cargo build --release
+    print_success "Release build completed"
+
+    print_info "Creating wrapper script..."
+    local wrapper_dir="/tmp/tomo-demo-bin"
+    mkdir -p "$wrapper_dir"
+    cat > "$wrapper_dir/tomo" << SCRIPT
+#!/bin/bash
+exec $PWD/target/release/tomo --config-path /tmp/tomo-demo "\$@"
+SCRIPT
+    chmod +x "$wrapper_dir/tomo"
+    export PATH="$wrapper_dir:$PATH"
+    trap "rm -rf $wrapper_dir" EXIT
+    print_success "Wrapper created at $wrapper_dir/tomo"
+
+    if ! command -v vhs &> /dev/null; then
+        print_warning "vhs not found. Install it: https://github.com/charmbracelet/vhs"
+    fi
+
+    print_info "Running demo tape..."
+    vhs scripts/demo.tape
+    print_success "Demo tape completed"
+}
+
 cmd_all() {
     print_info "Running all tasks..."
     cmd_format
@@ -126,6 +154,9 @@ execute_command() {
             ;;
         docs)
             cmd_docs
+            ;;
+        demo)
+            cmd_demo
             ;;
         all)
             cmd_all
