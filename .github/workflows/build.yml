@@ -36,20 +36,20 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            binary: tomo
-            asset_name: tomo-linux-x64
+            binary: lab-ops
+            asset_name: lab-ops-linux-x64
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            binary: tomo.exe
-            asset_name: tomo-windows-x64.exe
+            binary: lab-ops.exe
+            asset_name: lab-ops-windows-x64.exe
           - target: x86_64-apple-darwin
             os: macos-latest
-            binary: tomo
-            asset_name: tomo-macos-x64
+            binary: lab-ops
+            asset_name: lab-ops-macos-x64
           - target: aarch64-apple-darwin
             os: macos-latest
-            binary: tomo
-            asset_name: tomo-macos-arm64
+            binary: lab-ops
+            asset_name: lab-ops-macos-arm64
     steps:
       - name: Checkout
         uses: actions/checkout@v4
