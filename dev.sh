@@ -66,13 +66,13 @@ cmd_format() {
 
 cmd_lint() {
     print_info "Linting code..."
-    cargo clippy --all-targets --all-features --no-deps --fix --allow-dirty
+    cargo clippy --workspace --all-targets --all-features --no-deps --fix --allow-dirty
     print_success "Linting completed"
 }
 
 cmd_test() {
     print_info "Running tests..."
-    cargo test --all-features
+    cargo test --workspace --all-targets --all-features
     print_success "Tests completed"
 }
 
