@@ -9,6 +9,11 @@ on:
         description: 'Binary name (e.g. tomo, lab-ops)'
         required: true
         type: string
+      platforms:
+        description: 'Build targets: multi (all 4) or linux (x64 only)'
+        required: false
+        type: string
+        default: 'multi'
     secrets:
       PRIVATE_TOKEN:
         required: true
@@ -135,9 +140,11 @@ jobs:
         run: |
           mkdir -p release
           cp artifacts/${{ inputs.binary-name }}-linux-x64/${{ inputs.binary-name }}-linux-x64 release/
-          cp artifacts/${{ inputs.binary-name }}-windows-x64.exe/${{ inputs.binary-name }}-windows-x64.exe release/
-          cp artifacts/${{ inputs.binary-name }}-macos-x64/${{ inputs.binary-name }}-macos-x64 release/
-          cp artifacts/${{ inputs.binary-name }}-macos-arm64/${{ inputs.binary-name }}-macos-arm64 release/
+          if [[ "${{ inputs.platforms }}" != "linux" ]]; then
+            cp artifacts/${{ inputs.binary-name }}-windows-x64.exe/${{ inputs.binary-name }}-windows-x64.exe release/
+            cp artifacts/${{ inputs.binary-name }}-macos-x64/${{ inputs.binary-name }}-macos-x64 release/
+            cp artifacts/${{ inputs.binary-name }}-macos-arm64/${{ inputs.binary-name }}-macos-arm64 release/
+          fi
 
       - name: Create Release
         id: release
