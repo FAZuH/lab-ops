@@ -17,4 +17,5 @@ jobs:
     uses: ./.github/workflows/_release.yml
     with:
       binary-name: lab-ops
+      platforms: linux
     secrets: inherit
