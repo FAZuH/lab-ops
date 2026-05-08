@@ -68,9 +68,16 @@ jobs:
       - name: Build
         run: cargo build ${{ inputs.cargo-build-args }}
 
+      - name: Prepare Artifact
+        if: inputs.upload-binary
+        run: |
+          mkdir -p artifacts
+          cp target/${{ inputs.release && 'release' || 'debug' }}/lab-ops artifacts/lab-ops-linux-x64
+          chmod +x artifacts/lab-ops-linux-x64
+
       - name: Upload Binary Artifact
         if: inputs.upload-binary
         uses: actions/upload-artifact@v4
         with:
           name: lab-ops-linux-x64
-          path: target/${{ inputs.release && 'release' || 'debug' }}/lab-ops
+          path: artifacts/lab-ops-linux-x64
