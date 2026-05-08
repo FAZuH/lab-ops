@@ -1,22 +1,19 @@
-use std::process;
-
 use clap::Parser as _;
+use color_eyre::Result;
 use lab_ops::cli::Cli;
 use lab_ops::cli::Command;
 use lab_ops::cmd::cf2ansible;
 
-fn main() {
+fn main() -> Result<()> {
+    color_eyre::install()?;
     let cli = Cli::parse();
 
-    let result = match cli.command {
+    match cli.command {
         Command::Cf2Ansible {
             zone_file,
             zone_name,
-        } => cf2ansible::run(zone_file, zone_name),
+        } => cf2ansible::run(zone_file, zone_name)?,
     };
 
-    if let Err(e) = result {
-        eprintln!("Error: {e}");
-        process::exit(1);
-    }
+    Ok(())
 }
