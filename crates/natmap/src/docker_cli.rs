@@ -130,7 +130,7 @@ pub async fn run_cli_with_args(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-async fn list(container_id: Option<String>, socket: &str, json: bool) -> Result<()> {
+pub async fn list(container_id: Option<String>, socket: &str, json: bool) -> Result<()> {
     let res: Vec<ActivePortMapping> =
         request_json(socket, Method::GET, "/mappings", None::<()>).await?;
     let res = if let Some(cid) = container_id {
@@ -168,7 +168,7 @@ async fn list(container_id: Option<String>, socket: &str, json: bool) -> Result<
     Ok(())
 }
 
-async fn remap(container_id: String, mapping: String, socket: &str, json: bool) -> Result<()> {
+pub async fn remap(container_id: String, mapping: String, socket: &str, json: bool) -> Result<()> {
     let parts: Vec<&str> = mapping.split(':').collect();
     if parts.len() != 2 {
         color_eyre::eyre::bail!("Invalid mapping format. Use <old_host_port>:<new_host_port>");
@@ -188,7 +188,7 @@ async fn remap(container_id: String, mapping: String, socket: &str, json: bool) 
     Ok(())
 }
 
-async fn add(container_id: String, mapping: String, socket: &str, json: bool) -> Result<()> {
+pub async fn add(container_id: String, mapping: String, socket: &str, json: bool) -> Result<()> {
     // Parse proto from trailing /proto suffix
     let (mapping_part, proto) = match mapping.split_once('/') {
         Some((m, p)) => (m, p.to_string()),
@@ -222,7 +222,7 @@ async fn add(container_id: String, mapping: String, socket: &str, json: bool) ->
     Ok(())
 }
 
-async fn remove(
+pub async fn remove(
     container_id: Option<String>,
     port: Option<String>,
     all: bool,

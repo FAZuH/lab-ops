@@ -2,10 +2,10 @@ use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::str::FromStr;
 
-use dockernatmap::models::ActivePortMapping;
-use dockernatmap::models::AddMappingRequest;
-use dockernatmap::models::PortMappingRequest;
-use dockernatmap::models::TransportProtocol;
+use natmap::models::ActivePortMapping;
+use natmap::models::AddMappingRequest;
+use natmap::models::PortMappingRequest;
+use natmap::models::TransportProtocol;
 
 #[test]
 fn add_mapping_request_defaults() {
@@ -72,7 +72,7 @@ fn active_port_mapping_rule_comment_format() {
         proto: TransportProtocol::Tcp,
     };
     let mapping = ActivePortMapping::new(1, req, "abc123".into(), "my-nginx".into());
-    assert_eq!(mapping.rule_comment, "dockernatmap:abc123:8080");
+    assert_eq!(mapping.rule_comment, "natmap:abc123:8080");
     assert_eq!(mapping.container_id, "abc123");
     assert_eq!(mapping.container_name, "my-nginx");
 }

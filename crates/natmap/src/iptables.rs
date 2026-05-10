@@ -8,7 +8,7 @@ use tracing::info;
 use crate::models::ActivePortMapping;
 
 const DOCKER_USER_CHAIN: &str = "DOCKER-USER";
-const DOCKERNATMAP_CHAIN: &str = "DOCKERNATMAP";
+const NATMAP_CHAIN: &str = "NATMAP";
 
 pub struct IptablesManager;
 
@@ -38,50 +38,33 @@ impl IptablesManager {
                 )?;
             }
 
-            // Create DOCKERNATMAP subchain in nat table (DNAT rules live here)
-            if !self.chain_exists(cmd, "nat", DOCKERNATMAP_CHAIN) {
-                self.run(cmd, &["-t", "nat", "-N", DOCKERNATMAP_CHAIN], true)?;
+            // Create NATMAP subchain in nat table (DNAT rules live here)
+            if !self.chain_exists(cmd, "nat", NATMAP_CHAIN) {
+                self.run(cmd, &["-t", "nat", "-N", NATMAP_CHAIN], true)?;
             }
 
-            // Create DOCKERNATMAP subchain in filter table (FORWARD ACCEPT rules live here)
-            if !self.chain_exists(cmd, "filter", DOCKERNATMAP_CHAIN) {
-                self.run(cmd, &["-t", "filter", "-N", DOCKERNATMAP_CHAIN], true)?;
+            // Create NATMAP subchain in filter table (FORWARD ACCEPT rules live here)
+            if !self.chain_exists(cmd, "filter", NATMAP_CHAIN) {
+                self.run(cmd, &["-t", "filter", "-N", NATMAP_CHAIN], true)?;
             }
 
-            // Jump from DOCKER-USER to DOCKERNATMAP in filter table (if not exists)
+            // Jump from DOCKER-USER to NATMAP in filter table (if not exists)
             if !self.rule_exists(
                 cmd,
-                &[
-                    "-t",
-                    "filter",
-                    "-C",
-                    DOCKER_USER_CHAIN,
-                    "-j",
-                    DOCKERNATMAP_CHAIN,
-                ],
+                &["-t", "filter", "-C", DOCKER_USER_CHAIN, "-j", NATMAP_CHAIN],
             ) {
                 self.run(
                     cmd,
-                    &[
-                        "-t",
-                        "filter",
-                        "-I",
-                        DOCKER_USER_CHAIN,
-                        "-j",
-                        DOCKERNATMAP_CHAIN,
-                    ],
+                    &["-t", "filter", "-I", DOCKER_USER_CHAIN, "-j", NATMAP_CHAIN],
                     true,
                 )?;
             }
 
-            // Jump from PREROUTING to DOCKERNATMAP in nat table (if not exists)
-            if !self.rule_exists(
-                cmd,
-                &["-t", "nat", "-C", "PREROUTING", "-j", DOCKERNATMAP_CHAIN],
-            ) {
+            // Jump from PREROUTING to NATMAP in nat table (if not exists)
+            if !self.rule_exists(cmd, &["-t", "nat", "-C", "PREROUTING", "-j", NATMAP_CHAIN]) {
                 self.run(
                     cmd,
-                    &["-t", "nat", "-I", "PREROUTING", "-j", DOCKERNATMAP_CHAIN],
+                    &["-t", "nat", "-I", "PREROUTING", "-j", NATMAP_CHAIN],
                     true,
                 )?;
             }
@@ -103,14 +86,14 @@ impl IptablesManager {
         let proto = mapping.request.proto.to_string();
         let comment = &mapping.rule_comment;
 
-        // 1. DNAT rule (nat/PREROUTING via DOCKERNATMAP)
+        // 1. DNAT rule (nat/PREROUTING via NATMAP)
         self.run(
             cmd,
             &[
                 "-t",
                 "nat",
                 "-A",
-                DOCKERNATMAP_CHAIN,
+                NATMAP_CHAIN,
                 "-p",
                 &proto,
                 "--dport",
@@ -127,14 +110,14 @@ impl IptablesManager {
             true,
         )?;
 
-        // 2. FORWARD ACCEPT rule in filter/DOCKERNATMAP
+        // 2. FORWARD ACCEPT rule in filter/NATMAP
         self.run(
             cmd,
             &[
                 "-t",
                 "filter",
                 "-A",
-                DOCKERNATMAP_CHAIN,
+                NATMAP_CHAIN,
                 "-d",
                 &container_ip,
                 "-p",
@@ -228,10 +211,10 @@ impl IptablesManager {
     fn remove_by_comment(&self, comment: &str, is_ipv6: bool) -> Result<()> {
         let cmd = self.cmd_for(is_ipv6);
 
-        // Delete from DOCKERNATMAP in nat table
-        self.delete_all_matching(cmd, "nat", DOCKERNATMAP_CHAIN, comment)?;
-        // Delete from DOCKERNATMAP in filter table
-        self.delete_all_matching(cmd, "filter", DOCKERNATMAP_CHAIN, comment)?;
+        // Delete from NATMAP in nat table
+        self.delete_all_matching(cmd, "nat", NATMAP_CHAIN, comment)?;
+        // Delete from NATMAP in filter table
+        self.delete_all_matching(cmd, "filter", NATMAP_CHAIN, comment)?;
         // Delete from POSTROUTING in nat table
         self.delete_all_matching(cmd, "nat", "POSTROUTING", comment)?;
         // Delete from OUTPUT in nat table (localhost DNAT)
@@ -247,8 +230,8 @@ impl IptablesManager {
 
         for &cmd in &["iptables", "ip6tables"] {
             // Find and delete rules matching prefix in relevant chains
-            let _ = self.delete_all_matching_prefix(cmd, "nat", DOCKERNATMAP_CHAIN, &prefix);
-            let _ = self.delete_all_matching_prefix(cmd, "filter", DOCKERNATMAP_CHAIN, &prefix);
+            let _ = self.delete_all_matching_prefix(cmd, "nat", NATMAP_CHAIN, &prefix);
+            let _ = self.delete_all_matching_prefix(cmd, "filter", NATMAP_CHAIN, &prefix);
             let _ = self.delete_all_matching_prefix(cmd, "nat", "POSTROUTING", &prefix);
             let _ = self.delete_all_matching_prefix(cmd, "nat", "OUTPUT", &prefix);
         }

@@ -56,11 +56,11 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
-const DEFAULT_STATE_FILE: &str = "/var/lib/dockernatmap/state.json";
-const DEFAULT_SOCKET_PATH: &str = "/run/dockernatmap.sock";
+const DEFAULT_STATE_FILE: &str = "/var/lib/natmap/state.json";
+const DEFAULT_SOCKET_PATH: &str = "/run/natmap.sock";
 
 pub async fn run_daemon() -> Result<()> {
-    run_daemon_with_paths(DEFAULT_SOCKET_PATH, DEFAULT_STATE_FILE, "dockernatmap").await
+    run_daemon_with_paths(DEFAULT_SOCKET_PATH, DEFAULT_STATE_FILE, "natmap").await
 }
 
 pub async fn run_daemon_with_paths(
@@ -68,7 +68,7 @@ pub async fn run_daemon_with_paths(
     state_file: &str,
     socket_group: &str,
 ) -> Result<()> {
-    info!("Starting dockernatmap daemon...");
+    info!("Starting natmap daemon...");
 
     // Initialize dependencies
     let docker_client = docker::connect()?;
@@ -82,8 +82,8 @@ pub async fn run_daemon_with_paths(
             color_eyre::eyre::eyre!(
                 "Failed to create state directory {}: {e}\n\
                  This daemon needs root (or CAP_NET_ADMIN + write access to /var/lib).\n\
-                 Try: sudo lab-ops dockernatmap daemon\n\
-                 Or for testing: lab-ops dockernatmap daemon --state-dir /tmp/dockernatmap --socket /tmp/dockernatmap.sock",
+                 Try: sudo lab-ops natmap daemon\n\
+                 Or for testing: lab-ops natmap daemon --state-dir /tmp/natmap --socket /tmp/natmap.sock",
                 state_dir.display()
             )
         })?;
@@ -94,7 +94,7 @@ pub async fn run_daemon_with_paths(
         color_eyre::eyre::eyre!(
             "Failed to set up iptables chains: {e}\n\
              This daemon needs root (or CAP_NET_ADMIN) to manage iptables.\n\
-             Try: sudo lab-ops dockernatmap daemon"
+             Try: sudo lab-ops natmap daemon"
         )
     })?;
 
@@ -137,8 +137,8 @@ pub async fn run_daemon_with_paths(
         color_eyre::eyre::eyre!(
             "Failed to bind Unix socket at {sp}: {e}\n\
              This daemon needs root to bind to /run.\n\
-             Try: sudo lab-ops dockernatmap daemon\n\
-             Or for testing: lab-ops dockernatmap daemon --state-dir /tmp/dockernatmap --socket /tmp/dockernatmap.sock"
+             Try: sudo lab-ops natmap daemon\n\
+             Or for testing: lab-ops natmap daemon --state-dir /tmp/natmap --socket /tmp/natmap.sock"
         )
     })?;
 

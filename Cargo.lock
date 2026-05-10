@@ -403,30 +403,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dockernatmap"
-version = "0.1.0"
-dependencies = [
- "axum",
- "bollard",
- "clap",
- "color-eyre",
- "comfy-table",
- "futures-util",
- "http-body-util",
- "hyper",
- "hyper-util",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tower",
- "tower-service",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -990,7 +966,6 @@ dependencies = [
  "clap",
  "color-eyre",
  "comfy-table",
- "dockernatmap",
  "natmap",
  "regex",
  "tokio",
@@ -1121,8 +1096,24 @@ dependencies = [
 name = "natmap"
 version = "0.1.0"
 dependencies = [
+ "axum",
+ "bollard",
  "clap",
  "color-eyre",
+ "comfy-table",
+ "futures-util",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tower",
+ "tower-service",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

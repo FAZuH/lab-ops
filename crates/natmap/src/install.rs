@@ -21,7 +21,7 @@ pub fn install_systemd(binary: &str, group: &str) -> color_eyre::Result<()> {
         println!("Binary already at {}, skipping copy.", target.display());
     }
 
-    let service_file = include_str!("../assets/dockernetmap.service");
+    let service_file = include_str!("../assets/natmap.service");
 
     // Create group if not exists
     let group_exists = Command::new("getent")
@@ -55,7 +55,7 @@ pub fn install_systemd(binary: &str, group: &str) -> color_eyre::Result<()> {
     }
 
     // Write service file
-    let path = std::path::Path::new("/etc/systemd/system/dockernatmap.service");
+    let path = std::path::Path::new("/etc/systemd/system/natmap.service");
     println!("Writing systemd service to {}", path.display());
     if path.exists() {
         println!("Service file already exists, overwriting.");
@@ -67,19 +67,17 @@ pub fn install_systemd(binary: &str, group: &str) -> color_eyre::Result<()> {
     Command::new("systemctl").arg("daemon-reload").status()?;
 
     // Enable and start
-    println!("Enabling dockernatmap service...");
+    println!("Enabling natmap service...");
     let status = Command::new("systemctl")
-        .args(["enable", "--now", "dockernatmap"])
+        .args(["enable", "--now", "natmap"])
         .status()?;
     if !status.success() {
-        bail!("Failed to enable dockernatmap service");
+        bail!("Failed to enable natmap service");
     }
 
-    println!("dockernatmap installed and running.");
-    println!("Use `systemctl status dockernatmap` to check.");
-    println!(
-        "Use `lab-ops dockernatmap list` to see mappings (after re-login for group membership)."
-    );
+    println!("natmap installed and running.");
+    println!("Use `systemctl status natmap` to check.");
+    println!("Use `lab-ops natmap list` to see mappings (after re-login for group membership).");
 
     Ok(())
 }

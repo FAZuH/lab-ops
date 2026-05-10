@@ -5,7 +5,6 @@ use clap::Subcommand;
 
 pub const CMD_CF2ANSIBLE: &str = "cf2ansible";
 pub const CMD_DOCKERNET: &str = "dockernet";
-pub const CMD_DOCKERNATMAP: &str = "dockernatmap";
 pub const CMD_NATMAP: &str = "natmap";
 
 #[derive(Parser)]
@@ -28,13 +27,7 @@ pub enum Command {
     /// View addresses and binds of Docker containers
     #[command(name = CMD_DOCKERNET)]
     DockerNet,
-    /// dockernatmap daemon management
-    #[command(name = CMD_DOCKERNATMAP)]
-    DockerNatMap {
-        #[command(flatten)]
-        args: dockernatmap::cli::Cli,
-    },
-    /// Manage iptables NAT rules
+    /// Manage iptables NAT rules (static VMs & dynamic Docker)
     #[command(name = CMD_NATMAP)]
     NatMap {
         #[command(flatten)]

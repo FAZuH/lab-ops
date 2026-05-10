@@ -20,13 +20,10 @@ fn main() -> Result<()> {
             let rt = Builder::new_current_thread().enable_all().build()?;
             rt.block_on(dockernet::run())?;
         }
-        Command::DockerNatMap { args } => {
+        Command::NatMap { args } => {
             use tokio::runtime::Builder;
             let rt = Builder::new_current_thread().enable_all().build()?;
-            rt.block_on(dockernatmap::cli::run_cli_with_args(args))?;
-        }
-        Command::NatMap { args } => {
-            natmap::cli::run_cli_with_args(args)?;
+            rt.block_on(natmap::cli::run_cli_with_args(args))?;
         }
     };
 

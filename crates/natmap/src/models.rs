@@ -51,7 +51,7 @@ impl ActivePortMapping {
         container_id: String,
         container_name: String,
     ) -> Self {
-        let rule_comment = format!("dockernatmap:{}:{}", container_id, request.host_addr.port());
+        let rule_comment = format!("natmap:{}:{}", container_id, request.host_addr.port());
         Self {
             id,
             request,
