@@ -991,6 +991,7 @@ dependencies = [
  "color-eyre",
  "comfy-table",
  "dockernatmap",
+ "natmap",
  "regex",
  "tokio",
 ]
@@ -1114,6 +1115,14 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "tempfile",
+]
+
+[[package]]
+name = "natmap"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "color-eyre",
 ]
 
 [[package]]
