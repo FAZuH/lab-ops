@@ -195,8 +195,8 @@ pub fn run_cli_with_args(cli: Cli) -> Result<()> {
 }
 
 fn run_iptables(args: &[&str], ignore_error: bool) -> Result<()> {
-    let status = match Command::new("iptables").args(args).status() {
-        Ok(s) => s,
+    let output = match Command::new("iptables").args(args).output() {
+        Ok(o) => o,
         Err(e) => {
             if ignore_error {
                 return Ok(());
@@ -205,8 +205,13 @@ fn run_iptables(args: &[&str], ignore_error: bool) -> Result<()> {
             }
         }
     };
-    if !status.success() && !ignore_error {
-        color_eyre::eyre::bail!("iptables command failed: iptables {}", args.join(" "));
+    if !output.status.success() && !ignore_error {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        color_eyre::eyre::bail!(
+            "iptables command failed: iptables {}\n{}",
+            args.join(" "),
+            stderr
+        );
     }
     Ok(())
 }
