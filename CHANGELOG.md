@@ -1,3 +1,15 @@
+## 0.1.2 (2026-05-10)
+
+
+### New Features
+
+* Add natmap command ([a5aedbd](https://github.com/FAZuH/lab-ops/commit/a5aedbdeb3d775a3173dd9baf70a9efe3ef610f8))
+
+
+### Documentation
+
+* Update README ([c84cedc](https://github.com/FAZuH/lab-ops/commit/c84cedccc5708d25f278b5cea7f8fb2acfa710be))
+
 ## 0.1.1 (2026-05-08)
 
 
