@@ -54,13 +54,18 @@ pub fn install_systemd(binary: &str, group: &str) -> color_eyre::Result<()> {
         );
     }
 
-    // Write service file
+    // Write service file with placeholder substitution
+    let state_dir = "/var/lib/natmap/state.json";
+    let rendered = service_file
+        .replace("{binary}", binary)
+        .replace("{state_dir}", state_dir)
+        .replace("{group}", group);
     let path = std::path::Path::new("/etc/systemd/system/natmap.service");
     println!("Writing systemd service to {}", path.display());
     if path.exists() {
         println!("Service file already exists, overwriting.");
     }
-    std::fs::write(path, service_file)?;
+    std::fs::write(path, rendered)?;
 
     // Reload systemd
     println!("Reloading systemd...");
@@ -77,7 +82,7 @@ pub fn install_systemd(binary: &str, group: &str) -> color_eyre::Result<()> {
 
     println!("natmap installed and running.");
     println!("Use `systemctl status natmap` to check.");
-    println!("Use `lab-ops natmap list` to see mappings (after re-login for group membership).");
+    println!("Use `lab-ops natmap ls` to see mappings (after re-login for group membership).");
 
     Ok(())
 }

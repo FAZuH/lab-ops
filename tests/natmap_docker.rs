@@ -74,7 +74,7 @@ mod docker_tests {
         let save_out = run_in_docker(&[
             "lab-ops",
             "natmap",
-            "forward",
+            "dnat",
             "--ext-ip",
             ext_ip,
             "--int-ip",
@@ -105,7 +105,7 @@ mod docker_tests {
         let save_out_after = run_in_docker(&[
             "lab-ops",
             "natmap",
-            "forward",
+            "dnat",
             "--ext-ip",
             ext_ip,
             "--int-ip",
@@ -115,7 +115,7 @@ mod docker_tests {
             "&&",
             "lab-ops",
             "natmap",
-            "forward",
+            "dnat",
             "--ext-ip",
             ext_ip,
             "--int-ip",
