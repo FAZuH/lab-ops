@@ -100,6 +100,43 @@ lab-ops cf2ansible example.com.txt
 lab-ops cf2ansible example.com.txt example.com
 ```
 
+### natmap
+
+```bash
+lab-ops natmap <command> [args...]
+```
+
+Manage iptables NAT rules for VMs.
+
+#### Add or delete DNAT forwarding rules
+
+```bash
+lab-ops natmap forward --ext-ip 139.99.69.43 --int-ip 10.10.10.101 --ports 25,465
+lab-ops natmap forward --ext-ip 139.99.69.43 --int-ip 10.10.10.101 --ports 25,465 --delete
+```
+
+#### Add or delete SNAT rules
+
+```bash
+lab-ops natmap snat --ext-ip 139.99.69.43 --int-ip 10.10.10.101 --ext-if vmbr0
+```
+
+#### Add or delete hairpin NAT rules
+
+```bash
+lab-ops natmap hairpin --ext-ip 139.99.69.43 --int-ip 10.10.10.101 --ports 25,465
+```
+
+#### Utility commands
+
+```bash
+# Enable IP forwarding (sysctl)
+lab-ops natmap enable-forwarding
+
+# Save iptables rules to /etc/iptables/rules.v4
+lab-ops natmap persist
+```
+
 ## License
 
 [MIT](https://spdx.org/licenses/MIT.html)

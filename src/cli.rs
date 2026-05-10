@@ -6,6 +6,7 @@ use clap::Subcommand;
 pub const CMD_CF2ANSIBLE: &str = "cf2ansible";
 pub const CMD_DOCKERNET: &str = "dockernet";
 pub const CMD_DOCKERNATMAP: &str = "dockernatmap";
+pub const CMD_NATMAP: &str = "natmap";
 
 #[derive(Parser)]
 #[command(name = "lab-ops", about = "Lab operations toolkit")]
@@ -32,5 +33,11 @@ pub enum Command {
     DockerNatMap {
         #[command(flatten)]
         args: dockernatmap::cli::Cli,
+    },
+    /// Manage iptables NAT rules
+    #[command(name = CMD_NATMAP)]
+    NatMap {
+        #[command(flatten)]
+        args: natmap::cli::Cli,
     },
 }
