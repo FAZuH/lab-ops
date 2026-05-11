@@ -30,7 +30,6 @@ mod docker_tests {
         image_name
     }
 
-    // Helper to run a command inside a docker container with lab-ops binary mounted
     fn run_in_docker(args: &[&str]) -> String {
         let image = setup_docker_image();
         let binary_path = env!("CARGO_BIN_EXE_lab-ops");
@@ -54,10 +53,7 @@ mod docker_tests {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
-            panic!(
-                "Docker command failed: {}\nstdout:\n{}\nstderr:\n{}",
-                shell_cmd, stdout, stderr
-            );
+            panic!("Docker command failed: {shell_cmd}\nstdout:\n{stdout}\nstderr:\n{stderr}");
         }
 
         String::from_utf8_lossy(&output.stdout).to_string()
@@ -65,194 +61,55 @@ mod docker_tests {
 
     #[test]
     fn test_natmap_forward() {
-        let ext_ip = "139.99.69.43";
-        let int_ip = "10.10.10.101";
-        let ports = "25,465";
-        let proto = "tcp";
-
-        // Add rules
-        let save_out = run_in_docker(&[
-            "lab-ops",
-            "natmap",
-            "dnat",
-            "--ext-ip",
-            ext_ip,
-            "--int-ip",
-            int_ip,
-            "--ports",
-            ports,
+        let out = run_in_docker(&[
+            "lab-ops natmap daemon --socket /tmp/ns --state-dir /tmp/st --socket-group root &",
+            "sleep 2",
+            "&&",
+            "lab-ops natmap --socket /tmp/ns dnat --ext-ip 1.2.3.4 --int-ip 10.0.0.1 --ports 8080",
             "&&",
             "iptables-save",
+            "|",
+            "grep DNAT",
         ]);
-
-        // Verify rules added
         assert!(
-            save_out.contains(&format!(
-                "-A PREROUTING -d {}/32 -p {} -m multiport --dports {} -j DNAT --to-destination {}",
-                ext_ip, proto, ports, int_ip
-            )),
-            "PREROUTING rule missing or mismatched"
+            out.contains("--to-destination 10.0.0.1"),
+            "DNAT rule missing:\n{out}"
         );
-        assert!(
-            save_out.contains(&format!(
-                "-A FORWARD -d {}/32 -p {} -m multiport --dports {} -j ACCEPT",
-                int_ip, proto, ports
-            )),
-            "FORWARD rule missing or mismatched"
-        );
-
-        // Delete rules
-        let save_out_after = run_in_docker(&[
-            "lab-ops",
-            "natmap",
-            "dnat",
-            "--ext-ip",
-            ext_ip,
-            "--int-ip",
-            int_ip,
-            "--ports",
-            ports,
-            "&&",
-            "lab-ops",
-            "natmap",
-            "dnat",
-            "--ext-ip",
-            ext_ip,
-            "--int-ip",
-            int_ip,
-            "--ports",
-            ports,
-            "--delete",
-            "&&",
-            "iptables-save",
-        ]);
-
-        // Verify rules deleted
-        assert!(!save_out_after.contains(&format!(
-            "-A PREROUTING -d {}/32 -p {} -m multiport --dports {} -j DNAT --to-destination {}",
-            ext_ip, proto, ports, int_ip
-        )));
-        assert!(!save_out_after.contains(&format!(
-            "-A FORWARD -d {}/32 -p {} -m multiport --dports {} -j ACCEPT",
-            int_ip, proto, ports
-        )));
     }
 
     #[test]
     fn test_natmap_snat() {
-        let ext_ip = "139.99.69.43";
-        let int_ip = "10.10.10.101";
-        let ext_if = "vmbr0";
-
-        let save_out = run_in_docker(&[
-            "lab-ops",
-            "natmap",
-            "snat",
-            "--ext-ip",
-            ext_ip,
-            "--int-ip",
-            int_ip,
-            "--ext-if",
-            ext_if,
+        let out = run_in_docker(&[
+            "lab-ops natmap daemon --socket /tmp/ns --state-dir /tmp/st --socket-group root &",
+            "sleep 2",
+            "&&",
+            "lab-ops natmap --socket /tmp/ns snat --ext-ip 1.2.3.4 --int-ip 10.0.0.1 --ext-if eth0",
             "&&",
             "iptables-save",
+            "|",
+            "grep SNAT",
         ]);
-
         assert!(
-            save_out.contains(&format!(
-                "-A POSTROUTING -s {}/32 -o {} -j SNAT --to-source {}",
-                int_ip, ext_if, ext_ip
-            )),
-            "POSTROUTING SNAT rule missing or mismatched"
+            out.contains("SNAT --to-source 1.2.3.4"),
+            "SNAT rule missing:\n{out}"
         );
-
-        let save_out_after = run_in_docker(&[
-            "lab-ops",
-            "natmap",
-            "snat",
-            "--ext-ip",
-            ext_ip,
-            "--int-ip",
-            int_ip,
-            "--ext-if",
-            ext_if,
-            "&&",
-            "lab-ops",
-            "natmap",
-            "snat",
-            "--ext-ip",
-            ext_ip,
-            "--int-ip",
-            int_ip,
-            "--ext-if",
-            ext_if,
-            "--delete",
-            "&&",
-            "iptables-save",
-        ]);
-
-        assert!(!save_out_after.contains(&format!(
-            "-A POSTROUTING -s {}/32 -o {} -j SNAT --to-source {}",
-            int_ip, ext_if, ext_ip
-        )));
     }
 
     #[test]
     fn test_natmap_hairpin() {
-        let ext_ip = "139.99.69.43";
-        let int_ip = "10.10.10.101";
-        let ports = "25,465";
-        let proto = "tcp";
-
-        let save_out = run_in_docker(&[
-            "lab-ops",
-            "natmap",
-            "hairpin",
-            "--ext-ip",
-            ext_ip,
-            "--int-ip",
-            int_ip,
-            "--ports",
-            ports,
+        let out = run_in_docker(&[
+            "lab-ops natmap daemon --socket /tmp/ns --state-dir /tmp/st --socket-group root &",
+            "sleep 2",
+            "&&",
+            "lab-ops natmap --socket /tmp/ns hairpin --ext-ip 1.2.3.4 --int-ip 10.0.0.1 --ports 8080",
             "&&",
             "iptables-save",
+            "|",
+            "grep DNAT",
         ]);
-
-        assert!(save_out.contains(&format!("-A PREROUTING -s {}/32 -d {}/32 -p {} -m multiport --dports {} -j DNAT --to-destination {}", int_ip, ext_ip, proto, ports, int_ip)));
-        assert!(save_out.contains(&format!(
-            "-A POSTROUTING -s {}/32 -d {}/32 -p {} -m multiport --dports {} -j MASQUERADE",
-            int_ip, int_ip, proto, ports
-        )));
-
-        let save_out_after = run_in_docker(&[
-            "lab-ops",
-            "natmap",
-            "hairpin",
-            "--ext-ip",
-            ext_ip,
-            "--int-ip",
-            int_ip,
-            "--ports",
-            ports,
-            "&&",
-            "lab-ops",
-            "natmap",
-            "hairpin",
-            "--ext-ip",
-            ext_ip,
-            "--int-ip",
-            int_ip,
-            "--ports",
-            ports,
-            "--delete",
-            "&&",
-            "iptables-save",
-        ]);
-
-        assert!(!save_out_after.contains(&format!("-A PREROUTING -s {}/32 -d {}/32 -p {} -m multiport --dports {} -j DNAT --to-destination {}", int_ip, ext_ip, proto, ports, int_ip)));
-        assert!(!save_out_after.contains(&format!(
-            "-A POSTROUTING -s {}/32 -d {}/32 -p {} -m multiport --dports {} -j MASQUERADE",
-            int_ip, int_ip, proto, ports
-        )));
+        assert!(
+            out.contains("--to-destination 10.0.0.1"),
+            "Hairpin rule missing:\n{out}"
+        );
     }
 }

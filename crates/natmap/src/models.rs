@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt::Display;
 use std::net::SocketAddr;
 
@@ -20,11 +21,10 @@ impl Display for TransportProtocol {
     }
 }
 
-/// Mirrors PortBindingReq — desired mapping configuration
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PortMappingRequest {
-    pub host_addr: SocketAddr,      // 0.0.0.0:8080 or [::]:8080
-    pub container_addr: SocketAddr, // 172.17.0.2:80
+    pub host_addr: SocketAddr,
+    pub container_addr: SocketAddr,
     pub proto: TransportProtocol,
 }
 
@@ -34,14 +34,13 @@ impl PortMappingRequest {
     }
 }
 
-/// Mirrors PortBinding — an active, installed mapping
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActivePortMapping {
     pub id: u64,
     pub request: PortMappingRequest,
     pub container_id: String,
     pub container_name: String,
-    pub rule_comment: String, // iptables comment for idempotent existence checks
+    pub rule_comment: String,
 }
 
 impl ActivePortMapping {
@@ -84,4 +83,76 @@ fn default_host_ip() -> String {
 
 fn default_proto() -> String {
     "tcp".to_string()
+}
+
+// --- Static NAT configs (persisted to state.json) ---
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DnatConfig {
+    pub ext_ip: String,
+    pub int_ip: String,
+    pub ports: String,
+    pub proto: String,
+    pub ext_if: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnatConfig {
+    pub int_ip: String,
+    pub ext_ip: String,
+    pub ext_if: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HairpinConfig {
+    pub ext_ip: String,
+    pub int_ip: String,
+    pub ports: String,
+    pub proto: String,
+}
+
+// --- API request types ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnatRequest {
+    pub ext_ip: String,
+    pub int_ip: String,
+    pub ports: String,
+    #[serde(default = "default_proto")]
+    pub proto: String,
+    pub ext_if: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnatRequest {
+    pub int_ip: String,
+    pub ext_ip: String,
+    pub ext_if: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HairpinRequest {
+    pub ext_ip: String,
+    pub int_ip: String,
+    pub ports: String,
+    #[serde(default = "default_proto")]
+    pub proto: String,
+}
+
+// --- Persisted daemon state ---
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DaemonState {
+    pub docker: HashMap<String, Vec<ActivePortMapping>>,
+    pub dnats: Vec<DnatConfig>,
+    pub snats: Vec<SnatConfig>,
+    pub hairpins: Vec<HairpinConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListResponse {
+    pub docker: Vec<ActivePortMapping>,
+    pub dnats: Vec<DnatConfig>,
+    pub snats: Vec<SnatConfig>,
+    pub hairpins: Vec<HairpinConfig>,
 }

@@ -31,19 +31,63 @@ use tracing::info;
 use crate::docker;
 use crate::iptables::IptablesManager;
 use crate::models::*;
+use crate::port_allocator::PortAllocator;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub mappings: Arc<RwLock<HashMap<String, Vec<ActivePortMapping>>>>,
+    pub state: Arc<RwLock<DaemonState>>,
     pub iptables: Arc<IptablesManager>,
-    pub docker: Docker,
+    pub docker: Option<Docker>,
     pub state_path: PathBuf,
     pub next_id: Arc<AtomicU64>,
+    pub ports: Arc<PortAllocator>,
 }
 
 impl AppState {
     fn allocate_id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    fn port_key(ip: &str, port: u16) -> String {
+        format!("{}:{}", ip, port)
+    }
+
+    async fn bind_ports(
+        ports: &PortAllocator,
+        ip: &str,
+        ports_csv: &str,
+    ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+        for p in ports_csv.split(',') {
+            let p: u16 = p.trim().parse().map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!("Invalid port: {}", p),
+                    }),
+                )
+            })?;
+            let addr = SocketAddr::new(IpAddr::from_str("0.0.0.0").unwrap(), p);
+            ports
+                .allocate(&Self::port_key(ip, p), addr)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::CONFLICT,
+                        Json(ErrorResponse {
+                            error: e.to_string(),
+                        }),
+                    )
+                })?;
+        }
+        Ok(())
+    }
+
+    async fn unbind_ports(ports: &PortAllocator, ip: &str, ports_csv: &str) {
+        for p in ports_csv.split(',') {
+            if let Ok(p) = p.trim().parse::<u16>() {
+                ports.deallocate(&Self::port_key(ip, p)).await;
+            }
+        }
     }
 }
 
@@ -66,61 +110,72 @@ pub async fn run_daemon_with_paths(
 ) -> Result<()> {
     info!("Starting natmap daemon...");
 
-    // Initialize dependencies
-    let docker_client = docker::connect()?;
+    let docker_client = docker::connect().ok();
+    if docker_client.is_none() {
+        info!("Docker not available — running without Docker support");
+    }
     let iptables = Arc::new(IptablesManager::new());
 
-    // Create state dir if not exists
     let state_path = PathBuf::from(state_file);
     let state_dir = state_path.parent().unwrap();
     if !state_dir.exists() {
         fs::create_dir_all(state_dir).map_err(|e| {
             color_eyre::eyre::eyre!(
-                "Failed to create state directory {}: {e}\n\
-                 This daemon needs root (or CAP_NET_ADMIN + write access to /var/lib).\n\
-                 Try: sudo lab-ops natmap daemon\n\
-                 Or for testing: lab-ops natmap daemon --state-dir /tmp/natmap --socket /tmp/natmap.sock",
+                "Failed to create state directory {}: {e}",
                 state_dir.display()
             )
         })?;
     }
 
-    // Setup chains
-    iptables.setup().map_err(|e| {
-        color_eyre::eyre::eyre!(
-            "Failed to set up iptables chains: {e}\n\
-             This daemon needs root (or CAP_NET_ADMIN) to manage iptables.\n\
-             Try: sudo lab-ops natmap daemon"
-        )
-    })?;
+    iptables
+        .setup()
+        .map_err(|e| color_eyre::eyre::eyre!("Failed to set up iptables chains: {e}"))?;
 
-    let mappings = Arc::new(RwLock::new(HashMap::new()));
+    let ports = Arc::new(PortAllocator::new());
+    let daemon_state = Arc::new(RwLock::new(DaemonState::default()));
+
     let state = AppState {
-        mappings: mappings.clone(),
+        state: daemon_state.clone(),
         iptables: iptables.clone(),
-        docker: docker_client.clone(),
+        docker: docker_client,
         state_path: state_path.clone(),
         next_id: Arc::new(AtomicU64::new(1)),
+        ports: ports.clone(),
     };
 
-    // Reload state on startup
-    reload_state(&state).await?;
+    reload_state(&state, &iptables, &ports).await?;
 
-    // Spawn docker event listener
-    let state_clone = state.clone();
+    if state.docker.is_some() {
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = listen_docker_events(state_clone).await {
+                error!("Docker listener exited with error: {}", e);
+            }
+        });
+    }
+
+    let shutdown_state = state.clone();
     tokio::spawn(async move {
-        if let Err(e) = listen_docker_events(state_clone).await {
-            error!("Docker listener exited with error: {}", e);
-        }
+        tokio::signal::ctrl_c().await.ok();
+        info!("Shutting down: flushing iptables rules...");
+        let _ = shutdown_state.iptables.flush_all_natmap();
+        shutdown_state.ports.deallocate_all().await;
+        info!("Shutdown complete.");
+        std::process::exit(0);
     });
 
-    // Start API server on unix socket
     let app = Router::new()
         .route("/mappings", get(list_mappings))
         .route("/remap/:container_id", put(remap_port))
         .route("/mapping/:container_id", post(add_mapping))
         .route("/mapping/{container_id}/{port}", delete(remove_mapping))
         .route("/mapping/by-id/:id", delete(remove_mapping_by_id))
+        .route("/dnat", post(add_dnat))
+        .route("/dnat", delete(remove_dnat))
+        .route("/snat", post(add_snat))
+        .route("/snat", delete(remove_snat))
+        .route("/hairpin", post(add_hairpin))
+        .route("/hairpin", delete(remove_hairpin))
         .with_state(state);
 
     let socket_path_str = socket_path.to_string();
@@ -129,16 +184,9 @@ pub async fn run_daemon_with_paths(
     }
 
     let listener = tokio::net::UnixListener::bind(&socket_path_str).map_err(|e| {
-        let sp = socket_path_str.clone();
-        color_eyre::eyre::eyre!(
-            "Failed to bind Unix socket at {sp}: {e}\n\
-             This daemon needs root to bind to /run.\n\
-             Try: sudo lab-ops natmap daemon\n\
-             Or for testing: lab-ops natmap daemon --state-dir /tmp/natmap --socket /tmp/natmap.sock"
-        )
+        color_eyre::eyre::eyre!("Failed to bind Unix socket at {}: {e}", socket_path_str)
     })?;
 
-    // Set socket permissions so non-root users in the group can access it
     let _ = std::process::Command::new("chown")
         .args([format!("root:{}", socket_group), socket_path_str.clone()])
         .status();
@@ -179,71 +227,141 @@ pub async fn run_daemon_with_paths(
     Ok(())
 }
 
-async fn reload_state(state: &AppState) -> Result<()> {
-    info!("Reloading state from {}", state.state_path.display());
+async fn reload_state(
+    state: &AppState,
+    iptables: &IptablesManager,
+    ports: &PortAllocator,
+) -> Result<()> {
+    info!("Crash recovery: flushing stale iptables rules");
+    let _ = iptables.flush_all_natmap();
+    ports.deallocate_all().await;
 
-    // Load JSON state
-    let mut stored_mappings: HashMap<String, Vec<ActivePortMapping>> = HashMap::new();
-    if state.state_path.exists()
+    let mut daemon_state: DaemonState = if state.state_path.exists()
         && let Ok(data) = fs::read_to_string(&state.state_path)
-        && let Ok(parsed) = serde_json::from_str(&data)
     {
-        stored_mappings = parsed;
-    }
-
-    // Reconcile with actual containers
-    let mut active = HashMap::new();
-
-    let opts = ListContainersOptions {
-        all: false,
-        ..Default::default()
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        DaemonState::default()
     };
 
-    let containers = state.docker.list_containers(Some(opts)).await?;
-    let mut running_ids = HashSet::new();
-    for c in containers {
-        if let Some(id) = c.id {
-            running_ids.insert(id);
-        }
-    }
+    // Reconcile Docker mappings
+    if let Some(docker) = &state.docker {
+        let containers = docker
+            .list_containers(Some(ListContainersOptions {
+                all: false,
+                ..Default::default()
+            }))
+            .await?;
+        let running_ids: HashSet<String> = containers.into_iter().filter_map(|c| c.id).collect();
 
-    // Purge old mappings from store and from iptables
-    let mut max_id: u64 = 0;
-    for (container_id, container_mappings) in stored_mappings.into_iter() {
-        if !running_ids.contains(&container_id) {
-            info!(
-                "Container {} no longer running, flushing rules",
-                container_id
-            );
-            let _ = state.iptables.flush_container_rules(&container_id);
-        } else {
-            for mapping in &container_mappings {
-                let _ = state.iptables.install_mapping(mapping);
-                if mapping.id > max_id {
-                    max_id = mapping.id;
+        let mut max_id: u64 = 0;
+        let docker_entries: Vec<(String, Vec<ActivePortMapping>)> =
+            daemon_state.docker.drain().collect();
+        let mut new_docker = HashMap::new();
+
+        for (container_id, mappings) in docker_entries {
+            if !running_ids.contains(&container_id) {
+                info!("Container {} gone, removing mappings", container_id);
+                continue;
+            }
+            let mut kept = Vec::new();
+            for m in mappings {
+                if m.id > max_id {
+                    max_id = m.id;
+                }
+                let key = AppState::port_key(
+                    &m.request.host_addr.ip().to_string(),
+                    m.request.host_addr.port(),
+                );
+                if ports.is_allocated(&key).await {
+                    info!("Port {} already held, removing stale mapping", key);
+                    continue;
+                }
+                match ports.allocate(&key.clone(), m.request.host_addr).await {
+                    Ok(()) => {
+                        let _ = iptables.install_mapping(&m);
+                        kept.push(m);
+                    }
+                    Err(e) => error!("Port {} in use, dropping mapping: {}", key, e),
                 }
             }
-            active.insert(container_id, container_mappings);
+            if !kept.is_empty() {
+                new_docker.insert(container_id, kept);
+            }
         }
+        daemon_state.docker = new_docker;
+        state
+            .next_id
+            .store(max_id.saturating_add(1), Ordering::SeqCst);
     }
 
-    // Set next_id past the highest known id
-    state
-        .next_id
-        .store(max_id.saturating_add(1), Ordering::SeqCst);
+    // Reconcile static DNATs
+    let mut kept_dnats = Vec::new();
+    for config in daemon_state.dnats.drain(..) {
+        let mut ok = true;
+        for p in config.ports.split(',') {
+            if let Ok(port) = p.trim().parse::<u16>() {
+                let addr = SocketAddr::new(IpAddr::from_str("0.0.0.0").unwrap(), port);
+                let key = AppState::port_key(&config.ext_ip, port);
+                if ports.is_allocated(&key).await {
+                    continue;
+                }
+                if let Err(e) = ports.allocate(&key, addr).await {
+                    error!("DNAT port {} in use, dropping: {}", port, e);
+                    ok = false;
+                }
+            }
+        }
+        if ok {
+            let _ = iptables.install_dnat(&config);
+            kept_dnats.push(config);
+        } else {
+            AppState::unbind_ports(ports, &config.ext_ip, &config.ports).await;
+        }
+    }
+    daemon_state.dnats = kept_dnats;
 
-    *state.mappings.write().await = active;
+    // Reconcile static SNATs (no port binding)
+    for config in &daemon_state.snats {
+        let _ = iptables.install_snat(config);
+    }
+
+    // Reconcile static hairpins
+    let mut kept_hairpins = Vec::new();
+    for config in daemon_state.hairpins.drain(..) {
+        let mut ok = true;
+        for p in config.ports.split(',') {
+            if let Ok(port) = p.trim().parse::<u16>() {
+                let addr = SocketAddr::new(IpAddr::from_str("0.0.0.0").unwrap(), port);
+                let key = AppState::port_key(&config.ext_ip, port);
+                if ports.is_allocated(&key).await {
+                    continue;
+                }
+                if let Err(e) = ports.allocate(&key, addr).await {
+                    error!("Hairpin port {} in use, dropping: {}", port, e);
+                    ok = false;
+                }
+            }
+        }
+        if ok {
+            let _ = iptables.install_hairpin(&config);
+            kept_hairpins.push(config);
+        } else {
+            AppState::unbind_ports(ports, &config.ext_ip, &config.ports).await;
+        }
+    }
+    daemon_state.hairpins = kept_hairpins;
+
+    *state.state.write().await = daemon_state;
     persist_state(state).await;
-
     Ok(())
 }
 
 async fn persist_state(state: &AppState) {
     let data = {
-        let lock = state.mappings.read().await;
+        let lock = state.state.read().await;
         serde_json::to_string(&*lock).unwrap_or_default()
     };
-
     let tmp = state.state_path.with_extension("tmp");
     if fs::write(&tmp, data).is_ok() {
         let _ = fs::rename(&tmp, &state.state_path);
@@ -251,6 +369,7 @@ async fn persist_state(state: &AppState) {
 }
 
 async fn listen_docker_events(state: AppState) -> Result<()> {
+    let docker = state.docker.as_ref().expect("Docker not available");
     let opts = EventsOptions {
         since: None,
         until: None,
@@ -260,15 +379,13 @@ async fn listen_docker_events(state: AppState) -> Result<()> {
                 .collect(),
         ),
     };
-
-    let mut stream = state.docker.events(Some(opts));
+    let mut stream = docker.events(Some(opts));
 
     while let Some(msg) = stream.next().await {
         let event = match msg {
             Ok(e) => e,
             Err(_) => continue,
         };
-
         let action = event.action.unwrap_or_default();
         let actor = match event.actor {
             Some(a) => a,
@@ -277,25 +394,36 @@ async fn listen_docker_events(state: AppState) -> Result<()> {
         let container_id = actor.id.unwrap_or_default();
 
         if action == "start" || action == "network connect" {
-            info!(
-                "Container {} started or connected to network. Parsing mappings.",
-                container_id
-            );
-            if let Ok(discovered) = docker::get_port_mappings(&state.docker, &container_id).await {
-                // Assign IDs and install rules
+            info!("Container {} started, parsing mappings", container_id);
+            if let Ok(discovered) = docker::get_port_mappings(docker, &container_id).await {
                 let mut assigned = Vec::new();
                 for mut m in discovered {
                     m.id = state.allocate_id();
+                    let key = AppState::port_key(
+                        &m.request.host_addr.ip().to_string(),
+                        m.request.host_addr.port(),
+                    );
+                    if state.ports.is_allocated(&key).await {
+                        info!("Port {} already allocated, skipping", key);
+                        continue;
+                    }
+                    if let Err(e) = state
+                        .ports
+                        .allocate(&key.clone(), m.request.host_addr)
+                        .await
+                    {
+                        error!("Port {} in use, skipping: {}", key, e);
+                        continue;
+                    }
                     if let Err(e) = state.iptables.install_mapping(&m) {
                         error!("Failed to install mapping {:?}: {}", m, e);
-                        let _ = state.iptables.remove_mapping(&m);
+                        state.ports.deallocate(&key).await;
+                        continue;
                     }
                     assigned.push(m);
                 }
-
-                // Merge with existing: keep manual mappings, add/refresh auto-discovered
-                let mut lock = state.mappings.write().await;
-                let existing = lock.entry(container_id.clone()).or_default();
+                let mut lock = state.state.write().await;
+                let existing = lock.docker.entry(container_id.clone()).or_default();
                 let auto_comments: HashSet<String> =
                     assigned.iter().map(|m| m.rule_comment.clone()).collect();
                 existing.retain(|m| !auto_comments.contains(&m.rule_comment));
@@ -304,47 +432,211 @@ async fn listen_docker_events(state: AppState) -> Result<()> {
                 persist_state(&state).await;
             }
         } else if action == "die" || action == "kill" || action == "network disconnect" {
-            info!(
-                "Container {} died or disconnected. Flushing rules.",
-                container_id
-            );
-            let _ = state.iptables.flush_container_rules(&container_id);
-            state.mappings.write().await.remove(&container_id);
+            info!("Container {} died, flushing rules", container_id);
+            let mut lock = state.state.write().await;
+            if let Some(mappings) = lock.docker.remove(&container_id) {
+                for m in &mappings {
+                    let _ = state.iptables.remove_mapping(m);
+                    state
+                        .ports
+                        .deallocate(&AppState::port_key(
+                            &m.request.host_addr.ip().to_string(),
+                            m.request.host_addr.port(),
+                        ))
+                        .await;
+                }
+            }
+            drop(lock);
             persist_state(&state).await;
         }
     }
-
     Ok(())
 }
 
-// API Routes
+// --- API Routes ---
 
-async fn list_mappings(State(state): State<AppState>) -> Json<Vec<ActivePortMapping>> {
-    let mut res = Vec::new();
-    for mappings in state.mappings.read().await.values() {
-        res.extend(mappings.iter().cloned());
+async fn list_mappings(State(state): State<AppState>) -> Json<ListResponse> {
+    let lock = state.state.read().await;
+    let mut docker_list = Vec::new();
+    for mappings in lock.docker.values() {
+        docker_list.extend(mappings.iter().cloned());
     }
-    Json(res)
+    Json(ListResponse {
+        docker: docker_list,
+        dnats: lock.dnats.clone(),
+        snats: lock.snats.clone(),
+        hairpins: lock.hairpins.clone(),
+    })
 }
+
+// --- Static NAT handlers ---
+
+async fn add_dnat(
+    State(state): State<AppState>,
+    Json(req): Json<DnatRequest>,
+) -> Result<Json<DnatConfig>, (StatusCode, Json<ErrorResponse>)> {
+    let config = DnatConfig {
+        ext_ip: req.ext_ip.clone(),
+        int_ip: req.int_ip.clone(),
+        ports: req.ports.clone(),
+        proto: req.proto.clone(),
+        ext_if: req.ext_if.clone(),
+    };
+    AppState::bind_ports(&state.ports, &config.ext_ip, &config.ports).await?;
+    if let Err(e) = state.iptables.install_dnat(&config) {
+        AppState::unbind_ports(&state.ports, &config.ext_ip, &config.ports).await;
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        ));
+    }
+    state.state.write().await.dnats.push(config.clone());
+    persist_state(&state).await;
+    Ok(Json(config))
+}
+
+async fn remove_dnat(
+    State(state): State<AppState>,
+    Json(req): Json<DnatRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let mut lock = state.state.write().await;
+    let idx = lock
+        .dnats
+        .iter()
+        .position(|d| d.ext_ip == req.ext_ip && d.int_ip == req.int_ip && d.ports == req.ports);
+    if let Some(i) = idx {
+        let config = lock.dnats.remove(i);
+        let _ = state.iptables.remove_dnat(&config);
+        AppState::unbind_ports(&state.ports, &config.ext_ip, &config.ports).await;
+        drop(lock);
+        persist_state(&state).await;
+        Ok(StatusCode::OK)
+    } else {
+        Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "DNAT rule not found".into(),
+            }),
+        ))
+    }
+}
+
+async fn add_snat(
+    State(state): State<AppState>,
+    Json(req): Json<SnatRequest>,
+) -> Result<Json<SnatConfig>, (StatusCode, Json<ErrorResponse>)> {
+    let config = SnatConfig {
+        int_ip: req.int_ip.clone(),
+        ext_ip: req.ext_ip.clone(),
+        ext_if: req.ext_if.clone(),
+    };
+    state.iptables.install_snat(&config).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+    state.state.write().await.snats.push(config.clone());
+    persist_state(&state).await;
+    Ok(Json(config))
+}
+
+async fn remove_snat(
+    State(state): State<AppState>,
+    Json(req): Json<SnatRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let mut lock = state.state.write().await;
+    let idx = lock
+        .snats
+        .iter()
+        .position(|s| s.int_ip == req.int_ip && s.ext_ip == req.ext_ip && s.ext_if == req.ext_if);
+    if let Some(i) = idx {
+        let config = lock.snats.remove(i);
+        let _ = state.iptables.remove_snat(&config);
+        drop(lock);
+        persist_state(&state).await;
+        Ok(StatusCode::OK)
+    } else {
+        Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "SNAT rule not found".into(),
+            }),
+        ))
+    }
+}
+
+async fn add_hairpin(
+    State(state): State<AppState>,
+    Json(req): Json<HairpinRequest>,
+) -> Result<Json<HairpinConfig>, (StatusCode, Json<ErrorResponse>)> {
+    let config = HairpinConfig {
+        ext_ip: req.ext_ip.clone(),
+        int_ip: req.int_ip.clone(),
+        ports: req.ports.clone(),
+        proto: req.proto.clone(),
+    };
+    AppState::bind_ports(&state.ports, &config.ext_ip, &config.ports).await?;
+    if let Err(e) = state.iptables.install_hairpin(&config) {
+        AppState::unbind_ports(&state.ports, &config.ext_ip, &config.ports).await;
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        ));
+    }
+    state.state.write().await.hairpins.push(config.clone());
+    persist_state(&state).await;
+    Ok(Json(config))
+}
+
+async fn remove_hairpin(
+    State(state): State<AppState>,
+    Json(req): Json<HairpinRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let mut lock = state.state.write().await;
+    let idx = lock
+        .hairpins
+        .iter()
+        .position(|h| h.ext_ip == req.ext_ip && h.int_ip == req.int_ip && h.ports == req.ports);
+    if let Some(i) = idx {
+        let config = lock.hairpins.remove(i);
+        let _ = state.iptables.remove_hairpin(&config);
+        AppState::unbind_ports(&state.ports, &config.ext_ip, &config.ports).await;
+        drop(lock);
+        persist_state(&state).await;
+        Ok(StatusCode::OK)
+    } else {
+        Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Hairpin rule not found".into(),
+            }),
+        ))
+    }
+}
+
+// --- Docker handlers ---
 
 async fn remap_port(
     State(state): State<AppState>,
     Path(container_id): Path<String>,
     Json(req): Json<RemapRequest>,
 ) -> Result<Json<Vec<ActivePortMapping>>, (StatusCode, Json<ErrorResponse>)> {
-    let mut lock = state.mappings.write().await;
-
-    let container_mappings = match lock.get_mut(&container_id) {
-        Some(m) => m,
-        None => {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: "Container not found".into(),
-                }),
-            ));
-        }
-    };
+    let mut lock = state.state.write().await;
+    let container_mappings = lock.docker.get_mut(&container_id).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Container not found".into(),
+            }),
+        )
+    })?;
 
     let mut to_replace = Vec::new();
     for (i, m) in container_mappings.iter().enumerate() {
@@ -352,7 +644,6 @@ async fn remap_port(
             to_replace.push(i);
         }
     }
-
     if to_replace.is_empty() {
         return Err((
             StatusCode::NOT_FOUND,
@@ -363,7 +654,6 @@ async fn remap_port(
     }
 
     let mut new_mappings = Vec::new();
-
     for i in to_replace {
         let old = &container_mappings[i];
         let mut new_req = old.request.clone();
@@ -375,14 +665,26 @@ async fn remap_port(
             container_id.clone(),
             old.container_name.clone(),
         );
-
-        // Remove old
+        let new_key = AppState::port_key(
+            &new_mapping.request.host_addr.ip().to_string(),
+            new_mapping.request.host_addr.port(),
+        );
+        if let Err(e) = state
+            .ports
+            .allocate(&new_key, new_mapping.request.host_addr)
+            .await
+        {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            ));
+        }
         let _ = state.iptables.remove_mapping(old);
-        // Install new
         if let Err(e) = state.iptables.install_mapping(&new_mapping) {
-            // rollback
-            let _ = state.iptables.remove_mapping(&new_mapping);
             let _ = state.iptables.install_mapping(old);
+            state.ports.deallocate(&new_key).await;
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
@@ -390,14 +692,19 @@ async fn remap_port(
                 }),
             ));
         }
-
+        state
+            .ports
+            .deallocate(&AppState::port_key(
+                &old.request.host_addr.ip().to_string(),
+                old.request.host_addr.port(),
+            ))
+            .await;
         container_mappings[i] = new_mapping.clone();
         new_mappings.push(new_mapping);
     }
 
     drop(lock);
     persist_state(&state).await;
-
     Ok(Json(new_mappings))
 }
 
@@ -406,8 +713,15 @@ async fn add_mapping(
     Path(container_id): Path<String>,
     Json(req): Json<AddMappingRequest>,
 ) -> Result<Json<ActivePortMapping>, (StatusCode, Json<ErrorResponse>)> {
-    let inspect = state
-        .docker
+    let docker = state.docker.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "Docker not available".into(),
+            }),
+        )
+    })?;
+    let inspect = docker
         .inspect_container(&container_id, None)
         .await
         .map_err(|e| {
@@ -418,14 +732,12 @@ async fn add_mapping(
                 }),
             )
         })?;
-
     let container_name = inspect
         .name
         .as_deref()
         .unwrap_or("unknown")
         .trim_start_matches('/')
         .to_string();
-
     let network_settings = inspect.network_settings.ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
@@ -434,24 +746,24 @@ async fn add_mapping(
             }),
         )
     })?;
-
-    let container_ip = match network_settings.networks {
-        Some(ref nets) => nets.values().find_map(|net| {
-            net.ip_address
-                .as_deref()
-                .and_then(|ip| IpAddr::from_str(ip).ok())
-        }),
-        None => None,
-    }
-    .ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Container has no IP address".into(),
-            }),
-        )
-    })?;
-
+    let container_ip = network_settings
+        .networks
+        .as_ref()
+        .and_then(|nets| {
+            nets.values().find_map(|net| {
+                net.ip_address
+                    .as_deref()
+                    .and_then(|ip| IpAddr::from_str(ip).ok())
+            })
+        })
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Container has no IP address".into(),
+                }),
+            )
+        })?;
     let proto = match req.proto.to_lowercase().as_str() {
         "tcp" => TransportProtocol::Tcp,
         "udp" => TransportProtocol::Udp,
@@ -464,7 +776,6 @@ async fn add_mapping(
             ));
         }
     };
-
     let host_ip = IpAddr::from_str(&req.host_ip).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -473,10 +784,8 @@ async fn add_mapping(
             }),
         )
     })?;
-
     let host_addr = SocketAddr::new(host_ip, req.host_port);
     let container_addr = SocketAddr::new(container_ip, req.container_port);
-
     let request = PortMappingRequest {
         host_addr,
         container_addr,
@@ -485,24 +794,37 @@ async fn add_mapping(
     let id = state.allocate_id();
     let mapping = ActivePortMapping::new(id, request, container_id.clone(), container_name);
 
-    state.iptables.install_mapping(&mapping).map_err(|e| {
-        (
+    let key = AppState::port_key(&host_ip.to_string(), req.host_port);
+    state
+        .ports
+        .allocate(&key.clone(), host_addr)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+    if let Err(e) = state.iptables.install_mapping(&mapping) {
+        state.ports.deallocate(&key).await;
+        return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
                 error: format!("iptables error: {e}"),
             }),
-        )
-    })?;
-
+        ));
+    }
     state
-        .mappings
+        .state
         .write()
         .await
+        .docker
         .entry(container_id)
         .or_default()
         .push(mapping.clone());
     persist_state(&state).await;
-
     Ok(Json(mapping))
 }
 
@@ -511,73 +833,66 @@ async fn remove_mapping(
     Path((container_id, port_str)): Path<(String, String)>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     let port = port_str.parse::<u16>().unwrap_or(0);
-
-    let mut lock = state.mappings.write().await;
-    let container_mappings = match lock.get_mut(&container_id) {
-        Some(m) => m,
-        None => {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: "Container not found".into(),
-                }),
-            ));
-        }
-    };
-
-    let mut removed = false;
-    container_mappings.retain(|m| {
-        if m.request.host_addr.port() == port {
-            let _ = state.iptables.remove_mapping(m);
-            removed = true;
-            false
-        } else {
-            true
-        }
-    });
-
-    if !removed {
-        return Err((
+    let mut lock = state.state.write().await;
+    let container_mappings = lock.docker.get_mut(&container_id).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Container not found".into(),
+            }),
+        )
+    })?;
+    let pos = container_mappings
+        .iter()
+        .position(|m| m.request.host_addr.port() == port);
+    if let Some(i) = pos {
+        let m = container_mappings.remove(i);
+        let _ = state.iptables.remove_mapping(&m);
+        state
+            .ports
+            .deallocate(&AppState::port_key(
+                &m.request.host_addr.ip().to_string(),
+                m.request.host_addr.port(),
+            ))
+            .await;
+        drop(lock);
+        persist_state(&state).await;
+        Ok(StatusCode::OK)
+    } else {
+        Err((
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
                 error: "Port mapping not found".into(),
             }),
-        ));
+        ))
     }
-
-    drop(lock);
-    persist_state(&state).await;
-
-    Ok(StatusCode::OK)
 }
 
 async fn remove_mapping_by_id(
     State(state): State<AppState>,
     Path(id): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    let mut lock = state.mappings.write().await;
-
-    let mut removed = false;
-    for (_, mappings) in lock.iter_mut() {
+    let mut lock = state.state.write().await;
+    for (_, mappings) in lock.docker.iter_mut() {
         if let Some(pos) = mappings.iter().position(|m| m.id == id) {
             let m = mappings.remove(pos);
             let _ = state.iptables.remove_mapping(&m);
-            removed = true;
-            break;
+            state
+                .ports
+                .deallocate(&AppState::port_key(
+                    &m.request.host_addr.ip().to_string(),
+                    m.request.host_addr.port(),
+                ))
+                .await;
+            drop(lock);
+            persist_state(&state).await;
+            return Ok(StatusCode::OK);
         }
     }
-
-    if !removed {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("No mapping found with id {id}"),
-            }),
-        ));
-    }
-
-    drop(lock);
-    persist_state(&state).await;
-
-    Ok(StatusCode::OK)
+    Err((
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse {
+            error: format!("No mapping found with id {id}"),
+        }),
+    ))
 }

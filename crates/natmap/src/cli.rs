@@ -149,7 +149,7 @@ pub async fn run_cli_with_args(cli: Cli) -> Result<()> {
             ext_if,
             delete,
         } => {
-            handle_dnat(ext_ip, int_ip, proto, ports, ext_if, delete)?;
+            handle_dnat(ext_ip, int_ip, proto, ports, ext_if, delete, &socket).await?;
         }
         NatMapCommand::Snat {
             int_ip,
@@ -157,7 +157,7 @@ pub async fn run_cli_with_args(cli: Cli) -> Result<()> {
             ext_ip,
             delete,
         } => {
-            handle_snat(int_ip, ext_if, ext_ip, delete)?;
+            handle_snat(int_ip, ext_if, ext_ip, delete, &socket).await?;
         }
         NatMapCommand::Hairpin {
             ext_ip,
@@ -166,7 +166,7 @@ pub async fn run_cli_with_args(cli: Cli) -> Result<()> {
             ports,
             delete,
         } => {
-            handle_hairpin(ext_ip, int_ip, proto, ports, delete)?;
+            handle_hairpin(ext_ip, int_ip, proto, ports, delete, &socket).await?;
         }
         NatMapCommand::List { container_id } => {
             handle_list(&socket, container_id, json).await?;
@@ -194,13 +194,10 @@ pub async fn run_cli_with_args(cli: Cli) -> Result<()> {
             }
         },
         NatMapCommand::Save => {
-            let status = Command::new("sh")
+            Command::new("sh")
                 .arg("-c")
                 .arg("iptables-save > /etc/iptables/rules.v4")
                 .status()?;
-            if !status.success() {
-                // Ignore error as in bash script (|| true)
-            }
         }
         NatMapCommand::Fwd => {
             let status = Command::new("sysctl")
@@ -213,10 +210,10 @@ pub async fn run_cli_with_args(cli: Cli) -> Result<()> {
         }
         NatMapCommand::Daemon {
             state_dir,
-            socket: daemon_socket,
+            socket,
             socket_group,
         } => {
-            crate::daemon::run_daemon_with_paths(&daemon_socket, &state_dir, &socket_group).await?;
+            crate::daemon::run_daemon_with_paths(&socket, &state_dir, &socket_group).await?;
         }
         NatMapCommand::Install { binary, group } => {
             crate::install::install_systemd(&binary, &group)?;

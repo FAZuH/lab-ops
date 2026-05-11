@@ -15,7 +15,7 @@ pub async fn request_json<T: serde::de::DeserializeOwned, R: serde::Serialize>(
 ) -> Result<T> {
     let stream = UnixStream::connect(socket_path).await.map_err(|e| {
         color_eyre::eyre::eyre!(
-            "Failed to connect to dockernatmap daemon at {}: {}\nIs the daemon running?",
+            "Failed to connect to natmap daemon at {}: {}\nIs the daemon running?",
             socket_path,
             e
         )
