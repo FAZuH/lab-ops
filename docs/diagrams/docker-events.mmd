@@ -1,0 +1,39 @@
+sequenceDiagram
+    participant Docker as Docker Daemon
+    participant DL as Docker Event Listener<br/>(listen_docker_events)
+    participant State as DaemonState
+    participant Ports as PortAllocator
+    participant IPT as IptablesManager
+
+    Docker->>DL: Event: container "start"
+
+    DL->>Docker: get_port_mappings(container_id)
+    Docker-->>DL: [PortBinding {host_port, container_port, proto}]
+
+    loop For each discovered mapping
+        DL->>DL: allocate_id()
+
+        alt Port already reserved
+            DL->>Ports: is_allocated(key)?
+            Ports-->>DL: true (skip)
+        else Port free
+            DL->>Ports: allocate(key, addr)
+            DL->>IPT: install_mapping(mapping)
+            DL->>DL: Add to assigned list
+        end
+    end
+
+    DL->>State: lock.write()
+    DL->>State: Merge assigned into docker[container_id]
+    DL->>State: persist_state()
+
+    Note over DL: --- Later ---
+
+    Docker->>DL: Event: container "die"
+    DL->>State: lock.write()
+    DL->>State: Remove docker[container_id]
+    loop For each mapping
+        DL->>IPT: remove_mapping(m)
+        DL->>Ports: deallocate(key)
+    end
+    DL->>State: persist_state()

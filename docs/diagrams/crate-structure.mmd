@@ -1,0 +1,33 @@
+flowchart TB
+    subgraph "lab-ops binary"
+        main["src/main.rs<br/>CLI entrypoint"]
+        cli["src/cli.rs<br/>Command enum dispatch"]
+        dockernet["src/cmd/dockernet.rs"]
+        cf2ansible["src/cmd/cf2ansible.rs"]
+    end
+
+    subgraph "natmap crate"
+        ncli["crates/natmap/src/cli.rs<br/>NatMapCommand enum"]
+        cmd["crates/natmap/src/command.rs<br/>Handler functions"]
+        daemon["crates/natmap/src/daemon.rs<br/>API server + state"]
+        models["crates/natmap/src/models.rs<br/>Data types"]
+        ipt["crates/natmap/src/iptables.rs<br/>IptablesManager"]
+        ports["crates/natmap/src/port_allocator.rs<br/>PortAllocator"]
+        inst["crates/natmap/src/install.rs<br/>Systemd install"]
+        docker["crates/natmap/src/docker.rs<br/>Docker API client"]
+        utils["crates/natmap/src/utils.rs<br/>HTTP client"]
+    end
+
+    main --> cli
+    cli --> dockernet
+    cli --> cf2ansible
+    cli --> ncli
+
+    ncli --> cmd
+    cmd --> daemon
+    cmd --> utils
+    daemon --> models
+    daemon --> ipt
+    daemon --> ports
+    daemon --> docker
+    daemon --> inst

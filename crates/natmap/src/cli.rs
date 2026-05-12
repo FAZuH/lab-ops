@@ -4,17 +4,29 @@ use clap::Parser;
 use clap::Subcommand;
 use color_eyre::Result;
 
+use crate::command::*;
+
 #[derive(Parser, Debug)]
-#[command(name = "natmap", about = "Manage iptables NAT rules")]
+#[command(
+    name = "natmap",
+    about = "Manage iptables NAT rules (static VMs & dynamic Docker)"
+)]
 pub struct Cli {
+    #[arg(long, default_value = "/run/natmap.sock", global = true)]
+    pub socket: String,
+
+    #[arg(long, global = true)]
+    pub json: bool,
+
     #[command(subcommand)]
     pub command: NatMapCommand,
 }
 
 #[derive(Subcommand, Debug)]
 pub enum NatMapCommand {
-    /// Add or delete PREROUTING and FORWARD rules for DNAT
-    Forward {
+    /// Add or delete DNAT port forwarding rules
+    #[command(name = "dnat")]
+    Dnat {
         #[arg(long)]
         ext_ip: String,
         #[arg(long)]
@@ -28,7 +40,8 @@ pub enum NatMapCommand {
         #[arg(long)]
         delete: bool,
     },
-    /// Add or delete POSTROUTING rule for SNAT
+    /// Add or delete SNAT rules
+    #[command(name = "snat")]
     Snat {
         #[arg(long)]
         int_ip: String,
@@ -39,7 +52,8 @@ pub enum NatMapCommand {
         #[arg(long)]
         delete: bool,
     },
-    /// Add or delete Hairpin NAT rules
+    /// Add or delete hairpin NAT rules
+    #[command(name = "hairpin")]
     Hairpin {
         #[arg(long)]
         ext_ip: String,
@@ -52,15 +66,82 @@ pub enum NatMapCommand {
         #[arg(long)]
         delete: bool,
     },
-    /// Enable IP forwarding using sysctl
-    EnableForwarding,
+    /// List all NAT rules (static iptables + Docker mappings)
+    #[command(name = "ls")]
+    List {
+        #[arg(value_name = "CONTAINER_ID")]
+        container_id: Option<String>,
+    },
+    /// Docker container port mappings
+    #[command(name = "docker")]
+    Docker {
+        #[command(subcommand)]
+        cmd: DockerCommand,
+    },
     /// Save iptables rules to /etc/iptables/rules.v4
-    Persist,
+    #[command(name = "save")]
+    Save,
+    /// Enable IP forwarding via sysctl
+    #[command(name = "fwd")]
+    Fwd,
+    /// Run the natmap daemon
+    #[command(name = "daemon")]
+    Daemon {
+        #[arg(long, default_value = "/var/lib/natmap/state.json")]
+        state_dir: String,
+        #[arg(long, default_value = "/run/natmap.sock")]
+        socket: String,
+        #[arg(long, default_value = "natmap")]
+        socket_group: String,
+    },
+    /// Install natmap daemon as a systemd service
+    #[command(name = "install")]
+    Install {
+        #[arg(long, default_value = "natmap")]
+        group: String,
+        #[arg(long, default_value = "/usr/local/bin/lab-ops")]
+        binary: String,
+    },
 }
 
-pub fn run_cli_with_args(cli: Cli) -> Result<()> {
+#[derive(Subcommand, Debug)]
+pub enum DockerCommand {
+    /// Add a new port mapping to a running container
+    #[command(name = "add")]
+    Add {
+        #[arg(value_name = "CONTAINER_ID")]
+        container_id: String,
+        #[arg(value_name = "[HOST_IP:]HOST_PORT:CONTAINER_PORT[/PROTO]")]
+        mapping: String,
+    },
+    /// Remove a specific Docker port mapping
+    #[command(name = "rm")]
+    Remove {
+        #[arg(value_name = "CONTAINER_ID")]
+        container_id: Option<String>,
+        #[arg(value_name = "PORT[/PROTO]")]
+        port: Option<String>,
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        id: Option<u64>,
+    },
+    /// Remap a host port for a running container
+    #[command(name = "remap")]
+    Remap {
+        #[arg(value_name = "CONTAINER_ID")]
+        container_id: String,
+        #[arg(value_name = "OLD_PORT:NEW_PORT")]
+        mapping: String,
+    },
+}
+
+pub async fn run_cli_with_args(cli: Cli) -> Result<()> {
+    let socket = cli.socket;
+    let json = cli.json;
+
     match cli.command {
-        NatMapCommand::Forward {
+        NatMapCommand::Dnat {
             ext_ip,
             int_ip,
             proto,
@@ -68,37 +149,7 @@ pub fn run_cli_with_args(cli: Cli) -> Result<()> {
             ext_if,
             delete,
         } => {
-            let action = if delete { "-D" } else { "-A" };
-            let multiport = ports.contains(',');
-            let port_args = if multiport {
-                vec!["-m", "multiport", "--dports", &ports]
-            } else {
-                vec!["--dport", &ports]
-            };
-
-            // PREROUTING
-            let mut pre_args = vec!["-t", "nat", action, "PREROUTING"];
-            if let Some(ref iface) = ext_if {
-                pre_args.extend(vec!["-i", iface]);
-            }
-            pre_args.extend(vec!["-d", &ext_ip, "-p", &proto]);
-            pre_args.extend(port_args.clone());
-
-            let dest = if multiport {
-                int_ip.clone()
-            } else {
-                format!("{}:{}", int_ip, ports)
-            };
-            pre_args.extend(vec!["-j", "DNAT", "--to-destination", &dest]);
-
-            run_iptables(&pre_args, delete)?;
-
-            // FORWARD
-            let mut fwd_args = vec![action, "FORWARD", "-p", &proto, "-d", &int_ip];
-            fwd_args.extend(port_args);
-            fwd_args.extend(vec!["-j", "ACCEPT"]);
-
-            run_iptables(&fwd_args, delete)?;
+            handle_dnat(ext_ip, int_ip, proto, ports, ext_if, delete, &socket).await?;
         }
         NatMapCommand::Snat {
             int_ip,
@@ -106,22 +157,7 @@ pub fn run_cli_with_args(cli: Cli) -> Result<()> {
             ext_ip,
             delete,
         } => {
-            let action = if delete { "-D" } else { "-A" };
-            let args = vec![
-                "-t",
-                "nat",
-                action,
-                "POSTROUTING",
-                "-s",
-                &int_ip,
-                "-o",
-                &ext_if,
-                "-j",
-                "SNAT",
-                "--to-source",
-                &ext_ip,
-            ];
-            run_iptables(&args, delete)?;
+            handle_snat(int_ip, ext_if, ext_ip, delete, &socket).await?;
         }
         NatMapCommand::Hairpin {
             ext_ip,
@@ -130,49 +166,40 @@ pub fn run_cli_with_args(cli: Cli) -> Result<()> {
             ports,
             delete,
         } => {
-            let action = if delete { "-D" } else { "-A" };
-            let multiport = ports.contains(',');
-            let port_args = if multiport {
-                vec!["-m", "multiport", "--dports", &ports]
-            } else {
-                vec!["--dport", &ports]
-            };
-
-            // PREROUTING
-            let mut pre_args = vec![
-                "-t",
-                "nat",
-                action,
-                "PREROUTING",
-                "-s",
-                &int_ip,
-                "-d",
-                &ext_ip,
-                "-p",
-                &proto,
-            ];
-            pre_args.extend(port_args.clone());
-            pre_args.extend(vec!["-j", "DNAT", "--to-destination", &int_ip]);
-            run_iptables(&pre_args, delete)?;
-
-            // POSTROUTING
-            let mut post_args = vec![
-                "-t",
-                "nat",
-                action,
-                "POSTROUTING",
-                "-s",
-                &int_ip,
-                "-d",
-                &int_ip,
-                "-p",
-                &proto,
-            ];
-            post_args.extend(port_args);
-            post_args.extend(vec!["-j", "MASQUERADE"]);
-            run_iptables(&post_args, delete)?;
+            handle_hairpin(ext_ip, int_ip, proto, ports, delete, &socket).await?;
         }
-        NatMapCommand::EnableForwarding => {
+        NatMapCommand::List { container_id } => {
+            handle_list(&socket, container_id, json).await?;
+        }
+        NatMapCommand::Docker { cmd } => match cmd {
+            DockerCommand::Add {
+                container_id,
+                mapping,
+            } => {
+                add(container_id, mapping, &socket, json).await?;
+            }
+            DockerCommand::Remove {
+                container_id,
+                port,
+                all,
+                id,
+            } => {
+                remove(container_id, port, all, id, &socket, json).await?;
+            }
+            DockerCommand::Remap {
+                container_id,
+                mapping,
+            } => {
+                remap(container_id, mapping, &socket, json).await?;
+            }
+        },
+        NatMapCommand::Save => {
+            Command::new("sh")
+                .arg("-c")
+                .arg("iptables-save > /etc/iptables/rules.v4")
+                .status()?;
+        }
+        NatMapCommand::Fwd => {
             let status = Command::new("sysctl")
                 .arg("-w")
                 .arg("net.ipv4.ip_forward=1")
@@ -181,37 +208,16 @@ pub fn run_cli_with_args(cli: Cli) -> Result<()> {
                 color_eyre::eyre::bail!("Failed to enable IP forwarding");
             }
         }
-        NatMapCommand::Persist => {
-            let status = Command::new("sh")
-                .arg("-c")
-                .arg("iptables-save > /etc/iptables/rules.v4")
-                .status()?;
-            if !status.success() {
-                // Ignore error as in bash script (|| true)
-            }
+        NatMapCommand::Daemon {
+            state_dir,
+            socket,
+            socket_group,
+        } => {
+            crate::daemon::run_daemon_with_paths(&socket, &state_dir, &socket_group).await?;
         }
-    }
-    Ok(())
-}
-
-fn run_iptables(args: &[&str], ignore_error: bool) -> Result<()> {
-    let output = match Command::new("iptables").args(args).output() {
-        Ok(o) => o,
-        Err(e) => {
-            if ignore_error {
-                return Ok(());
-            } else {
-                return Err(e.into());
-            }
+        NatMapCommand::Install { binary, group } => {
+            crate::install::install_systemd(&binary, &group)?;
         }
-    };
-    if !output.status.success() && !ignore_error {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        color_eyre::eyre::bail!(
-            "iptables command failed: iptables {}\n{}",
-            args.join(" "),
-            stderr
-        );
     }
     Ok(())
 }

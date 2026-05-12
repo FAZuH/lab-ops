@@ -1,0 +1,25 @@
+flowchart LR
+    subgraph Memory["Daemon Memory"]
+        DS["DaemonState<br/>Arc RwLock"]
+    end
+
+    subgraph Disk["/var/lib/natmap/"]
+        JSON["state.json"]
+    end
+
+    subgraph Events["Triggers"]
+        API["API call<br/>(add/remove rule)"]
+        DOCKER["Docker event<br/>(start/die)"]
+        SHUTDOWN["SIGTERM / SIGINT"]
+        STARTUP["Daemon startup"]
+    end
+
+    API -->|"modify + persist_state()"| DS
+    DOCKER -->|"modify + persist_state()"| DS
+    DS -->|"atomic write-via-tmp"| JSON
+
+    SHUTDOWN -->|"flush_all_natmap()"| IPT["Clear iptables"]
+    SHUTDOWN -->|"deallocate_all()"| PORTS["Release ports"]
+
+    STARTUP -->|"read"| JSON
+    STARTUP -->|"reconcile"| DS

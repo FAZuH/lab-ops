@@ -16,125 +16,78 @@ Prints IP addresses and port bindings of Docker containers
 lab-ops dockernet
 ```
 
-### dockernatmap
-
-Dynamic Docker port remapping daemon. Installs iptables DNAT rules in the `DOCKER-USER` chain and exposes an API to remap host ports at runtime without restarting containers. Coexists with Docker's own iptables management.
-
-#### Daemon
-
-```bash
-# Run the daemon
-sudo lab-ops dockernatmap daemon
-
-# Run with custom paths (for testing)
-lab-ops dockernatmap daemon --state-dir /tmp/dockernatmap --socket /tmp/dockernatmap.sock
-```
-
-#### Install as systemd service
-
-```bash
-sudo lab-ops dockernatmap install
-```
-
-Creates a `dockernatmap` group, adds the current user to it, copies the binary to `/usr/local/bin/lab-ops`, writes a systemd service file, and enables + starts it. Users in the `dockernatmap` group can use the CLI without sudo (re-login required after install).
-
-#### List mappings
-
-```bash
-lab-ops dockernatmap list
-
-lab-ops dockernatmap list <container-id-or-name>
-```
-
-#### Add a new mapping
-
-```bash
-# Map host port 8080 to container port 80 (all interfaces)
-lab-ops dockernatmap add my-nginx 8080:80
-
-# Map a specific host IP
-lab-ops dockernatmap add my-nginx 100.64.0.10:80:80
-
-# Specify protocol
-lab-ops dockernatmap add my-nginx 8443:443/tcp
-```
-
-#### Remap a host port
-
-```bash
-lab-ops dockernatmap remap my-nginx 8080:9090
-```
-
-#### Remove a mapping
-
-```bash
-# By container + port
-lab-ops dockernatmap remove my-nginx 8080/tcp
-
-# By mapping ID
-lab-ops dockernatmap remove --id 1
-```
-
-#### JSON output
-
-```bash
-lab-ops dockernatmap --json list
-```
-
-#### Custom socket path
-
-```bash
-lab-ops dockernatmap --socket /tmp/dockernatmap.sock list
-```
-
-### cf2ansible
-
-```bash
-lab-ops cf2ansible <zone-file> [zone-name]
-```
-
-Converts a BIND DNS zone file into Ansible Cloudflare DNS tasks (community.general.cloudflare_dns).
-
-```bash
-lab-ops cf2ansible example.com.txt
-lab-ops cf2ansible example.com.txt example.com
-```
-
 ### natmap
 
 ```bash
 lab-ops natmap <command> [args...]
 ```
 
-Manage iptables NAT rules for VMs.
+Manage iptables NAT rules for static VMs and dynamic Docker port remapping.
 
-#### Add or delete DNAT forwarding rules
+#### Static VM NAT Rules
 
+Add or delete DNAT forwarding rules:
 ```bash
-lab-ops natmap forward --ext-ip 139.99.69.43 --int-ip 10.10.10.101 --ports 25,465
-lab-ops natmap forward --ext-ip 139.99.69.43 --int-ip 10.10.10.101 --ports 25,465 --delete
+lab-ops natmap dnat --ext-ip 139.99.69.43 --int-ip 10.10.10.101 --ports 25,465
+lab-ops natmap dnat --ext-ip 139.99.69.43 --int-ip 10.10.10.101 --ports 25,465 --delete
 ```
 
-#### Add or delete SNAT rules
-
+Add or delete SNAT rules:
 ```bash
 lab-ops natmap snat --ext-ip 139.99.69.43 --int-ip 10.10.10.101 --ext-if vmbr0
 ```
 
-#### Add or delete hairpin NAT rules
-
+Add or delete hairpin NAT rules:
 ```bash
 lab-ops natmap hairpin --ext-ip 139.99.69.43 --int-ip 10.10.10.101 --ports 25,465
 ```
 
-#### Utility commands
+Enable IP forwarding and persist rules:
+```bash
+lab-ops natmap fwd
+lab-ops natmap save
+```
+
+#### Dynamic Docker Port Remapping
+
+The `natmap` daemon installs iptables DNAT rules in the `NATMAP` chain and exposes an API to remap host ports at runtime without restarting containers.
+
+**Daemon**
 
 ```bash
-# Enable IP forwarding (sysctl)
-lab-ops natmap enable-forwarding
+# Run the daemon
+sudo lab-ops natmap daemon
 
-# Save iptables rules to /etc/iptables/rules.v4
-lab-ops natmap persist
+# Run with custom paths (for testing)
+lab-ops natmap daemon --state-dir /tmp/natmap --socket /tmp/natmap.sock
+```
+
+**Install as systemd service**
+
+```bash
+sudo lab-ops natmap install
+```
+
+Creates a `natmap` group, adds the current user to it, copies the binary to `/usr/local/bin/lab-ops`, writes a systemd service file, and enables + starts it. Users in the `natmap` group can use the CLI without sudo (re-login required after install).
+
+**Manage Mappings**
+
+```bash
+# List all NAT rules (static iptables + Docker)
+lab-ops natmap ls
+lab-ops natmap ls <container-id-or-name>
+
+# Add a new mapping
+lab-ops natmap docker add my-nginx 8080:80
+lab-ops natmap docker add my-nginx 100.64.0.10:80:80
+lab-ops natmap docker add my-nginx 8443:443/tcp
+
+# Remap a host port
+lab-ops natmap docker remap my-nginx 8080:9090
+
+# Remove a mapping
+lab-ops natmap docker rm my-nginx 8080/tcp
+lab-ops natmap docker rm --id 1
 ```
 
 ## License

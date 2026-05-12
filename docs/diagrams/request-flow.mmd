@@ -1,0 +1,33 @@
+sequenceDiagram
+    participant CLI as lab-ops CLI
+    participant Socket as Unix Socket<br/>/run/natmap.sock
+    participant API as Daemon API<br/>(axum router)
+    participant State as AppState<br/>(RwLock)
+    participant Ports as PortAllocator
+    participant IPT as IptablesManager
+    participant OS as Linux Kernel
+
+    CLI->>Socket: POST /dnat<br/>{ext_ip, int_ip, ports}
+    Socket->>API: Route to add_dnat()
+
+    API->>Ports: allocate("ip:port") for each port
+    Ports->>OS: TcpListener::bind(0.0.0.0:port)
+    alt Port conflict
+        OS-->>Ports: EADDRINUSE
+        Ports-->>API: Error
+        API-->>CLI: 409 Conflict
+    else Port available
+        OS-->>Ports: OK
+        Ports-->>API: Ok
+
+        API->>IPT: install_dnat(config)
+        IPT->>OS: iptables -A PREROUTING -j DNAT
+        IPT->>OS: iptables -A FORWARD -j ACCEPT
+        IPT-->>API: Ok
+
+        API->>State: lock.write().dnats.push(config)
+        State-->>API: Ok
+
+        API->>State: persist_state()<br/>(write state.json)
+        API-->>CLI: 200 OK
+    end

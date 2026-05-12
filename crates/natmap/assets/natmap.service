@@ -1,0 +1,14 @@
+[Unit]
+Description=natmap — Dynamic Docker port remapping and static NAT daemon
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+
+[Service]
+Type=simple
+ExecStart={binary} natmap daemon --state-dir {state_dir} --socket /run/natmap.sock --socket-group {group}
+ExecReload={binary} natmap reload
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

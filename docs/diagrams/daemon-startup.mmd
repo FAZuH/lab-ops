@@ -1,0 +1,27 @@
+flowchart TD
+    A["Daemon starts<br/>run_daemon_with_paths()"]
+    B["Connect to Docker<br/>(optional, ok if missing)"]
+    C["iptables.setup()<br/>Create NATMAP chains + jumps"]
+    D{State file exists?}
+    E["state = DaemonState::default()"]
+    F["Load state from<br/>/var/lib/natmap/state.json"]
+    G["Flush ALL stale<br/>NATMAP iptables rules"]
+    H["Deallocate ALL<br/>port reservations"]
+    I["Reconcile Docker mappings<br/>- Skip dead containers<br/>- Rebind ports<br/>- Re-add iptables rules"]
+    J["Reconcile static DNATs<br/>- Bind ports<br/>- Install iptables rules"]
+    K["Reconcile static SNATs<br/>- Install iptables rules<br/>(no port binding)"]
+    L["Reconcile static Hairpins<br/>- Bind ports<br/>- Install iptables rules"]
+    M["Spawn Docker event<br/>listener (if Docker ok)"]
+    N["Spawn SIGTERM handler"]
+    O["Bind Unix socket<br/>Start API server"]
+
+    A --> B --> C --> D
+    D -->|no| E
+    D -->|yes| F
+    F --> G
+    E --> G
+    G --> H --> I --> J --> K --> L
+    L --> M --> N --> O
+
+    style G fill:#f96,stroke:#333
+    style H fill:#f96,stroke:#333

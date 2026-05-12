@@ -1,4 +1,4 @@
-use dockernatmap::models::AddMappingRequest;
+use natmap::models::AddMappingRequest;
 
 /// Simulates the CLI mapping string parsing logic
 fn parse_mapping(mapping: &str) -> Result<AddMappingRequest, String> {
