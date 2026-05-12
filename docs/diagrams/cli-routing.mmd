@@ -1,0 +1,45 @@
+flowchart LR
+    subgraph CLI["lab-ops natmap"]
+        dnat["dnat<br/>DNAT rules"]
+        snat["snat<br/>SNAT rules"]
+        hairpin["hairpin<br/>Hairpin NAT"]
+        ls["ls<br/>List all rules"]
+        docker["docker<br/>Container mappings"]
+        save["save<br/>Persist iptables"]
+        fwd["fwd<br/>Enable IP forwarding"]
+        daemon_cmd["daemon<br/>Run daemon"]
+        install["install<br/>Systemd service"]
+    end
+
+    subgraph Handlers["command.rs handlers"]
+        h_dnat["handle_dnat()"]
+        h_snat["handle_snat()"]
+        h_hairpin["handle_hairpin()"]
+        h_ls["handle_list()"]
+        h_add["add()"]
+        h_rm["remove()"]
+        h_remap["remap()"]
+        direct["Direct syscall"]
+    end
+
+    subgraph Daemon["daemon.rs API"]
+        d_dnat["POST/DELETE /dnat"]
+        d_snat["POST/DELETE /snat"]
+        d_hairpin["POST/DELETE /hairpin"]
+        d_list["GET /mappings"]
+        d_add["POST /mapping/:id"]
+        d_rm["DELETE /mapping/:id/:port"]
+        d_remap["PUT /remap/:id"]
+    end
+
+    dnat --> h_dnat --> d_dnat
+    snat --> h_snat --> d_snat
+    hairpin --> h_hairpin --> d_hairpin
+    ls --> h_ls --> d_list
+    docker --> h_add --> d_add
+    docker --> h_rm --> d_rm
+    docker --> h_remap --> d_remap
+    save --> direct
+    fwd --> direct
+    daemon_cmd --> direct
+    install --> direct

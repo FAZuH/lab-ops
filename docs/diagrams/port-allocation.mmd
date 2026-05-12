@@ -1,0 +1,35 @@
+sequenceDiagram
+    participant User as User / Script
+    participant CLI as lab-ops CLI
+    participant Daemon as natmap Daemon
+    participant OS as OS Kernel
+
+    User->>CLI: natmap dnat --ports 8080
+    CLI->>Daemon: POST /dnat via Unix socket
+
+    rect rgb(255, 230, 230)
+        Note over Daemon,OS: Phase 1: Reserve Port
+        Daemon->>OS: bind(0.0.0.0:8080)
+        alt Port already in use
+            OS-->>Daemon: error (EADDRINUSE)
+            Daemon-->>CLI: 409 Conflict
+            CLI-->>User: "Port already in use"
+        else Port available
+            OS-->>Daemon: OK
+            Daemon->>Daemon: Store TcpListener in PortAllocator
+        end
+    end
+
+    rect rgb(230, 255, 230)
+        Note over Daemon,OS: Phase 2: Install iptables
+        Daemon->>OS: iptables -A PREROUTING -d ext_ip -p tcp --dport 8080 -j DNAT
+        Daemon->>OS: iptables -A FORWARD -p tcp -d int_ip --dport 8080 -j ACCEPT
+        Daemon->>Daemon: Persist to state.json
+    end
+
+    Note over Daemon,OS: Later: rule removal
+    User->>CLI: natmap dnat --ports 8080 --delete
+    CLI->>Daemon: DELETE /dnat
+    Daemon->>OS: iptables -D PREROUTING ... (remove rules)
+    Daemon->>OS: Drop TcpListener (release port)
+    Daemon->>Daemon: Remove from state.json

@@ -1,0 +1,24 @@
+flowchart TD
+    subgraph "filter table"
+        FORWARD["FORWARD chain"]
+        DUSER["DOCKER-USER chain<br/>(Docker created)"]
+        NMF["NATMAP chain<br/>(natmap created)"]
+        FORWARD -->|"-j DOCKER-USER"| DUSER
+        DUSER -->|"-j NATMAP"| NMF
+    end
+
+    subgraph "nat table"
+        PRE["PREROUTING chain"]
+        OUT["OUTPUT chain"]
+        POST["POSTROUTING chain"]
+        NMN["NATMAP chain<br/>(natmap created)"]
+        PRE -->|"-j NATMAP"| NMN
+        OUT -->|"DNAT rules"| NMN
+        POST -->|"MASQUERADE rules"| POST
+    end
+
+    NMN -->|"DNAT to container:port"| NMN
+    NMF -->|"ACCEPT to container"| NMF
+
+    style NMF fill:#6cf,stroke:#333
+    style NMN fill:#6cf,stroke:#333
