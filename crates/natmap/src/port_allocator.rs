@@ -68,8 +68,9 @@ impl PortAllocator {
 
     /// Releases all port reservations.
     pub async fn deallocate_all(&self) {
-        let count = self.sockets.write().await.len();
-        self.sockets.write().await.clear();
+        let mut sockets = self.sockets.write().await;
+        let count = sockets.len();
+        sockets.clear();
         info!("Released all {} port reservations", count);
     }
 }
