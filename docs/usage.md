@@ -87,7 +87,14 @@ lab-ops natmap fwd
 
 # Save current iptables rules to disk
 lab-ops natmap save
+
+# Clear all managed NAT rules and reset daemon state
+lab-ops natmap clear
 ```
+
+The `clear` command removes all daemon-managed rules (static DNAT, SNAT, hairpin, and Docker port mappings), releases all port reservations, and resets the persisted state. It is useful for bulk cleanup without restarting the daemon.
+
+---
 
 ---
 
@@ -258,11 +265,8 @@ PORTS="25,465,587,143,993,110,995,4190"
 # Enable forwarding
 lab-ops natmap fwd
 
-# Flush old rules
-lab-ops natmap dnat --ext-ip $EXT_IP --int-ip $INT_IP --ports $PORTS --ext-if $EXT_IF --delete || true
-lab-ops natmap dnat --ext-ip $EXT_IP --int-ip $INT_IP --ports $PORTS --delete || true
-lab-ops natmap snat --int-ip $INT_IP --ext-if $EXT_IF --ext-ip $EXT_IP --delete || true
-lab-ops natmap hairpin --ext-ip $EXT_IP --int-ip $INT_IP --ports $PORTS --delete || true
+# Clear any previous rules (same effect as individual --delete)
+lab-ops natmap clear || true
 
 # Apply new rules
 lab-ops natmap dnat --ext-ip $EXT_IP --int-ip $INT_IP --ports $PORTS
