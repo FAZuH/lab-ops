@@ -1,3 +1,8 @@
+//! Prints a table of Docker containers with their IPs and port bindings.
+//!
+//! Connects to the local Docker daemon, inspects all containers, and displays
+//! their name, status, IP addresses (per network), and host port mappings.
+
 use std::collections::HashMap;
 
 use bollard;
@@ -8,6 +13,18 @@ use bollard::query_parameters::ListContainersOptionsBuilder;
 use color_eyre::eyre::Result;
 use comfy_table::Table;
 
+/// Displays a table of Docker containers with IPs and port bindings.
+///
+/// Skips containers that exited successfully (status `Exited (0)`).
+/// Rows are sorted by name, then status, then bindings.
+///
+/// # Examples
+///
+/// ```no_run
+/// use lab_ops::cmd::dockernet;
+/// let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+/// rt.block_on(dockernet::run()).unwrap();
+/// ```
 pub async fn run() -> Result<()> {
     let mut table = Table::new();
     let mut rows = Vec::new();
@@ -45,10 +62,12 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
+/// Returns whether the container status indicates a clean exit.
 fn is_exit(status: impl AsRef<str>) -> bool {
     status.as_ref().contains("Exited (0)")
 }
 
+/// Returns the first container name, stripping leading slashes.
 fn format_name(names: Option<Vec<String>>) -> String {
     names
         .unwrap_or_default()
@@ -57,6 +76,7 @@ fn format_name(names: Option<Vec<String>>) -> String {
         .unwrap_or_default()
 }
 
+/// Formats container IPs from all attached networks, joined by newlines.
 fn format_ips(networks: Option<HashMap<String, EndpointSettings>>) -> String {
     let Some(networks) = networks else {
         return String::new();
@@ -68,6 +88,7 @@ fn format_ips(networks: Option<HashMap<String, EndpointSettings>>) -> String {
         .join("\n")
 }
 
+/// Formats port bindings as `proto: host_ip:host_port` lines.
 fn format_binds(ports: Option<HashMap<String, Option<Vec<PortBinding>>>>) -> String {
     let Some(ports) = ports else {
         return String::new();

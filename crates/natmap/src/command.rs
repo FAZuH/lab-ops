@@ -1,3 +1,8 @@
+//! CLI command implementations that communicate with the natmap daemon.
+//!
+//! Each `handle_*` function constructs the appropriate HTTP request to the
+//! daemon's Unix socket API and formats the response for display.
+
 use std::process::Command;
 
 use color_eyre::eyre::Result;
@@ -6,6 +11,10 @@ use hyper::Method;
 use crate::models::*;
 use crate::utils::request_json;
 
+/// Displays a combined listing of static iptables NAT rules and daemon-managed state.
+///
+/// Reads live iptables rules via `iptables-save` and queries the daemon at
+/// `GET /mappings` for managed DNAT, SNAT, hairpin, and Docker mappings.
 pub async fn handle_list(socket: &str, container_id: Option<String>, json: bool) -> Result<()> {
     println!("── Static iptables NAT rules ──");
     let output = Command::new("iptables-save").output();
@@ -101,6 +110,7 @@ pub async fn handle_list(socket: &str, container_id: Option<String>, json: bool)
     Ok(())
 }
 
+/// Adds or removes a static DNAT rule via the daemon API.
 pub async fn handle_dnat(
     ext_ip: String,
     int_ip: String,
@@ -114,7 +124,7 @@ pub async fn handle_dnat(
         ext_ip,
         int_ip,
         ports,
-        proto,
+        proto: proto.try_into()?,
         ext_if,
     };
     if delete {
@@ -127,6 +137,7 @@ pub async fn handle_dnat(
     Ok(())
 }
 
+/// Adds or removes a static SNAT rule via the daemon API.
 pub async fn handle_snat(
     int_ip: String,
     ext_if: String,
@@ -149,6 +160,7 @@ pub async fn handle_snat(
     Ok(())
 }
 
+/// Adds or removes a static hairpin NAT rule via the daemon API.
 pub async fn handle_hairpin(
     ext_ip: String,
     int_ip: String,
@@ -161,7 +173,7 @@ pub async fn handle_hairpin(
         ext_ip,
         int_ip,
         ports,
-        proto,
+        proto: proto.try_into()?,
     };
     if delete {
         let _: () = request_json(socket, Method::DELETE, "/hairpin", Some(req)).await?;
@@ -173,6 +185,7 @@ pub async fn handle_hairpin(
     Ok(())
 }
 
+/// Lists Docker port mappings from the daemon (active mappings only).
 pub async fn list(container_id: Option<String>, socket: &str, json: bool) -> Result<()> {
     let res: Vec<ActivePortMapping> =
         request_json(socket, Method::GET, "/mappings", None::<()>).await?;
@@ -211,6 +224,7 @@ pub async fn list(container_id: Option<String>, socket: &str, json: bool) -> Res
     Ok(())
 }
 
+/// Lists Docker mappings, silently returning a message when the daemon is not reachable.
 pub async fn try_list(socket: &str, container_id: Option<String>, json: bool) -> Result<()> {
     match list(container_id, socket, json).await {
         Ok(()) => Ok(()),
@@ -221,6 +235,7 @@ pub async fn try_list(socket: &str, container_id: Option<String>, json: bool) ->
     }
 }
 
+/// Remaps a container's host port to a new port without restarting the container.
 pub async fn remap(container_id: String, mapping: String, socket: &str, json: bool) -> Result<()> {
     let parts: Vec<&str> = mapping.split(':').collect();
     if parts.len() != 2 {
@@ -240,6 +255,7 @@ pub async fn remap(container_id: String, mapping: String, socket: &str, json: bo
     Ok(())
 }
 
+/// Adds a new port mapping to a running container via the daemon API.
 pub async fn add(container_id: String, mapping: String, socket: &str, json: bool) -> Result<()> {
     let (mapping_part, proto) = match mapping.split_once('/') {
         Some((m, p)) => (m, p.to_string()),
@@ -259,7 +275,7 @@ pub async fn add(container_id: String, mapping: String, socket: &str, json: bool
         host_ip,
         host_port,
         container_port,
-        proto,
+        proto: proto.try_into()?,
     };
     let uri = format!("/mapping/{}", container_id);
     let res: ActivePortMapping = request_json(socket, Method::POST, &uri, Some(req)).await?;
@@ -271,6 +287,7 @@ pub async fn add(container_id: String, mapping: String, socket: &str, json: bool
     Ok(())
 }
 
+/// Removes one or more Docker port mappings via the daemon API.
 pub async fn remove(
     container_id: Option<String>,
     port: Option<String>,

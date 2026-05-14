@@ -1,3 +1,5 @@
+//! Docker client helpers for discovering and inspecting container port mappings.
+
 use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -10,10 +12,16 @@ use crate::models::ActivePortMapping;
 use crate::models::PortMappingRequest;
 use crate::models::TransportProtocol;
 
+/// Connects to the local Docker daemon via its default Unix socket.
 pub fn connect() -> Result<Docker> {
     Ok(Docker::connect_with_socket_defaults()?)
 }
 
+/// Discovers all published port mappings for a container.
+///
+/// Inspects the container's network settings and parses its exposed ports
+/// into [`ActivePortMapping`] entries. Handles both IPv4 and IPv6 host
+/// bindings when the host IP is unspecified (`0.0.0.0`).
 pub async fn get_port_mappings(
     docker: &Docker,
     container_id: &str,

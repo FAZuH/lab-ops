@@ -1,4 +1,5 @@
 use natmap::models::AddMappingRequest;
+use natmap::models::TransportProtocol;
 
 /// Simulates the CLI mapping string parsing logic
 fn parse_mapping(mapping: &str) -> Result<AddMappingRequest, String> {
@@ -30,7 +31,7 @@ fn parse_mapping(mapping: &str) -> Result<AddMappingRequest, String> {
         host_ip,
         host_port,
         container_port,
-        proto,
+        proto: proto.try_into().unwrap(),
     })
 }
 
@@ -40,7 +41,7 @@ fn parse_simple_two_part() {
     assert_eq!(req.host_ip, "0.0.0.0");
     assert_eq!(req.host_port, 8080);
     assert_eq!(req.container_port, 80);
-    assert_eq!(req.proto, "tcp");
+    assert_eq!(req.proto, TransportProtocol::Tcp);
 }
 
 #[test]
@@ -49,7 +50,7 @@ fn parse_two_part_with_proto() {
     assert_eq!(req.host_ip, "0.0.0.0");
     assert_eq!(req.host_port, 8080);
     assert_eq!(req.container_port, 80);
-    assert_eq!(req.proto, "udp");
+    assert_eq!(req.proto, TransportProtocol::Udp);
 }
 
 #[test]
@@ -58,7 +59,7 @@ fn parse_three_part_with_ip() {
     assert_eq!(req.host_ip, "100.64.0.10");
     assert_eq!(req.host_port, 80);
     assert_eq!(req.container_port, 80);
-    assert_eq!(req.proto, "tcp");
+    assert_eq!(req.proto, TransportProtocol::Tcp);
 }
 
 #[test]
@@ -67,7 +68,7 @@ fn parse_three_part_with_ip_and_proto() {
     assert_eq!(req.host_ip, "127.0.0.1");
     assert_eq!(req.host_port, 8443);
     assert_eq!(req.container_port, 443);
-    assert_eq!(req.proto, "tcp");
+    assert_eq!(req.proto, TransportProtocol::Tcp);
 }
 
 #[test]
@@ -76,7 +77,7 @@ fn parse_ipv4_loopback_address() {
     assert_eq!(req.host_ip, "127.0.0.1");
     assert_eq!(req.host_port, 3000);
     assert_eq!(req.container_port, 3000);
-    assert_eq!(req.proto, "tcp");
+    assert_eq!(req.proto, TransportProtocol::Tcp);
 }
 
 #[test]
@@ -85,7 +86,7 @@ fn parse_three_part_ipv4_address() {
     assert_eq!(req.host_ip, "192.168.1.100");
     assert_eq!(req.host_port, 9090);
     assert_eq!(req.container_port, 9090);
-    assert_eq!(req.proto, "tcp");
+    assert_eq!(req.proto, TransportProtocol::Tcp);
 }
 
 #[test]

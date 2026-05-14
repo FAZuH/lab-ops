@@ -1,3 +1,10 @@
+//! iptables rule management for DNAT, SNAT, hairpin, and Docker mappings.
+//!
+//! All rules are installed in the `NATMAP` chain (a sub-chain of `PREROUTING`
+//! in the `nat` table and `DOCKER-USER` in the `filter` table). This keeps
+//! natmap rules separate from Docker's own rules and ensures clean crash
+//! recovery via chain flush.
+
 use std::process::Command;
 
 use color_eyre::Result;
@@ -13,6 +20,11 @@ use crate::models::SnatConfig;
 const DOCKER_USER_CHAIN: &str = "DOCKER-USER";
 const NATMAP_CHAIN: &str = "NATMAP";
 
+/// Manages the lifecycle of iptables rules used by natmap.
+///
+/// Creates the `NATMAP` chain in both the `nat` and `filter` tables,
+/// inserts jumps from `PREROUTING` and `DOCKER-USER`, and provides
+/// methods to install/remove individual rules.
 pub struct IptablesManager;
 
 impl Default for IptablesManager {
@@ -22,11 +34,16 @@ impl Default for IptablesManager {
 }
 
 impl IptablesManager {
+    /// Creates a new [`IptablesManager`].
     pub fn new() -> Self {
         Self
     }
 
-    /// Sets up the required chains and jumps.
+    /// Creates the `NATMAP` chains and inserts jump rules.
+    ///
+    /// Operates on both `iptables` (IPv4) and `ip6tables` (IPv6).
+    /// Safe to call multiple times — existing chains and rules are
+    /// not duplicated.
     pub fn setup(&self) -> Result<()> {
         info!("Setting up iptables chains and jumps");
 
@@ -76,7 +93,7 @@ impl IptablesManager {
         Ok(())
     }
 
-    /// Installs mapping rules for a given ActivePortMapping
+    /// Installs DNAT, FORWARD ACCEPT, MASQUERADE, and OUTPUT DNAT rules for a Docker mapping.
     pub fn install_mapping(&self, mapping: &ActivePortMapping) -> Result<()> {
         debug!("Installing mapping: {:?}", mapping);
         let cmd = self.cmd_for(mapping.request.is_ipv6());
@@ -203,14 +220,14 @@ impl IptablesManager {
         Ok(())
     }
 
-    /// Removes all rules associated with a mapping comment
+    /// Removes all iptables rules associated with a Docker mapping by its rule comment.
     pub fn remove_mapping(&self, mapping: &ActivePortMapping) -> Result<()> {
         debug!("Removing mapping: {:?}", mapping);
         self.remove_by_comment(&mapping.rule_comment, mapping.request.is_ipv6())?;
         Ok(())
     }
 
-    /// Delete rules matching exactly the comment (across all tables/chains where we insert)
+    /// Deletes rules matching the comment string across all relevant tables and chains.
     fn remove_by_comment(&self, comment: &str, is_ipv6: bool) -> Result<()> {
         let cmd = self.cmd_for(is_ipv6);
 
@@ -226,18 +243,24 @@ impl IptablesManager {
         Ok(())
     }
 
-    /// Flush ALL rules in the NATMAP chains (crash recovery / clean shutdown)
+    /// Flushes and deletes the `NATMAP` chains and removes all natmap-commented
+    /// rules from `POSTROUTING` and `OUTPUT` in both `iptables` (IPv4) and
+    /// `ip6tables` (IPv6).
+    ///
+    /// Used during crash recovery and clean shutdown to reset all natmap-managed rules.
     pub fn flush_all_natmap(&self) -> Result<()> {
         info!("Flushing all NATMAP iptables rules");
 
-        {
-            let &cmd = &"iptables";
+        for &cmd in &["iptables", "ip6tables"] {
             let _ = self.flush_chain(cmd, "nat", NATMAP_CHAIN);
             let _ = self.flush_chain(cmd, "filter", NATMAP_CHAIN);
+            let _ = self.delete_all_natmap_comments(cmd, "nat", "POSTROUTING");
+            let _ = self.delete_all_natmap_comments(cmd, "nat", "OUTPUT");
         }
         Ok(())
     }
 
+    /// Installs a static DNAT rule (PREROUTING + FORWARD ACCEPT).
     pub fn install_dnat(&self, config: &DnatConfig) -> Result<()> {
         let multiport = config.ports.contains(',');
         let port_args = if multiport {
@@ -250,7 +273,8 @@ impl IptablesManager {
         if let Some(ref iface) = config.ext_if {
             pre_args.extend(vec!["-i", iface]);
         }
-        pre_args.extend(vec!["-d", &config.ext_ip, "-p", &config.proto]);
+        let proto = config.proto.to_lowercase();
+        pre_args.extend(vec!["-d", &config.ext_ip, "-p", proto]);
         pre_args.extend(port_args.clone());
         let dest = if multiport {
             config.int_ip.clone()
@@ -260,13 +284,14 @@ impl IptablesManager {
         pre_args.extend(vec!["-j", "DNAT", "--to-destination", &dest]);
         self.run("iptables", &pre_args.to_vec(), true)?;
 
-        let mut fwd_args = vec!["-A", "FORWARD", "-p", &config.proto, "-d", &config.int_ip];
+        let mut fwd_args = vec!["-A", "FORWARD", "-p", proto, "-d", &config.int_ip];
         fwd_args.extend(port_args);
         fwd_args.extend(vec!["-j", "ACCEPT"]);
         self.run("iptables", &fwd_args.to_vec(), true)?;
         Ok(())
     }
 
+    /// Removes a static DNAT rule (PREROUTING + FORWARD ACCEPT).
     pub fn remove_dnat(&self, config: &DnatConfig) -> Result<()> {
         let multiport = config.ports.contains(',');
         let port_args: Vec<&str> = if multiport {
@@ -279,7 +304,8 @@ impl IptablesManager {
         if let Some(ref iface) = config.ext_if {
             pre_args.extend(vec!["-i", iface]);
         }
-        pre_args.extend(vec!["-d", &config.ext_ip, "-p", &config.proto]);
+        let proto = config.proto.to_lowercase();
+        pre_args.extend(vec!["-d", &config.ext_ip, "-p", proto]);
         pre_args.extend(port_args.clone());
         let dest = if multiport {
             config.int_ip.clone()
@@ -289,13 +315,14 @@ impl IptablesManager {
         pre_args.extend(vec!["-j", "DNAT", "--to-destination", &dest]);
         let _ = self.run("iptables", &pre_args.to_vec(), false);
 
-        let mut fwd_args = vec!["-D", "FORWARD", "-p", &config.proto, "-d", &config.int_ip];
+        let mut fwd_args = vec!["-D", "FORWARD", "-p", proto, "-d", &config.int_ip];
         fwd_args.extend(port_args);
         fwd_args.extend(vec!["-j", "ACCEPT"]);
         let _ = self.run("iptables", &fwd_args.to_vec(), false);
         Ok(())
     }
 
+    /// Installs a static SNAT (source NAT) rule in the POSTROUTING chain.
     pub fn install_snat(&self, config: &SnatConfig) -> Result<()> {
         let args = vec![
             "-t",
@@ -315,6 +342,7 @@ impl IptablesManager {
         Ok(())
     }
 
+    /// Removes a static SNAT rule from the POSTROUTING chain.
     pub fn remove_snat(&self, config: &SnatConfig) -> Result<()> {
         let args = vec![
             "-t",
@@ -334,6 +362,7 @@ impl IptablesManager {
         Ok(())
     }
 
+    /// Installs a hairpin NAT rule (PREROUTING DNAT + POSTROUTING MASQUERADE).
     pub fn install_hairpin(&self, config: &HairpinConfig) -> Result<()> {
         let multiport = config.ports.contains(',');
         let port_args: Vec<&str> = if multiport {
@@ -341,6 +370,7 @@ impl IptablesManager {
         } else {
             vec!["--dport", &config.ports]
         };
+        let proto = config.proto.to_lowercase();
 
         let mut pre_args = vec![
             "-t",
@@ -352,7 +382,7 @@ impl IptablesManager {
             "-d",
             &config.ext_ip,
             "-p",
-            &config.proto,
+            proto,
         ];
         pre_args.extend(port_args.clone());
         pre_args.extend(vec!["-j", "DNAT", "--to-destination", &config.int_ip]);
@@ -368,7 +398,7 @@ impl IptablesManager {
             "-d",
             &config.int_ip,
             "-p",
-            &config.proto,
+            proto,
         ];
         post_args.extend(port_args);
         post_args.extend(vec!["-j", "MASQUERADE"]);
@@ -376,6 +406,7 @@ impl IptablesManager {
         Ok(())
     }
 
+    /// Removes a hairpin NAT rule (PREROUTING DNAT + POSTROUTING MASQUERADE).
     pub fn remove_hairpin(&self, config: &HairpinConfig) -> Result<()> {
         let multiport = config.ports.contains(',');
         let port_args: Vec<&str> = if multiport {
@@ -383,6 +414,7 @@ impl IptablesManager {
         } else {
             vec!["--dport", &config.ports]
         };
+        let proto = config.proto.to_lowercase();
 
         let mut pre_args = vec![
             "-t",
@@ -394,7 +426,7 @@ impl IptablesManager {
             "-d",
             &config.ext_ip,
             "-p",
-            &config.proto,
+            proto,
         ];
         pre_args.extend(port_args.clone());
         pre_args.extend(vec!["-j", "DNAT", "--to-destination", &config.int_ip]);
@@ -410,7 +442,7 @@ impl IptablesManager {
             "-d",
             &config.int_ip,
             "-p",
-            &config.proto,
+            proto,
         ];
         post_args.extend(port_args);
         post_args.extend(vec!["-j", "MASQUERADE"]);
@@ -418,18 +450,41 @@ impl IptablesManager {
         Ok(())
     }
 
+    /// Flushes and deletes a specific chain in a given table.
     fn flush_chain(&self, cmd: &str, table: &str, chain: &str) -> Result<()> {
         let _ = self.run(cmd, &["-t", table, "-F", chain], false);
         let _ = self.run(cmd, &["-t", table, "-X", chain], false);
         Ok(())
     }
 
-    // Helper functions
+    /// Deletes all rules in a chain whose comment starts with "natmap:".
+    fn delete_all_natmap_comments(&self, cmd: &str, table: &str, chain: &str) -> Result<()> {
+        loop {
+            let rules = self.get_rules(cmd, table, chain)?;
+            let mut deleted = false;
+            for (line_num, rule) in rules.iter().enumerate() {
+                if rule.contains("--comment \"natmap:") || rule.contains("--comment natmap:") {
+                    let num = (line_num + 1).to_string();
+                    self.run(cmd, &["-t", table, "-D", chain, &num], false)?;
+                    deleted = true;
+                    break;
+                }
+            }
+            if !deleted {
+                break;
+            }
+        }
+        Ok(())
+    }
 
+    // --- Helper functions ---
+
+    /// Returns `"ip6tables"` or `"iptables"` based on address family.
     fn cmd_for(&self, is_ipv6: bool) -> &'static str {
         if is_ipv6 { "ip6tables" } else { "iptables" }
     }
 
+    /// Executes an iptables command. If `fail_on_error` is true, returns an error on failure.
     fn run(&self, cmd: &str, args: &[&str], fail_on_error: bool) -> Result<bool> {
         let out = Command::new(cmd).args(args).output()?;
         if out.status.success() {
@@ -444,15 +499,18 @@ impl IptablesManager {
         }
     }
 
+    /// Checks whether a chain exists in the given table.
     fn chain_exists(&self, cmd: &str, table: &str, chain: &str) -> bool {
         self.run(cmd, &["-t", table, "-L", chain, "-n"], false)
             .unwrap_or(false)
     }
 
+    /// Checks whether a specific iptables rule already exists.
     fn rule_exists(&self, cmd: &str, args: &[&str]) -> bool {
         self.run(cmd, args, false).unwrap_or(false)
     }
 
+    /// Deletes all rules in a chain whose comment matches the given string.
     fn delete_all_matching(
         &self,
         cmd: &str,
@@ -483,6 +541,7 @@ impl IptablesManager {
         Ok(())
     }
 
+    /// Returns the list of active rules in a chain (lines starting with `-A` or `-I`).
     fn get_rules(&self, cmd: &str, table: &str, chain: &str) -> Result<Vec<String>> {
         let out = Command::new(cmd)
             .args(["-t", table, "-S", chain])

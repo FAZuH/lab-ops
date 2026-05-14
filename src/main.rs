@@ -1,3 +1,7 @@
+//! Binary entrypoint for lab-ops.
+//!
+//! Parses CLI arguments and dispatches to the appropriate subcommand handler.
+
 use clap::Parser as _;
 use color_eyre::Result;
 use lab_ops::cli::Cli;
