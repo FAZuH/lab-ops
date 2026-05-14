@@ -286,7 +286,7 @@ async fn reload_state(
 
         let mut max_id: u64 = 0;
         let docker_entries: Vec<(String, Vec<ActivePortMapping>)> =
-            daemon_state.docker.drain().collect();
+            daemon_state.mapping.drain().collect();
         let mut new_docker = HashMap::new();
 
         for (container_id, mappings) in docker_entries {
@@ -319,7 +319,7 @@ async fn reload_state(
                 new_docker.insert(container_id, kept);
             }
         }
-        daemon_state.docker = new_docker;
+        daemon_state.mapping = new_docker;
         state
             .next_id
             .store(max_id.saturating_add(1), Ordering::SeqCst);
@@ -458,7 +458,7 @@ async fn listen_docker_events(state: AppState) -> Result<()> {
                     assigned.push(m);
                 }
                 let mut lock = state.state.write().await;
-                let existing = lock.docker.entry(container_id.clone()).or_default();
+                let existing = lock.mapping.entry(container_id.clone()).or_default();
                 let auto_comments: HashSet<String> =
                     assigned.iter().map(|m| m.rule_comment.clone()).collect();
                 existing.retain(|m| !auto_comments.contains(&m.rule_comment));
@@ -469,7 +469,7 @@ async fn listen_docker_events(state: AppState) -> Result<()> {
         } else if action == "die" || action == "kill" || action == "network disconnect" {
             info!("Container {} died, flushing rules", container_id);
             let mut lock = state.state.write().await;
-            if let Some(mappings) = lock.docker.remove(&container_id) {
+            if let Some(mappings) = lock.mapping.remove(&container_id) {
                 for m in &mappings {
                     let _ = state.iptables.remove_mapping(m);
                     state
@@ -494,7 +494,7 @@ async fn listen_docker_events(state: AppState) -> Result<()> {
 async fn list_mappings(State(state): State<AppState>) -> Json<ListResponse> {
     let lock = state.state.read().await;
     let mut docker_list = Vec::new();
-    for mappings in lock.docker.values() {
+    for mappings in lock.mapping.values() {
         docker_list.extend(mappings.iter().cloned());
     }
     Json(ListResponse {
@@ -672,7 +672,7 @@ async fn remap_port(
     Json(req): Json<RemapRequest>,
 ) -> Result<Json<Vec<ActivePortMapping>>, (StatusCode, Json<ErrorResponse>)> {
     let mut lock = state.state.write().await;
-    let container_mappings = lock.docker.get_mut(&container_id).ok_or_else(|| {
+    let container_mappings = lock.mapping.get_mut(&container_id).ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -864,7 +864,7 @@ async fn add_mapping(
         .state
         .write()
         .await
-        .docker
+        .mapping
         .entry(container_id)
         .or_default()
         .push(mapping.clone());
@@ -879,7 +879,7 @@ async fn remove_mapping(
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     let port = port_str.parse::<u16>().unwrap_or(0);
     let mut lock = state.state.write().await;
-    let container_mappings = lock.docker.get_mut(&container_id).ok_or_else(|| {
+    let container_mappings = lock.mapping.get_mut(&container_id).ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -919,7 +919,7 @@ async fn remove_mapping_by_id(
     Path(id): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     let mut lock = state.state.write().await;
-    for (_, mappings) in lock.docker.iter_mut() {
+    for (_, mappings) in lock.mapping.iter_mut() {
         if let Some(pos) = mappings.iter().position(|m| m.id == id) {
             let m = mappings.remove(pos);
             let _ = state.iptables.remove_mapping(&m);

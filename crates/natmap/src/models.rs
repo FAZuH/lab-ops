@@ -186,7 +186,7 @@ pub struct HairpinRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DaemonState {
     /// Docker container mappings, keyed by container ID.
-    pub docker: HashMap<String, Vec<ActivePortMapping>>,
+    pub mapping: HashMap<String, Vec<ActivePortMapping>>,
     /// Static DNAT rule configurations.
     pub dnats: Vec<DnatConfig>,
     /// Static SNAT rule configurations.
