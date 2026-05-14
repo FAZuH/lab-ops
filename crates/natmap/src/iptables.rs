@@ -243,16 +243,19 @@ impl IptablesManager {
         Ok(())
     }
 
-    /// Flushes and deletes the `NATMAP` chains in both `nat` and `filter` tables.
+    /// Flushes and deletes the `NATMAP` chains and removes all natmap-commented
+    /// rules from `POSTROUTING` and `OUTPUT` in both `iptables` (IPv4) and
+    /// `ip6tables` (IPv6).
     ///
     /// Used during crash recovery and clean shutdown to reset all natmap-managed rules.
     pub fn flush_all_natmap(&self) -> Result<()> {
         info!("Flushing all NATMAP iptables rules");
 
-        {
-            let &cmd = &"iptables";
+        for &cmd in &["iptables", "ip6tables"] {
             let _ = self.flush_chain(cmd, "nat", NATMAP_CHAIN);
             let _ = self.flush_chain(cmd, "filter", NATMAP_CHAIN);
+            let _ = self.delete_all_natmap_comments(cmd, "nat", "POSTROUTING");
+            let _ = self.delete_all_natmap_comments(cmd, "nat", "OUTPUT");
         }
         Ok(())
     }
@@ -451,6 +454,26 @@ impl IptablesManager {
     fn flush_chain(&self, cmd: &str, table: &str, chain: &str) -> Result<()> {
         let _ = self.run(cmd, &["-t", table, "-F", chain], false);
         let _ = self.run(cmd, &["-t", table, "-X", chain], false);
+        Ok(())
+    }
+
+    /// Deletes all rules in a chain whose comment starts with "natmap:".
+    fn delete_all_natmap_comments(&self, cmd: &str, table: &str, chain: &str) -> Result<()> {
+        loop {
+            let rules = self.get_rules(cmd, table, chain)?;
+            let mut deleted = false;
+            for (line_num, rule) in rules.iter().enumerate() {
+                if rule.contains("--comment \"natmap:") || rule.contains("--comment natmap:") {
+                    let num = (line_num + 1).to_string();
+                    self.run(cmd, &["-t", table, "-D", chain, &num], false)?;
+                    deleted = true;
+                    break;
+                }
+            }
+            if !deleted {
+                break;
+            }
+        }
         Ok(())
     }
 
