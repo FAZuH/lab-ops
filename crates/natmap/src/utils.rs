@@ -1,3 +1,5 @@
+//! HTTP client helpers for communicating with the natmap daemon over its Unix socket.
+
 use color_eyre::Result;
 use http_body_util::BodyExt;
 use http_body_util::Empty;
@@ -7,6 +9,16 @@ use hyper::Request;
 use hyper_util::rt::TokioIo;
 use tokio::net::UnixStream;
 
+/// Sends an HTTP request to the natmap daemon over its Unix socket and deserializes the JSON response.
+///
+/// Generic over `T` (response type, must implement `DeserializeOwned`) and `R`
+/// (request body type, must implement `Serialize`). Pass `None` for `body` on
+/// GET and DELETE requests.
+///
+/// # Errors
+///
+/// Returns an error if the daemon is unreachable, returns a non-success status
+/// code, or if JSON deserialization fails.
 pub async fn request_json<T: serde::de::DeserializeOwned, R: serde::Serialize>(
     socket_path: &str,
     method: Method,

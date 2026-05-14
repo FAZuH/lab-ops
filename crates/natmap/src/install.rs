@@ -1,5 +1,16 @@
+//! Systemd installation support for the natmap daemon.
+
 use color_eyre::eyre::bail;
 
+/// Installs the natmap daemon as a systemd service.
+///
+/// Performs the following steps:
+///
+/// 1. Copies the current binary to `binary` (unless already at that path).
+/// 2. Creates the `group` system group if it does not exist.
+/// 3. Adds the current user to the group (requires re-login to take effect).
+/// 4. Writes a systemd service unit to `/etc/systemd/system/natmap.service`.
+/// 5. Runs `systemctl daemon-reload`, then `systemctl enable --now natmap`.
 pub fn install_systemd(binary: &str, group: &str) -> color_eyre::Result<()> {
     use std::process::Command;
 

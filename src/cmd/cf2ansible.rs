@@ -1,3 +1,10 @@
+//! Converts BIND DNS zone files to Ansible Cloudflare DNS tasks.
+//!
+//! Parses standard BIND zone file format and emits Ansible YAML tasks using
+//! the `community.general.cloudflare_dns` module. Supports A, AAAA, CNAME, MX,
+//! TXT, SRV, TLSA, and NS record types. Cloudflare proxied status can be
+//! annotated via `; cf_tags=cf-proxied:true|false` inline comments.
+
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -7,22 +14,40 @@ use color_eyre::Result;
 use color_eyre::eyre::Context;
 use regex::Regex;
 
+/// Matches the SOA record line to extract the zone name.
 static SOA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\S+\s+\d+\s+IN\s+SOA\s+").unwrap());
+/// Matches a standard DNS resource record line.
 static ZONE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(\S+)\s+(\d+)\s+IN\s+(\S+)\s+(.*)$").unwrap());
+/// Matches an inline `cf-proxied` comment annotation.
 static PROXIED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\s*;\s*cf_tags=cf-proxied:(true|false)\s*$").unwrap());
+/// Extracts quoted strings from TXT record data.
 static TXT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#""([^"]*)""#).unwrap());
 
+/// A parsed DNS resource record.
 #[derive(Debug, Clone)]
 struct DnsRecord {
+    /// Fully-qualified domain name (trailing dot).
     name: String,
+    /// Time-to-live in seconds.
     ttl: u32,
+    /// Record type (A, AAAA, CNAME, MX, TXT, SRV, TLSA, NS).
     rtype: String,
+    /// Record data (the RDATA portion).
     data: String,
+    /// Whether Cloudflare proxying is enabled, if annotated.
     proxied: Option<bool>,
 }
 
+/// Parses a BIND zone file and prints Ansible Cloudflare DNS tasks to stdout.
+///
+/// # Examples
+///
+/// ```no_run
+/// use lab_ops::cmd::cf2ansible;
+/// cf2ansible::run("zone.txt", Some("example.com")).unwrap();
+/// ```
 pub fn run(zone_file: impl AsRef<Path>, zone_name: Option<impl AsRef<str>>) -> Result<()> {
     let content = fs::read_to_string(&zone_file)
         .with_context(|| format!("failed to read file {}", zone_file.as_ref().display()))?;
@@ -37,6 +62,9 @@ pub fn run(zone_file: impl AsRef<Path>, zone_name: Option<impl AsRef<str>>) -> R
     Ok(())
 }
 
+/// Extracts the zone name from the SOA record.
+///
+/// Returns "example.com" as a fallback if no SOA record is found.
 fn extract_zone(content: &str) -> String {
     for line in content.lines() {
         if SOA.is_match(line) {
@@ -48,6 +76,9 @@ fn extract_zone(content: &str) -> String {
     "example.com".to_string()
 }
 
+/// Parses BIND zone file content into a vector of [`DnsRecord`].
+///
+/// Skips empty lines, comments, and SOA records.
 fn parse_zone(content: &str) -> Vec<DnsRecord> {
     let mut records = Vec::new();
 
@@ -85,6 +116,7 @@ fn parse_zone(content: &str) -> Vec<DnsRecord> {
     records
 }
 
+/// Splits raw record data into its value and an optional Cloudflare proxied flag.
 fn split_data_and_proxied(raw: &str) -> (String, Option<bool>) {
     let proxied = PROXIED.captures(raw).map(|c| c[1].to_lowercase() == "true");
     let data = PROXIED.replace(raw, "").trim().to_string();
@@ -92,6 +124,9 @@ fn split_data_and_proxied(raw: &str) -> (String, Option<bool>) {
     (data, proxied)
 }
 
+/// Strips the zone suffix from a fully-qualified domain name.
+///
+/// Returns `"@"` when the FQDN matches the zone (apex).
 fn strip_zone(fqdn: &str, zone: &str) -> String {
     let fqdn = fqdn.trim_end_matches('.');
     let zone = zone.trim_end_matches('.');
@@ -109,6 +144,7 @@ fn strip_zone(fqdn: &str, zone: &str) -> String {
     fqdn.to_string()
 }
 
+/// Parses an SRV record name into (remaining record name, service, protocol).
 fn parse_srv_name(fqdn: &str, zone: &str) -> (String, String, String) {
     let record_part = strip_zone(fqdn, zone);
 
@@ -139,6 +175,7 @@ fn parse_srv_name(fqdn: &str, zone: &str) -> (String, String, String) {
     (remaining, service, proto)
 }
 
+/// Parses a TLSA record name into (remaining record name, port, protocol).
 fn parse_tlsa_name(fqdn: &str, zone: &str) -> (String, u32, String) {
     let record_part = strip_zone(fqdn, zone);
 
@@ -169,6 +206,7 @@ fn parse_tlsa_name(fqdn: &str, zone: &str) -> (String, u32, String) {
     (remaining, port, proto)
 }
 
+/// Concatenates all quoted strings in TXT record data into a single string.
 fn parse_txt_data(raw: &str) -> String {
     let mut result = String::new();
 
@@ -179,10 +217,12 @@ fn parse_txt_data(raw: &str) -> String {
     result
 }
 
+/// Returns whether a record type supports Cloudflare proxying.
 fn can_proxy(rtype: &str) -> bool {
     matches!(rtype, "A" | "AAAA" | "CNAME")
 }
 
+/// Escapes a string for safe inclusion in a YAML double-quoted value.
 fn yaml_escape(s: &str) -> String {
     const SPECIAL_CHARS: &[char] = &[
         ':', '#', '"', '\'', '{', '}', '[', ']', ',', '&', '*', '?', '|', '<', '>', '=', '!', '%',
@@ -217,10 +257,12 @@ fn yaml_escape(s: &str) -> String {
     }
 }
 
+/// Prints the full Ansible playbook (YAML) for all parsed DNS records to stdout.
 fn print_ansible_tasks(records: &[DnsRecord], zone: &str) -> Result<()> {
     print_ansible_tasks_to(records, zone, io::stdout().lock())
 }
 
+/// Writes the Ansible playbook for all parsed DNS records to the given writer.
 fn print_ansible_tasks_to<W: io::Write>(
     records: &[DnsRecord],
     zone: &str,

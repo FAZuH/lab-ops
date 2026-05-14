@@ -1,3 +1,12 @@
+//! Natmap daemon — HTTP API server over Unix socket.
+//!
+//! The daemon is the central authority for all iptables NAT rules. It:
+//!
+//! - Hosts an HTTP API on a Unix socket (`/run/natmap.sock`)
+//! - Auto-discovers Docker container ports on start/stop events
+//! - Persists state to JSON and recovers after crashes
+//! - Prevents port conflicts using [`PortAllocator`]
+
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
@@ -33,25 +42,35 @@ use crate::iptables::IptablesManager;
 use crate::models::*;
 use crate::port_allocator::PortAllocator;
 
+/// Shared application state held by all Axum route handlers.
 #[derive(Clone)]
 pub struct AppState {
+    /// The in-memory daemon state.
     pub state: Arc<RwLock<DaemonState>>,
+    /// iptables rule manager.
     pub iptables: Arc<IptablesManager>,
+    /// Docker client (None if Docker is unavailable).
     pub docker: Option<Docker>,
+    /// Filesystem path for persisting state to JSON.
     pub state_path: PathBuf,
+    /// Auto-incrementing ID counter for mapping entries.
     pub next_id: Arc<AtomicU64>,
+    /// Port reservation system for conflict prevention.
     pub ports: Arc<PortAllocator>,
 }
 
 impl AppState {
+    /// Returns the next unique mapping ID and advances the counter.
     fn allocate_id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::SeqCst)
     }
 
+    /// Generates a port reservation key in the format `"<ip>:<port>"`.
     fn port_key(ip: &str, port: u16) -> String {
         format!("{}:{}", ip, port)
     }
 
+    /// Reserves all ports from a comma-separated port list using the port allocator.
     async fn bind_ports(
         ports: &PortAllocator,
         ip: &str,
@@ -82,6 +101,7 @@ impl AppState {
         Ok(())
     }
 
+    /// Releases all ports from a comma-separated port list from the port allocator.
     async fn unbind_ports(ports: &PortAllocator, ip: &str, ports_csv: &str) {
         for p in ports_csv.split(',') {
             if let Ok(p) = p.trim().parse::<u16>() {
@@ -91,6 +111,7 @@ impl AppState {
     }
 }
 
+/// JSON error response returned by the daemon API on failures.
 #[derive(Serialize)]
 pub struct ErrorResponse {
     pub error: String,
@@ -99,10 +120,15 @@ pub struct ErrorResponse {
 const DEFAULT_STATE_FILE: &str = "/var/lib/natmap/state.json";
 const DEFAULT_SOCKET_PATH: &str = "/run/natmap.sock";
 
+/// Runs the daemon with default paths (`/run/natmap.sock`, `/var/lib/natmap/state.json`).
 pub async fn run_daemon() -> Result<()> {
     run_daemon_with_paths(DEFAULT_SOCKET_PATH, DEFAULT_STATE_FILE, "natmap").await
 }
 
+/// Runs the natmap daemon with explicit paths for the socket, state file, and group.
+///
+/// Sets up iptables chains, loads persisted state, spawns Docker event listeners,
+/// installs a Ctrl-C handler for clean shutdown, and starts the HTTP API server.
 pub async fn run_daemon_with_paths(
     socket_path: &str,
     state_file: &str,
@@ -227,6 +253,10 @@ pub async fn run_daemon_with_paths(
     Ok(())
 }
 
+/// Loads persisted state from disk and reconciles with the current system state.
+///
+/// Flushes stale iptables rules, releases old port reservations, and re-installs
+/// rules for surviving containers and static configurations.
 async fn reload_state(
     state: &AppState,
     iptables: &IptablesManager,
@@ -357,6 +387,7 @@ async fn reload_state(
     Ok(())
 }
 
+/// Writes the current daemon state to disk (atomically via a temp file).
 async fn persist_state(state: &AppState) {
     let data = {
         let lock = state.state.read().await;
@@ -368,6 +399,10 @@ async fn persist_state(state: &AppState) {
     }
 }
 
+/// Listens for Docker container events and automatically manages port mappings.
+///
+/// On `start` / `network connect`: discovers published ports and installs rules.
+/// On `die` / `kill` / `network disconnect`: removes all rules for the container.
 async fn listen_docker_events(state: AppState) -> Result<()> {
     let docker = state.docker.as_ref().expect("Docker not available");
     let opts = EventsOptions {
@@ -455,6 +490,7 @@ async fn listen_docker_events(state: AppState) -> Result<()> {
 
 // --- API Routes ---
 
+/// `GET /mappings` — Returns all managed DNAT, SNAT, hairpin, and Docker mappings.
 async fn list_mappings(State(state): State<AppState>) -> Json<ListResponse> {
     let lock = state.state.read().await;
     let mut docker_list = Vec::new();
@@ -471,6 +507,7 @@ async fn list_mappings(State(state): State<AppState>) -> Json<ListResponse> {
 
 // --- Static NAT handlers ---
 
+/// `POST /dnat` — Adds a static DNAT rule.
 async fn add_dnat(
     State(state): State<AppState>,
     Json(req): Json<DnatRequest>,
@@ -497,6 +534,7 @@ async fn add_dnat(
     Ok(Json(config))
 }
 
+/// `DELETE /dnat` — Removes a static DNAT rule.
 async fn remove_dnat(
     State(state): State<AppState>,
     Json(req): Json<DnatRequest>,
@@ -523,6 +561,7 @@ async fn remove_dnat(
     }
 }
 
+/// `POST /snat` — Adds a static SNAT rule.
 async fn add_snat(
     State(state): State<AppState>,
     Json(req): Json<SnatRequest>,
@@ -545,6 +584,7 @@ async fn add_snat(
     Ok(Json(config))
 }
 
+/// `DELETE /snat` — Removes a static SNAT rule.
 async fn remove_snat(
     State(state): State<AppState>,
     Json(req): Json<SnatRequest>,
@@ -570,6 +610,7 @@ async fn remove_snat(
     }
 }
 
+/// `POST /hairpin` — Adds a static hairpin NAT rule.
 async fn add_hairpin(
     State(state): State<AppState>,
     Json(req): Json<HairpinRequest>,
@@ -595,6 +636,7 @@ async fn add_hairpin(
     Ok(Json(config))
 }
 
+/// `DELETE /hairpin` — Removes a static hairpin NAT rule.
 async fn remove_hairpin(
     State(state): State<AppState>,
     Json(req): Json<HairpinRequest>,
@@ -623,6 +665,7 @@ async fn remove_hairpin(
 
 // --- Docker handlers ---
 
+/// `PUT /remap/:container_id` — Remaps a host port for a running container.
 async fn remap_port(
     State(state): State<AppState>,
     Path(container_id): Path<String>,
@@ -708,6 +751,7 @@ async fn remap_port(
     Ok(Json(new_mappings))
 }
 
+/// `POST /mapping/:container_id` — Adds a new port mapping to a running container.
 async fn add_mapping(
     State(state): State<AppState>,
     Path(container_id): Path<String>,
@@ -828,6 +872,7 @@ async fn add_mapping(
     Ok(Json(mapping))
 }
 
+/// `DELETE /mapping/{container_id}/{port}` — Removes a specific port mapping by container and port.
 async fn remove_mapping(
     State(state): State<AppState>,
     Path((container_id, port_str)): Path<(String, String)>,
@@ -868,6 +913,7 @@ async fn remove_mapping(
     }
 }
 
+/// `DELETE /mapping/by-id/:id` — Removes a port mapping by its numeric ID.
 async fn remove_mapping_by_id(
     State(state): State<AppState>,
     Path(id): Path<u64>,
