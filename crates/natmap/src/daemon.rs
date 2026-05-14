@@ -202,6 +202,7 @@ pub async fn run_daemon_with_paths(
         .route("/snat", delete(remove_snat))
         .route("/hairpin", post(add_hairpin))
         .route("/hairpin", delete(remove_hairpin))
+        .route("/clear", delete(clear_all))
         .with_state(state);
 
     let socket_path_str = socket_path.to_string();
@@ -941,4 +942,46 @@ async fn remove_mapping_by_id(
             error: format!("No mapping found with id {id}"),
         }),
     ))
+}
+
+/// `DELETE /clear` — Removes all managed NAT rules and resets daemon state.
+async fn clear_all(
+    State(state): State<AppState>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let mut lock = state.state.write().await;
+
+    for mappings in lock.mapping.values() {
+        for m in mappings {
+            let _ = state.iptables.remove_mapping(m);
+            state
+                .ports
+                .deallocate(&AppState::port_key(
+                    &m.request.host_addr.ip().to_string(),
+                    m.request.host_addr.port(),
+                ))
+                .await;
+        }
+    }
+    lock.mapping.clear();
+
+    for config in &lock.dnats {
+        let _ = state.iptables.remove_dnat(config);
+        AppState::unbind_ports(&state.ports, &config.ext_ip, &config.ports).await;
+    }
+    lock.dnats.clear();
+
+    for config in &lock.snats {
+        let _ = state.iptables.remove_snat(config);
+    }
+    lock.snats.clear();
+
+    for config in &lock.hairpins {
+        let _ = state.iptables.remove_hairpin(config);
+        AppState::unbind_ports(&state.ports, &config.ext_ip, &config.ports).await;
+    }
+    lock.hairpins.clear();
+
+    drop(lock);
+    persist_state(&state).await;
+    Ok(StatusCode::OK)
 }

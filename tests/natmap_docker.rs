@@ -385,4 +385,101 @@ mod docker_tests {
             "echo PASS",
         ]);
     }
+
+    // --- Tests for clear command ---
+
+    /// `clear` must remove a deployed DNAT rule.
+    #[test]
+    fn clear_removes_dnat() {
+        run_in_docker(&[
+            "lab-ops natmap daemon --socket /tmp/ns --state-dir /tmp/st --socket-group root &",
+            "sleep 2",
+            "&&",
+            "lab-ops natmap --socket /tmp/ns dnat --ext-ip 1.2.3.4 --int-ip 10.0.0.1 --ports 8080",
+            "&&",
+            "iptables -t nat -S NATMAP | grep -q 'DNAT' || (echo 'FAIL: DNAT rule not installed' >&2 && exit 1)",
+            "&&",
+            "lab-ops natmap --socket /tmp/ns clear",
+            "&&",
+            "iptables -t nat -S NATMAP | grep -q 'DNAT' && (echo 'FAIL: DNAT rule not cleared' >&2 && exit 1) || echo 'PASS'",
+        ]);
+    }
+
+    /// `clear` must remove a deployed SNAT rule.
+    #[test]
+    fn clear_removes_snat() {
+        run_in_docker(&[
+            "lab-ops natmap daemon --socket /tmp/ns --state-dir /tmp/st --socket-group root &",
+            "sleep 2",
+            "&&",
+            "lab-ops natmap --socket /tmp/ns snat --ext-ip 1.2.3.4 --int-ip 10.0.0.1 --ext-if eth0",
+            "&&",
+            "iptables -t nat -S POSTROUTING | grep -q 'SNAT' || (echo 'FAIL: SNAT rule not installed' >&2 && exit 1)",
+            "&&",
+            "lab-ops natmap --socket /tmp/ns clear",
+            "&&",
+            "iptables -t nat -S POSTROUTING | grep -q 'natmap:' && (echo 'FAIL: SNAT rule not cleared' >&2 && exit 1) || echo 'PASS'",
+        ]);
+    }
+
+    /// `clear` must remove a deployed hairpin rule.
+    #[test]
+    fn clear_removes_hairpin() {
+        run_in_docker(&[
+            "lab-ops natmap daemon --socket /tmp/ns --state-dir /tmp/st --socket-group root &",
+            "sleep 2",
+            "&&",
+            "lab-ops natmap --socket /tmp/ns hairpin --ext-ip 1.2.3.4 --int-ip 10.0.0.1 --ports 8080",
+            "&&",
+            "iptables -t nat -S NATMAP | grep -q 'DNAT' || (echo 'FAIL: Hairpin rule not installed' >&2 && exit 1)",
+            "&&",
+            "lab-ops natmap --socket /tmp/ns clear",
+            "&&",
+            "iptables -t nat -S NATMAP | grep -q 'DNAT' && (echo 'FAIL: Hairpin rule not cleared' >&2 && exit 1) || echo 'PASS'",
+        ]);
+    }
+
+    /// `clear` must remove all types of rules simultaneously.
+    #[test]
+    fn clear_removes_all_rules() {
+        run_in_docker(&[
+            "lab-ops natmap daemon --socket /tmp/ns --state-dir /tmp/st --socket-group root &",
+            "sleep 2",
+            "&&",
+            "lab-ops natmap --socket /tmp/ns dnat --ext-ip 1.2.3.4 --int-ip 10.0.0.1 --ports 8080",
+            "&&",
+            "lab-ops natmap --socket /tmp/ns snat --ext-ip 5.6.7.8 --int-ip 10.0.0.2 --ext-if eth0",
+            "&&",
+            "lab-ops natmap --socket /tmp/ns hairpin --ext-ip 1.2.3.4 --int-ip 10.0.0.1 --ports 9090",
+            "&&",
+            "lab-ops natmap --socket /tmp/ns clear",
+            "&&",
+            "iptables -t nat -S | grep -q 'natmap:' && (echo 'FAIL: natmap rules remain after clear' >&2 && exit 1) || echo 'PASS'",
+        ]);
+    }
+
+    /// After `clear`, restarting the daemon must not re-create rules (state was reset).
+    #[test]
+    fn clear_resets_state() {
+        run_in_docker(&[
+            "lab-ops natmap daemon --socket /tmp/ns --state-dir /tmp/st --socket-group root &",
+            "sleep 2",
+            "&&",
+            "lab-ops natmap --socket /tmp/ns dnat --ext-ip 1.2.3.4 --int-ip 10.0.0.1 --ports 8080",
+            "&&",
+            "iptables -t nat -S NATMAP | grep -q '1.2.3.4' || (echo 'FAIL: rule not installed' >&2 && exit 1)",
+            "&&",
+            "lab-ops natmap --socket /tmp/ns clear",
+            "&&",
+            // Kill daemon
+            "kill %1 2>/dev/null; sleep 1",
+            "&&",
+            // Restart daemon — it loads state from disk; cleared state should be empty
+            "lab-ops natmap daemon --socket /tmp/ns --state-dir /tmp/st --socket-group root &",
+            "sleep 2",
+            "&&",
+            // Verify no natmap rules were re-created from stale state
+            "iptables -t nat -S | grep -q 'natmap:' && (echo 'FAIL: rules re-created from stale state after clear' >&2 && exit 1) || echo 'PASS'",
+        ]);
+    }
 }

@@ -97,6 +97,9 @@ pub enum NatMapCommand {
         #[arg(value_name = "CONTAINER_ID")]
         container_id: Option<String>,
     },
+    /// Removes all managed NAT rules and resets daemon state.
+    #[command(name = "clear")]
+    Clear,
     /// Manages Docker container port mappings.
     #[command(name = "docker")]
     Docker {
@@ -210,6 +213,9 @@ pub async fn run_cli_with_args(cli: Cli) -> Result<()> {
         }
         NatMapCommand::List { container_id } => {
             handle_list(&socket, container_id, json).await?;
+        }
+        NatMapCommand::Clear => {
+            handle_clear(&socket).await?;
         }
         NatMapCommand::Docker { cmd } => match cmd {
             DockerCommand::Add {

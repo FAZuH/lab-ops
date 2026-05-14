@@ -185,6 +185,13 @@ pub async fn handle_hairpin(
     Ok(())
 }
 
+/// Sends a clear-all request to the daemon, removing all managed rules and resetting state.
+pub async fn handle_clear(socket: &str) -> Result<()> {
+    let _: () = request_json(socket, Method::DELETE, "/clear", None::<()>).await?;
+    println!("All NAT rules cleared.");
+    Ok(())
+}
+
 /// Lists Docker port mappings from the daemon (active mappings only).
 pub async fn list(container_id: Option<String>, socket: &str, json: bool) -> Result<()> {
     let res: Vec<ActivePortMapping> =
