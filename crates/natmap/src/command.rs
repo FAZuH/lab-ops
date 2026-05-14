@@ -124,7 +124,7 @@ pub async fn handle_dnat(
         ext_ip,
         int_ip,
         ports,
-        proto,
+        proto: proto.try_into()?,
         ext_if,
     };
     if delete {
@@ -173,7 +173,7 @@ pub async fn handle_hairpin(
         ext_ip,
         int_ip,
         ports,
-        proto,
+        proto: proto.try_into()?,
     };
     if delete {
         let _: () = request_json(socket, Method::DELETE, "/hairpin", Some(req)).await?;
@@ -275,7 +275,7 @@ pub async fn add(container_id: String, mapping: String, socket: &str, json: bool
         host_ip,
         host_port,
         container_port,
-        proto,
+        proto: proto.try_into()?,
     };
     let uri = format!("/mapping/{}", container_id);
     let res: ActivePortMapping = request_json(socket, Method::POST, &uri, Some(req)).await?;

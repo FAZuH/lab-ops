@@ -11,19 +11,40 @@ use serde::Deserialize;
 use serde::Serialize;
 
 /// Transport protocol (TCP or UDP).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum TransportProtocol {
+    #[default]
     Tcp,
     Udp,
 }
 
+impl TryFrom<String> for TransportProtocol {
+    type Error = color_eyre::eyre::Error;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        match value.as_str() {
+            "tcp" => Ok(Self::Tcp),
+            "udp" => Ok(Self::Udp),
+            _ => Err(color_eyre::eyre::eyre!(
+                "Invalid transport protocol {value}"
+            )),
+        }
+    }
+}
+
+impl TransportProtocol {
+    pub fn to_lowercase(&self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Udp => "udp",
+        }
+    }
+}
+
 impl Display for TransportProtocol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Tcp => write!(f, "tcp"),
-            Self::Udp => write!(f, "udp"),
-        }
+        write!(f, "{}", self.to_lowercase())
     }
 }
 
@@ -96,16 +117,11 @@ pub struct AddMappingRequest {
     /// Port inside the container.
     pub container_port: u16,
     /// Transport protocol (`tcp` or `udp`, defaults to `tcp`).
-    #[serde(default = "default_proto")]
-    pub proto: String,
+    pub proto: TransportProtocol,
 }
 
 fn default_host_ip() -> String {
     "0.0.0.0".to_string()
-}
-
-fn default_proto() -> String {
-    "tcp".to_string()
 }
 
 // --- Static NAT configs (persisted to state.json) ---
@@ -119,8 +135,8 @@ pub struct DnatConfig {
     pub int_ip: String,
     /// Comma-separated list of ports.
     pub ports: String,
-    /// Transport protocol (`tcp` or `udp`).
-    pub proto: String,
+    /// Transport protocol.
+    pub proto: TransportProtocol,
     /// Optional external network interface.
     pub ext_if: Option<String>,
 }
@@ -145,8 +161,8 @@ pub struct HairpinConfig {
     pub int_ip: String,
     /// Comma-separated list of ports.
     pub ports: String,
-    /// Transport protocol (`tcp` or `udp`).
-    pub proto: String,
+    /// Transport protocol.
+    pub proto: TransportProtocol,
 }
 
 // --- API request types ---
@@ -157,8 +173,7 @@ pub struct DnatRequest {
     pub ext_ip: String,
     pub int_ip: String,
     pub ports: String,
-    #[serde(default = "default_proto")]
-    pub proto: String,
+    pub proto: TransportProtocol,
     pub ext_if: Option<String>,
 }
 
@@ -176,8 +191,7 @@ pub struct HairpinRequest {
     pub ext_ip: String,
     pub int_ip: String,
     pub ports: String,
-    #[serde(default = "default_proto")]
-    pub proto: String,
+    pub proto: TransportProtocol,
 }
 
 // --- Persisted daemon state ---

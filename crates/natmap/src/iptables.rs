@@ -270,7 +270,8 @@ impl IptablesManager {
         if let Some(ref iface) = config.ext_if {
             pre_args.extend(vec!["-i", iface]);
         }
-        pre_args.extend(vec!["-d", &config.ext_ip, "-p", &config.proto]);
+        let proto = config.proto.to_lowercase();
+        pre_args.extend(vec!["-d", &config.ext_ip, "-p", proto]);
         pre_args.extend(port_args.clone());
         let dest = if multiport {
             config.int_ip.clone()
@@ -280,7 +281,7 @@ impl IptablesManager {
         pre_args.extend(vec!["-j", "DNAT", "--to-destination", &dest]);
         self.run("iptables", &pre_args.to_vec(), true)?;
 
-        let mut fwd_args = vec!["-A", "FORWARD", "-p", &config.proto, "-d", &config.int_ip];
+        let mut fwd_args = vec!["-A", "FORWARD", "-p", proto, "-d", &config.int_ip];
         fwd_args.extend(port_args);
         fwd_args.extend(vec!["-j", "ACCEPT"]);
         self.run("iptables", &fwd_args.to_vec(), true)?;
@@ -300,7 +301,8 @@ impl IptablesManager {
         if let Some(ref iface) = config.ext_if {
             pre_args.extend(vec!["-i", iface]);
         }
-        pre_args.extend(vec!["-d", &config.ext_ip, "-p", &config.proto]);
+        let proto = config.proto.to_lowercase();
+        pre_args.extend(vec!["-d", &config.ext_ip, "-p", proto]);
         pre_args.extend(port_args.clone());
         let dest = if multiport {
             config.int_ip.clone()
@@ -310,7 +312,7 @@ impl IptablesManager {
         pre_args.extend(vec!["-j", "DNAT", "--to-destination", &dest]);
         let _ = self.run("iptables", &pre_args.to_vec(), false);
 
-        let mut fwd_args = vec!["-D", "FORWARD", "-p", &config.proto, "-d", &config.int_ip];
+        let mut fwd_args = vec!["-D", "FORWARD", "-p", proto, "-d", &config.int_ip];
         fwd_args.extend(port_args);
         fwd_args.extend(vec!["-j", "ACCEPT"]);
         let _ = self.run("iptables", &fwd_args.to_vec(), false);
@@ -365,6 +367,7 @@ impl IptablesManager {
         } else {
             vec!["--dport", &config.ports]
         };
+        let proto = config.proto.to_lowercase();
 
         let mut pre_args = vec![
             "-t",
@@ -376,7 +379,7 @@ impl IptablesManager {
             "-d",
             &config.ext_ip,
             "-p",
-            &config.proto,
+            proto,
         ];
         pre_args.extend(port_args.clone());
         pre_args.extend(vec!["-j", "DNAT", "--to-destination", &config.int_ip]);
@@ -392,7 +395,7 @@ impl IptablesManager {
             "-d",
             &config.int_ip,
             "-p",
-            &config.proto,
+            proto,
         ];
         post_args.extend(port_args);
         post_args.extend(vec!["-j", "MASQUERADE"]);
@@ -408,6 +411,7 @@ impl IptablesManager {
         } else {
             vec!["--dport", &config.ports]
         };
+        let proto = config.proto.to_lowercase();
 
         let mut pre_args = vec![
             "-t",
@@ -419,7 +423,7 @@ impl IptablesManager {
             "-d",
             &config.ext_ip,
             "-p",
-            &config.proto,
+            proto,
         ];
         pre_args.extend(port_args.clone());
         pre_args.extend(vec!["-j", "DNAT", "--to-destination", &config.int_ip]);
@@ -435,7 +439,7 @@ impl IptablesManager {
             "-d",
             &config.int_ip,
             "-p",
-            &config.proto,
+            proto,
         ];
         post_args.extend(port_args);
         post_args.extend(vec!["-j", "MASQUERADE"]);

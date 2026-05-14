@@ -516,7 +516,7 @@ async fn add_dnat(
         ext_ip: req.ext_ip.clone(),
         int_ip: req.int_ip.clone(),
         ports: req.ports.clone(),
-        proto: req.proto.clone(),
+        proto: req.proto,
         ext_if: req.ext_if.clone(),
     };
     AppState::bind_ports(&state.ports, &config.ext_ip, &config.ports).await?;
@@ -619,7 +619,7 @@ async fn add_hairpin(
         ext_ip: req.ext_ip.clone(),
         int_ip: req.int_ip.clone(),
         ports: req.ports.clone(),
-        proto: req.proto.clone(),
+        proto: req.proto,
     };
     AppState::bind_ports(&state.ports, &config.ext_ip, &config.ports).await?;
     if let Err(e) = state.iptables.install_hairpin(&config) {
@@ -808,7 +808,7 @@ async fn add_mapping(
                 }),
             )
         })?;
-    let proto = match req.proto.to_lowercase().as_str() {
+    let proto = match req.proto.to_lowercase() {
         "tcp" => TransportProtocol::Tcp,
         "udp" => TransportProtocol::Udp,
         other => {

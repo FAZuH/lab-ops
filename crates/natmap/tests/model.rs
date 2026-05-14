@@ -14,7 +14,7 @@ fn add_mapping_request_defaults() {
     assert_eq!(req.host_ip, "0.0.0.0");
     assert_eq!(req.host_port, 8080);
     assert_eq!(req.container_port, 80);
-    assert_eq!(req.proto, "tcp");
+    assert_eq!(req.proto, TransportProtocol::Tcp);
 }
 
 #[test]
@@ -25,7 +25,7 @@ fn add_mapping_request_full_fields() {
     assert_eq!(req.host_ip, "127.0.0.1");
     assert_eq!(req.host_port, 3000);
     assert_eq!(req.container_port, 3000);
-    assert_eq!(req.proto, "udp");
+    assert_eq!(req.proto, TransportProtocol::Udp);
 }
 
 #[test]
@@ -34,7 +34,7 @@ fn add_mapping_request_serialize_defaults() {
         host_ip: "0.0.0.0".into(),
         host_port: 443,
         container_port: 443,
-        proto: "tcp".into(),
+        proto: TransportProtocol::Tcp,
     };
     let json = serde_json::to_string(&req).unwrap();
     assert!(json.contains("\"host_ip\":\"0.0.0.0\""));
