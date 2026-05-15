@@ -482,4 +482,119 @@ mod docker_tests {
             "iptables -t nat -S | grep -q 'natmap:' && (echo 'FAIL: rules re-created from stale state after clear' >&2 && exit 1) || echo 'PASS'",
         ]);
     }
+
+    // --- Tests for new Port Allocator (IP_FREEBIND) behaviors ---
+
+    /// IP_FREEBIND must allow reserving a port on an IP that is not local to the machine.
+    #[test]
+    fn natmap_dnat_non_local_ip_freebind() {
+        let out = run_in_docker(&[
+            "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
+            "sleep 2",
+            "&&",
+            "lab-ops natmap --socket /tmp/ns dnat --ext-ip 198.51.100.99 --int-ip 10.0.0.1 --ports 8080",
+            "&&",
+            "iptables -t nat -S PREROUTING | grep -q '198.51.100.99' && echo 'PASS' || (echo 'FAIL: rule not created for non-local IP' >&2 && exit 1)",
+        ]);
+        assert!(
+            out.contains("PASS"),
+            "DNAT rule for non-local IP missing:\n{out}"
+        );
+    }
+
+    /// IP_FREEBIND must allow reserving the exact same port on two DIFFERENT external IPs.
+    #[test]
+    fn natmap_dnat_multiple_ips_same_port() {
+        let out = run_in_docker(&[
+            "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
+            "sleep 2",
+            "&&",
+            "lab-ops natmap --socket /tmp/ns dnat --ext-ip 198.51.100.1 --int-ip 10.0.0.1 --ports 8080",
+            "&&",
+            "lab-ops natmap --socket /tmp/ns dnat --ext-ip 198.51.100.2 --int-ip 10.0.0.2 --ports 8080",
+            "&&",
+            "iptables -t nat -S PREROUTING | grep -q '198.51.100.1' || (echo 'FAIL 1' >&2 && exit 1)",
+            "&&",
+            "iptables -t nat -S PREROUTING | grep -q '198.51.100.2' || (echo 'FAIL 2' >&2 && exit 1)",
+            "&&",
+            "echo 'PASS'",
+        ]);
+        assert!(
+            out.contains("PASS"),
+            "Failed to reserve same port on different IPs:\n{out}"
+        );
+    }
+
+    /// Trying to reserve the exact same port on the EXACT same external IP must return a Conflict.
+    #[test]
+    fn natmap_dnat_conflict_same_ip_same_port() {
+        let out = run_in_docker(&[
+            "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
+            "sleep 2",
+            "&&",
+            "lab-ops natmap --socket /tmp/ns dnat --ext-ip 198.51.100.1 --int-ip 10.0.0.1 --ports 8080",
+            "&&",
+            "if lab-ops natmap --socket /tmp/ns dnat --ext-ip 198.51.100.1 --int-ip 10.0.0.2 --ports 8080 2>&1 | grep -qi 'conflict'; then echo 'PASS'; else echo 'FAIL: missing conflict error' >&2 && exit 1; fi",
+        ]);
+        assert!(
+            out.contains("PASS"),
+            "Conflict error was not returned:\n{out}"
+        );
+    }
+
+    /// Deleting a rule must correctly deallocate the port, allowing it to be immediately re-reserved.
+    #[test]
+    fn natmap_dnat_release_port_on_delete() {
+        let out = run_in_docker(&[
+            "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
+            "sleep 2",
+            "&&",
+            "lab-ops natmap --socket /tmp/ns dnat --ext-ip 198.51.100.1 --int-ip 10.0.0.1 --ports 8080",
+            "&&",
+            "lab-ops natmap --socket /tmp/ns dnat --delete --ext-ip 198.51.100.1 --int-ip 10.0.0.1 --ports 8080",
+            "&&",
+            "lab-ops natmap --socket /tmp/ns dnat --ext-ip 198.51.100.1 --int-ip 10.0.0.2 --ports 8080",
+            "&&",
+            "iptables -t nat -S PREROUTING | grep -q '10.0.0.2' && echo 'PASS' || (echo 'FAIL: port not released' >&2 && exit 1)",
+        ]);
+        assert!(
+            out.contains("PASS"),
+            "Failed to re-reserve port after deletion:\n{out}"
+        );
+    }
+
+    /// The daemon must correctly allocate multiple ports passed as a comma-separated list.
+    #[test]
+    fn natmap_dnat_multiple_ports() {
+        let out = run_in_docker(&[
+            "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
+            "sleep 2",
+            "&&",
+            "lab-ops natmap --socket /tmp/ns dnat --ext-ip 198.51.100.1 --int-ip 10.0.0.1 --ports 8080,8081",
+            "&&",
+            "iptables -t nat -S PREROUTING | grep -q '8080' || (echo 'FAIL 8080' >&2 && exit 1)",
+            "&&",
+            "iptables -t nat -S PREROUTING | grep -q '8081' || (echo 'FAIL 8081' >&2 && exit 1)",
+            "&&",
+            "echo 'PASS'",
+        ]);
+        assert!(
+            out.contains("PASS"),
+            "Multiple ports reservation failed:\n{out}"
+        );
+    }
+
+    /// UDP protocol must be correctly specified and matched in the resulting iptables rule.
+    #[test]
+    fn natmap_dnat_udp() {
+        let out = run_in_docker(&[
+            "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
+            "sleep 2",
+            "&&",
+            "lab-ops natmap --socket /tmp/ns dnat --ext-ip 198.51.100.1 --int-ip 10.0.0.1 --ports 53 --proto udp",
+            "&&",
+            "iptables -t nat -S PREROUTING | grep -i -q 'udp' && echo 'PASS' || (echo 'FAIL' >&2 && exit 1)",
+        ]);
+        assert!(out.contains("PASS"), "UDP protocol rule failed:\n{out}");
+    }
 }
