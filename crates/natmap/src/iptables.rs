@@ -12,8 +12,8 @@ use tracing::debug;
 use tracing::error;
 use tracing::info;
 
-use crate::models::ActivePortMapping;
 use crate::models::DnatConfig;
+use crate::models::DockerPortMap;
 use crate::models::HairpinConfig;
 use crate::models::SnatConfig;
 
@@ -42,8 +42,7 @@ impl IptablesManager {
     /// Creates the `NATMAP` chains and inserts jump rules.
     ///
     /// Operates on both `iptables` (IPv4) and `ip6tables` (IPv6).
-    /// Safe to call multiple times — existing chains and rules are
-    /// not duplicated.
+    /// This method is idempotent.
     pub fn setup(&self) -> Result<()> {
         info!("Setting up iptables chains and jumps");
 
@@ -94,7 +93,7 @@ impl IptablesManager {
     }
 
     /// Installs DNAT, FORWARD ACCEPT, MASQUERADE, and OUTPUT DNAT rules for a Docker mapping.
-    pub fn install_mapping(&self, mapping: &ActivePortMapping) -> Result<()> {
+    pub fn install_dockermap(&self, mapping: &DockerPortMap) -> Result<()> {
         debug!("Installing mapping: {:?}", mapping);
         let cmd = self.cmd_for(mapping.request.is_ipv6());
 
@@ -221,7 +220,7 @@ impl IptablesManager {
     }
 
     /// Removes all iptables rules associated with a Docker mapping by its rule comment.
-    pub fn remove_mapping(&self, mapping: &ActivePortMapping) -> Result<()> {
+    pub fn remove_mapping(&self, mapping: &DockerPortMap) -> Result<()> {
         debug!("Removing mapping: {:?}", mapping);
         self.remove_by_comment(&mapping.rule_comment, mapping.request.is_ipv6())?;
         Ok(())
@@ -254,8 +253,8 @@ impl IptablesManager {
         for &cmd in &["iptables", "ip6tables"] {
             let _ = self.flush_chain(cmd, "nat", NATMAP_CHAIN);
             let _ = self.flush_chain(cmd, "filter", NATMAP_CHAIN);
-            let _ = self.delete_all_natmap_comments(cmd, "nat", "POSTROUTING");
-            let _ = self.delete_all_natmap_comments(cmd, "nat", "OUTPUT");
+            let _ = self.delete_all_natmap(cmd, "nat", "POSTROUTING");
+            let _ = self.delete_all_natmap(cmd, "nat", "OUTPUT");
         }
         Ok(())
     }
@@ -458,7 +457,7 @@ impl IptablesManager {
     }
 
     /// Deletes all rules in a chain whose comment starts with "natmap:".
-    fn delete_all_natmap_comments(&self, cmd: &str, table: &str, chain: &str) -> Result<()> {
+    fn delete_all_natmap(&self, cmd: &str, table: &str, chain: &str) -> Result<()> {
         loop {
             let rules = self.get_rules(cmd, table, chain)?;
             let mut deleted = false;

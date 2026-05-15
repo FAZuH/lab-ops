@@ -1,5 +1,7 @@
 //! HTTP client helpers for communicating with the natmap daemon over its Unix socket.
 
+use std::path::Path;
+
 use color_eyre::Result;
 use http_body_util::BodyExt;
 use http_body_util::Empty;
@@ -20,15 +22,16 @@ use tokio::net::UnixStream;
 /// Returns an error if the daemon is unreachable, returns a non-success status
 /// code, or if JSON deserialization fails.
 pub async fn request_json<T: serde::de::DeserializeOwned, R: serde::Serialize>(
-    socket_path: &str,
+    socket_path: impl AsRef<Path>,
     method: Method,
     path: &str,
     body: Option<R>,
 ) -> Result<T> {
+    let socket_path = socket_path.as_ref();
     let stream = UnixStream::connect(socket_path).await.map_err(|e| {
         color_eyre::eyre::eyre!(
             "Failed to connect to natmap daemon at {}: {}\nIs the daemon running?",
-            socket_path,
+            socket_path.to_string_lossy(),
             e
         )
     })?;

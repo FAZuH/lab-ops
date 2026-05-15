@@ -50,13 +50,13 @@ impl Display for TransportProtocol {
 
 /// Describes the desired port mapping between a host and a container.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PortMappingRequest {
+pub struct DockerPortMapRequest {
     pub host_addr: SocketAddr,
     pub container_addr: SocketAddr,
     pub proto: TransportProtocol,
 }
 
-impl PortMappingRequest {
+impl DockerPortMapRequest {
     /// Returns whether the host address is an IPv6 address.
     pub fn is_ipv6(&self) -> bool {
         self.host_addr.is_ipv6()
@@ -65,26 +65,26 @@ impl PortMappingRequest {
 
 /// An active port mapping that has been installed in iptables.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ActivePortMapping {
+pub struct DockerPortMap {
     /// Unique numeric ID assigned by the daemon.
     pub id: u64,
     /// The mapping request that was fulfilled.
-    pub request: PortMappingRequest,
+    pub request: DockerPortMapRequest,
     /// Docker container ID.
     pub container_id: String,
-    /// Human-readable container name.
+    /// Docker container name.
     pub container_name: String,
     /// iptables comment used to identify this mapping's rules.
     pub rule_comment: String,
 }
 
-impl ActivePortMapping {
-    /// Creates a new [`ActivePortMapping`] with a generated rule comment.
+impl DockerPortMap {
+    /// Creates a new [`DockerPortMap`] with a generated rule comment.
     ///
     /// The comment format is `natmap:<container_id>:<host_port>`.
     pub fn new(
         id: u64,
-        request: PortMappingRequest,
+        request: DockerPortMapRequest,
         container_id: String,
         container_name: String,
     ) -> Self {
@@ -101,14 +101,14 @@ impl ActivePortMapping {
 
 /// Request to remap a host port for an existing container.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemapRequest {
+pub struct DockerRemapRequest {
     pub host_port: u16,
     pub new_host_port: u16,
 }
 
 /// Request to add a new port mapping to a running container.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AddMappingRequest {
+pub struct DockerAddMapRequest {
     /// Host IP to bind to (defaults to `0.0.0.0`).
     #[serde(default = "default_host_ip")]
     pub host_ip: String,
@@ -117,11 +117,16 @@ pub struct AddMappingRequest {
     /// Port inside the container.
     pub container_port: u16,
     /// Transport protocol (`tcp` or `udp`, defaults to `tcp`).
+    #[serde(default = "default_proto")]
     pub proto: TransportProtocol,
 }
 
 fn default_host_ip() -> String {
     "0.0.0.0".to_string()
+}
+
+fn default_proto() -> TransportProtocol {
+    TransportProtocol::default()
 }
 
 // --- Static NAT configs (persisted to state.json) ---
@@ -199,8 +204,8 @@ pub struct HairpinRequest {
 /// The complete persisted state of the natmap daemon.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DaemonState {
-    /// Docker container mappings, keyed by container ID.
-    pub mapping: HashMap<String, Vec<ActivePortMapping>>,
+    /// Docker container port mappings, keyed by container ID.
+    pub mapping: HashMap<String, Vec<DockerPortMap>>,
     /// Static DNAT rule configurations.
     pub dnats: Vec<DnatConfig>,
     /// Static SNAT rule configurations.
@@ -212,7 +217,7 @@ pub struct DaemonState {
 /// Response returned by the `GET /mappings` endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListResponse {
-    pub docker: Vec<ActivePortMapping>,
+    pub docker: Vec<DockerPortMap>,
     pub dnats: Vec<DnatConfig>,
     pub snats: Vec<SnatConfig>,
     pub hairpins: Vec<HairpinConfig>,

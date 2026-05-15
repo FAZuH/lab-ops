@@ -17,3 +17,7 @@ color-eyre = "0.6.5"
 comfy-table = "7.2.2"
 tokio = { version = "1.52.2", features = ["rt"] }
 natmap = { path = "./crates/natmap" }
+
+[lints.clippy]
+uninlined_format_args = "deny"
+new_without_default = "allow"

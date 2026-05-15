@@ -1,8 +1,8 @@
-use natmap::models::AddMappingRequest;
+use natmap::models::DockerAddMapRequest;
 use natmap::models::TransportProtocol;
 
 /// Simulates the CLI mapping string parsing logic
-fn parse_mapping(mapping: &str) -> Result<AddMappingRequest, String> {
+fn parse_mapping(mapping: &str) -> Result<DockerAddMapRequest, String> {
     let (mapping_part, proto) = match mapping.split_once('/') {
         Some((m, p)) => (m, p.to_string()),
         None => (mapping, "tcp".to_string()),
@@ -27,7 +27,7 @@ fn parse_mapping(mapping: &str) -> Result<AddMappingRequest, String> {
         }
     };
 
-    Ok(AddMappingRequest {
+    Ok(DockerAddMapRequest {
         host_ip,
         host_port,
         container_port,

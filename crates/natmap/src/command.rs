@@ -3,9 +3,11 @@
 //! Each `handle_*` function constructs the appropriate HTTP request to the
 //! daemon's Unix socket API and formats the response for display.
 
+use std::path::Path;
 use std::process::Command;
 
 use color_eyre::eyre::Result;
+use color_eyre::eyre::bail;
 use hyper::Method;
 
 use crate::models::*;
@@ -15,7 +17,11 @@ use crate::utils::request_json;
 ///
 /// Reads live iptables rules via `iptables-save` and queries the daemon at
 /// `GET /mappings` for managed DNAT, SNAT, hairpin, and Docker mappings.
-pub async fn handle_list(socket: &str, container_id: Option<String>, json: bool) -> Result<()> {
+pub async fn handle_list(
+    socket: impl AsRef<Path>,
+    container_id: Option<String>,
+    json: bool,
+) -> Result<()> {
     println!("── Static iptables NAT rules ──");
     let output = Command::new("iptables-save").output();
     match output {
@@ -118,7 +124,7 @@ pub async fn handle_dnat(
     ports: String,
     ext_if: Option<String>,
     delete: bool,
-    socket: &str,
+    socket: impl AsRef<Path>,
 ) -> Result<()> {
     let req = DnatRequest {
         ext_ip,
@@ -143,7 +149,7 @@ pub async fn handle_snat(
     ext_if: String,
     ext_ip: String,
     delete: bool,
-    socket: &str,
+    socket: impl AsRef<Path>,
 ) -> Result<()> {
     let req = SnatRequest {
         int_ip,
@@ -167,7 +173,7 @@ pub async fn handle_hairpin(
     proto: String,
     ports: String,
     delete: bool,
-    socket: &str,
+    socket: impl AsRef<Path>,
 ) -> Result<()> {
     let req = HairpinRequest {
         ext_ip,
@@ -186,7 +192,7 @@ pub async fn handle_hairpin(
 }
 
 /// Sends a clear-all request to the daemon, removing all managed rules and resetting state.
-pub async fn handle_clear(socket: &str) -> Result<()> {
+pub async fn handle_clear(socket: impl AsRef<Path>) -> Result<()> {
     let _: () = request_json(socket, Method::DELETE, "/clear", None::<()>).await?;
     println!("All NAT rules cleared.");
     Ok(())
@@ -194,7 +200,7 @@ pub async fn handle_clear(socket: &str) -> Result<()> {
 
 /// Lists Docker port mappings from the daemon (active mappings only).
 pub async fn list(container_id: Option<String>, socket: &str, json: bool) -> Result<()> {
-    let res: Vec<ActivePortMapping> =
+    let res: Vec<DockerPortMap> =
         request_json(socket, Method::GET, "/mappings", None::<()>).await?;
     let res = if let Some(cid) = container_id {
         res.into_iter()
@@ -243,17 +249,22 @@ pub async fn try_list(socket: &str, container_id: Option<String>, json: bool) ->
 }
 
 /// Remaps a container's host port to a new port without restarting the container.
-pub async fn remap(container_id: String, mapping: String, socket: &str, json: bool) -> Result<()> {
+pub async fn remap(
+    container_id: String,
+    mapping: String,
+    socket: impl AsRef<Path>,
+    json: bool,
+) -> Result<()> {
     let parts: Vec<&str> = mapping.split(':').collect();
     if parts.len() != 2 {
-        color_eyre::eyre::bail!("Invalid mapping format. Use <old_host_port>:<new_host_port>");
+        bail!("Invalid mapping format. Use <old_host_port>:<new_host_port>");
     }
-    let req = RemapRequest {
+    let req = DockerRemapRequest {
         host_port: parts[0].parse()?,
         new_host_port: parts[1].parse()?,
     };
     let uri = format!("/remap/{}", container_id);
-    let res: Vec<ActivePortMapping> = request_json(socket, Method::PUT, &uri, Some(req)).await?;
+    let res: Vec<DockerPortMap> = request_json(socket, Method::PUT, &uri, Some(req)).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&res)?);
     } else {
@@ -263,7 +274,12 @@ pub async fn remap(container_id: String, mapping: String, socket: &str, json: bo
 }
 
 /// Adds a new port mapping to a running container via the daemon API.
-pub async fn add(container_id: String, mapping: String, socket: &str, json: bool) -> Result<()> {
+pub async fn add(
+    container_id: String,
+    mapping: String,
+    socket: impl AsRef<Path>,
+    json: bool,
+) -> Result<()> {
     let (mapping_part, proto) = match mapping.split_once('/') {
         Some((m, p)) => (m, p.to_string()),
         None => (mapping.as_str(), "tcp".to_string()),
@@ -273,19 +289,17 @@ pub async fn add(container_id: String, mapping: String, socket: &str, json: bool
     let (host_ip, host_port, container_port) = match parts.len() {
         3 => (parts[0].to_string(), parts[1].parse()?, parts[2].parse()?),
         2 => ("0.0.0.0".to_string(), parts[0].parse()?, parts[1].parse()?),
-        _ => color_eyre::eyre::bail!(
-            "Invalid mapping format. Use [HOST_IP:]HOST_PORT:CONTAINER_PORT[/PROTO]"
-        ),
+        _ => bail!("Invalid mapping format. Use [HOST_IP:]HOST_PORT:CONTAINER_PORT[/PROTO]"),
     };
 
-    let req = AddMappingRequest {
+    let req = DockerAddMapRequest {
         host_ip,
         host_port,
         container_port,
         proto: proto.try_into()?,
     };
     let uri = format!("/mapping/{}", container_id);
-    let res: ActivePortMapping = request_json(socket, Method::POST, &uri, Some(req)).await?;
+    let res: DockerPortMap = request_json(socket, Method::POST, &uri, Some(req)).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&res)?);
     } else {
@@ -300,7 +314,7 @@ pub async fn remove(
     port: Option<String>,
     all: bool,
     id: Option<u64>,
-    socket: &str,
+    socket: impl AsRef<Path>,
     json: bool,
 ) -> Result<()> {
     if let Some(mapping_id) = id {
@@ -310,7 +324,7 @@ pub async fn remove(
             println!("Successfully removed mapping {mapping_id}.");
         }
     } else if all {
-        color_eyre::eyre::bail!("--all not implemented yet");
+        bail!("--all not implemented yet");
     } else if let (Some(cid), Some(p)) = (container_id, port) {
         let port_num: u16 = p.split('/').next().unwrap().parse()?;
         let uri = format!("/mapping/{}/{}", cid, port_num);
@@ -319,7 +333,7 @@ pub async fn remove(
             println!("Successfully removed mapping.");
         }
     } else {
-        color_eyre::eyre::bail!("Specify either --id <ID>, or <CONTAINER_ID> <PORT>, or --all");
+        bail!("Specify either --id <ID>, or <CONTAINER_ID> <PORT>, or --all");
     }
     Ok(())
 }
