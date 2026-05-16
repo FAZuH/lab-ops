@@ -109,6 +109,7 @@ impl PortAllocator {
 
         let socket = Socket::new(domain, Type::STREAM, None)?;
 
+        // Without this we may fail to bind if the socket was just released and the port is briefly in TIME_WAIT.
         socket.set_reuse_address(true)?;
 
         if addr.is_ipv4() {
