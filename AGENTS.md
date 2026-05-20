@@ -26,7 +26,7 @@ All codebase conventions are defined in `docs/dev/standards.md`. Read it before 
 - **No `unwrap()` / `expect()`** outside `LazyLock<Regex>` statics. Prefer `?` and `bail!()`.
 - **Module-level docs** (`//!`) at the top of every `.rs` file.
 - **Public item docs** (`///`) on every `pub` item.
-- **Test naming**: `<module_or_function>__<scenario>` (double underscore separator).
+- **Test naming**: `<module_or_function>_<scenario>`.
 - **File naming**: `snake_case.rs`. Root crate's inline subcommands live in `src/cmd/`.
 - **No `use clap::Parser as _`** — unused trait imports must be removed.
 
@@ -67,6 +67,7 @@ When editing code, update the relevant docs in the same commit:
 | Conventions / rules | `docs/dev/standards.md` |
 | Test layout or counts | `docs/dev/testing.md` |
 | Architecture / data flow | `docs/dev/architecture.md` |
+| Integration test scenarios | `docs/dev/integration-test-plan.md` |
 | User-facing commands | `README.md` |
 
 Also check `docs/dev/standards.md` §12 (backlog) — if your change resolves a listed item, remove it from the backlog.
