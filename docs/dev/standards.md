@@ -89,25 +89,25 @@ pub const CMD_FORWARD: &str = "forward";
 All test functions must follow one convention:
 
 ```
-<module_or_function>__<scenario>
+<module_or_function>_<scenario>
 ```
 
 | Part | Convention |
 |---|---|
 | `<module_or_function>` | The thing under test (snake_case) |
-| Separator | Double underscore `__` |
+| Separator | Single underscore `_` |
 | `<scenario>` | What is being tested (snake_case, descriptive) |
 
 Examples:
 ```
-parse__minimal_config
-parse__full_config
-resolve__overrides_default
-allocate_port__assigns_unique
-format_ips__single
-format_ips__none
-build_consul_service__with_forwarding
-build_consul_service__udp_check
+parse_minimal_config
+parse_full_config
+resolve_overrides_default
+allocate_port_assigns_unique
+format_ips_single
+format_ips_none
+build_consul_service_with_forwarding
+build_consul_service_udp_check
 ```
 
 This replaces the legacy `test_<function>_<scenario>` pattern. When refactoring existing tests to this format, update only as part of meaningful work.
@@ -242,7 +242,7 @@ Unused trait imports should be removed. If a trait is needed for its methods, im
 
 ### 7.2. Test Naming
 
-See §3.6 — `<module_or_function>__<scenario>`.
+See §3.6 — `<module_or_function>_<scenario>`.
 
 ### 7.3. Test Structure
 
@@ -406,7 +406,7 @@ These inconsistencies exist in the codebase and should be addressed in future re
 | Add `#[cfg(test)] mod tests` to every untested module | Medium | Large |
 | Standardize dependency version specifiers across crates | Low | Small |
 | Move shared deps to `[workspace.dependencies]` | Low | Medium |
-| Rename legacy test functions to `modname__scenario` format | Low | Medium |
+
 | Add doc comments to `natmap/src/api.rs` route handlers | Medium | Medium |
 | Add doc comments to `auto-discover/src/cli.rs` public fns | Low | Small |
 | Convert `auto-discover/tests/integration.sh` to Rust integration tests | Low | Large |

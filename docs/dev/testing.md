@@ -43,8 +43,8 @@ Located in `tests/` or `crates/*/tests/` directories.
 
 Located in `tests/natmap_docker.rs` and `tests/auto_discover.rs`, behind `#[cfg(feature = "docker-tests")]`.
 
-**auto-discover Docker tests** (`tests/auto_discover.rs`, 9 tests):
-Spins up a privileged Docker container (Ubuntu 24.04 + Consul + iptables) running Consul, natmap, and auto-discover daemons. Verifies Consul registration, nginx config KV storage, forwarding metadata, and container lifecycle cleanup.
+**auto-discover Docker tests** (`tests/auto_discover.rs`, 19 tests):
+Spins up a privileged Docker container (Ubuntu 24.04 + Consul + iptables) running Consul, natmap, and auto-discover daemons. Verifies Consul registration, nginx config KV storage, forwarding metadata, container lifecycle cleanup, crash recovery, natmap integration edge cases, config generation pipeline, and registration metadata.
 
 | Category | Count |
 |---|---|
@@ -55,7 +55,7 @@ Spins up a privileged Docker container (Ubuntu 24.04 + Consul + iptables) runnin
 | Graceful shutdown | 3 |
 | Other | 5 |
 
-**Total: 28 natmap Docker tests + 9 auto-discover Docker tests = 37 Docker tests**
+**Total: 28 natmap Docker tests + 19 auto-discover Docker tests = 47 Docker tests**
 
 The Docker image is built once via `Once` from `ubuntu:24.04` with `iptables` installed.
 
@@ -90,7 +90,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn function_name__scenario() {
+    fn function_name_scenario() {
         let result = thing_under_test(input);
         assert!(result.is_ok());
     }
