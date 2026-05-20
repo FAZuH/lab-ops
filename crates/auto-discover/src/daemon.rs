@@ -426,29 +426,29 @@ impl DiscoveryDaemon {
         };
 
         let mut envs: HashMap<String, String> = HashMap::new();
-        envs.insert("LAB_DISCOVERY_SERVICE_NAME".into(), service.name.clone());
-        envs.insert("LAB_DISCOVERY_SERVICE_ID".into(), service_id.to_string());
+        envs.insert("AUTO_DISCOVER_SERVICE_NAME".into(), service.name.clone());
+        envs.insert("AUTO_DISCOVER_SERVICE_ID".into(), service_id.to_string());
         envs.insert(
-            "LAB_DISCOVERY_DOMAIN".into(),
+            "AUTO_DISCOVER_DOMAIN".into(),
             service.primary_domain().to_string(),
         );
         envs.insert(
-            "LAB_DISCOVERY_ALL_DOMAINS".into(),
+            "AUTO_DISCOVER_ALL_DOMAINS".into(),
             service.domains.join(" "),
         );
         if let Some(ref proxy_ip) = service.proxy_ip {
-            envs.insert("LAB_DISCOVERY_PROXY_IP".into(), proxy_ip.clone());
+            envs.insert("AUTO_DISCOVER_PROXY_IP".into(), proxy_ip.clone());
         }
-        envs.insert("LAB_DISCOVERY_BIND_IP".into(), consul_ip.to_string());
-        envs.insert("LAB_DISCOVERY_HOST_PORT".into(), host_port.to_string());
+        envs.insert("AUTO_DISCOVER_BIND_IP".into(), consul_ip.to_string());
+        envs.insert("AUTO_DISCOVER_HOST_PORT".into(), host_port.to_string());
         envs.insert(
-            "LAB_DISCOVERY_CONTAINER_PORT".into(),
+            "AUTO_DISCOVER_CONTAINER_PORT".into(),
             service.container_port.to_string(),
         );
-        envs.insert("LAB_DISCOVERY_TEMPLATE".into(), service.template.clone());
-        envs.insert("LAB_DISCOVERY_PROTOCOL".into(), service.protocol.clone());
+        envs.insert("AUTO_DISCOVER_TEMPLATE".into(), service.template.clone());
+        envs.insert("AUTO_DISCOVER_PROTOCOL".into(), service.protocol.clone());
         for (k, v) in &service.extra {
-            envs.insert(format!("LAB_DISCOVERY_EXTRA_{k}"), v.clone());
+            envs.insert(format!("AUTO_DISCOVER_EXTRA_{k}"), v.clone());
         }
 
         let output = std::process::Command::new(&service.nginx_generator)

@@ -95,10 +95,10 @@ YAMLEOF
 cat > /tmp/gen-nginx <<'GENEOF'
 #!/bin/bash
 cat <<EOF
-# Service: ${{LAB_DISCOVERY_SERVICE_NAME:-unknown}}
+# Service: ${{AUTO_DISCOVER_SERVICE_NAME:-unknown}}
 server {{
-    server_name ${{LAB_DISCOVERY_DOMAIN:-_}};
-    listen ${{LAB_DISCOVERY_PROXY_IP:-__TAILSCALE_IP__}}:80;
+    server_name ${{AUTO_DISCOVER_DOMAIN:-_}};
+    listen ${{AUTO_DISCOVER_PROXY_IP:-__TAILSCALE_IP__}}:80;
 }}
 EOF
 GENEOF
@@ -571,10 +571,10 @@ YAMLEOF
 cat > /tmp/gen-nginx <<'GENEOF'
 #!/bin/bash
 cat <<EOF
-# Service: ${{LAB_DISCOVERY_SERVICE_NAME:-unknown}}
+# Service: ${{AUTO_DISCOVER_SERVICE_NAME:-unknown}}
 server {{
-    server_name ${{LAB_DISCOVERY_DOMAIN:-_}};
-    listen ${{LAB_DISCOVERY_PROXY_IP:-__TAILSCALE_IP__}}:80;
+    server_name ${{AUTO_DISCOVER_DOMAIN:-_}};
+    listen ${{AUTO_DISCOVER_PROXY_IP:-__TAILSCALE_IP__}}:80;
 }}
 EOF
 GENEOF
@@ -651,10 +651,10 @@ YAMLEOF
 cat > /tmp/gen-nginx <<'GENEOF'
 #!/bin/bash
 cat <<EOF
-# Service: ${{LAB_DISCOVERY_SERVICE_NAME:-unknown}}
+# Service: ${{AUTO_DISCOVER_SERVICE_NAME:-unknown}}
 server {{
-    server_name ${{LAB_DISCOVERY_DOMAIN:-_}};
-    listen ${{LAB_DISCOVERY_PROXY_IP:-__TAILSCALE_IP__}}:80;
+    server_name ${{AUTO_DISCOVER_DOMAIN:-_}};
+    listen ${{AUTO_DISCOVER_PROXY_IP:-__TAILSCALE_IP__}}:80;
 }}
 EOF
 GENEOF
@@ -1034,7 +1034,7 @@ sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: natmap died"; cat /tmp/natmap.l
 
 cat > /tmp/gen-nginx <<'GENEOF'
 #!/bin/bash
-echo "server { server_name ${LAB_DISCOVERY_DOMAIN:-_}; listen 80; }"
+echo "server { server_name ${AUTO_DISCOVER_DOMAIN:-_}; listen 80; }"
 GENEOF
 chmod +x /tmp/gen-nginx
 
@@ -1112,7 +1112,7 @@ sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: natmap died"; cat /tmp/natmap.l
 
 cat > /tmp/gen-nginx <<'GENEOF'
 #!/bin/bash
-echo "server { server_name ${LAB_DISCOVERY_DOMAIN:-_}; listen 80; }"
+echo "server { server_name ${AUTO_DISCOVER_DOMAIN:-_}; listen 80; }"
 GENEOF
 chmod +x /tmp/gen-nginx
 
@@ -1183,7 +1183,7 @@ sleep 2; kill -0 $! 2>/dev/null || {{ echo "FAIL: natmap died"; cat /tmp/natmap.
 
 cat > /tmp/gen-nginx <<'GENEOF'
 #!/bin/bash
-echo "server {{ server_name ${{LAB_DISCOVERY_DOMAIN:-_}}; listen 80; }}"
+echo "server {{ server_name ${{AUTO_DISCOVER_DOMAIN:-_}}; listen 80; }}"
 GENEOF
 chmod +x /tmp/gen-nginx
 
@@ -1280,7 +1280,7 @@ sleep 2; kill -0 $! 2>/dev/null || {{ echo "FAIL: natmap died"; cat /tmp/natmap.
 
 cat > /tmp/gen-nginx <<'GENEOF'
 #!/bin/bash
-echo "server {{ server_name ${{LAB_DISCOVERY_DOMAIN:-_}}; listen 80; }}"
+echo "server {{ server_name ${{AUTO_DISCOVER_DOMAIN:-_}}; listen 80; }}"
 GENEOF
 chmod +x /tmp/gen-nginx
 
