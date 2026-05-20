@@ -1,3 +1,10 @@
+## 0.1.8 (2026-05-20)
+
+
+### Bug Fixes
+
+* Invalid arg on natmap.service ([604b454](https://github.com/FAZuH/lab-ops/commit/604b454366e6411c133e729855f3a2bc635322ba))
+
 ## 0.1.7 (2026-05-20)
 
 
@@ -50,6 +57,4 @@
 
 * Merge dockernatmap into natmap ([d0a5256](https://github.com/FAZuH/lab-ops/commit/d0a52562ab0addf57a835a69f2c0dcc148fe55a0))
 * Organize and rename modules ([8ad4747](https://github.com/FAZuH/lab-ops/commit/8ad47479d09658be959cfcbc659f93acf81d46ac))
-
-## 0.1.3 (2026-05-10)
 
