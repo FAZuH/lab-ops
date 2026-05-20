@@ -1,0 +1,310 @@
+use std::path::PathBuf;
+
+use bollard::query_parameters::EventsOptions;
+use clap::Parser;
+use clap::Subcommand;
+use color_eyre::eyre::bail;
+use color_eyre::Result;
+use futures_util::StreamExt;
+use tracing::debug;
+use tracing::error;
+use tracing::info;
+use tracing::warn;
+
+use crate::config::DiscoveryConfig;
+use crate::daemon::DiscoveryDaemon;
+use crate::nginx_daemon::NginxDaemon;
+
+/// Service discovery daemon: watches Docker events, manages port forwarding
+/// via `lab-ops natmap`, registers services with Consul, generates nginx
+/// configs, and syncs forwarding/KV rules on the proxy server.
+#[derive(Parser)]
+#[command(name = "auto-discover")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
+#[command(about = "Service discovery daemon with Consul integration and nginx config generation")]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+#[derive(Subcommand)]
+pub enum Commands {
+    /// Run all enabled daemon components (discovery, forwarding, nginx)
+    Daemon {
+        /// Path to discovery.yaml
+        #[arg(default_value = "/etc/auto-discover/discovery.yaml")]
+        config: PathBuf,
+        /// State directory for port assignments
+        #[arg(long, default_value = "/var/lib/auto-discover")]
+        state_dir: PathBuf,
+        /// Consul HTTP address
+        #[arg(long, default_value = "http://127.0.0.1:8500")]
+        consul_addr: String,
+        /// Disable the discovery component (Docker event watching)
+        #[arg(long)]
+        no_discovery: bool,
+        /// Disable the forwarding component (kernel DNAT sync)
+        #[arg(long)]
+        no_forwarding: bool,
+        /// Disable the nginx component (KV config sync)
+        #[arg(long)]
+        no_nginx: bool,
+    },
+    /// Run a single sync pass and exit
+    Sync {
+        /// Path to discovery.yaml
+        #[arg(default_value = "/etc/auto-discover/discovery.yaml")]
+        config: PathBuf,
+        /// State directory for port assignments
+        #[arg(long, default_value = "/var/lib/auto-discover")]
+        state_dir: PathBuf,
+    },
+    /// Validate the discovery configuration
+    Check {
+        /// Path to discovery.yaml
+        #[arg(default_value = "/etc/auto-discover/discovery.yaml")]
+        config: PathBuf,
+    },
+    /// Run on proxy server: sync DNAT rules from Consul (one-shot)
+    ForwardingSync {
+        /// Consul HTTP address
+        #[arg(default_value = "http://127.0.0.1:8500")]
+        consul_addr: String,
+    },
+    /// Run on proxy server: sync nginx configs from Consul KV (one-shot)
+    NginxSync {
+        /// Consul HTTP address
+        #[arg(default_value = "http://127.0.0.1:8500")]
+        consul_addr: String,
+    },
+}
+
+pub async fn run_cli(cli: Cli) -> Result<()> {
+    match cli.command {
+        Commands::Daemon {
+            config,
+            state_dir,
+            consul_addr,
+            no_discovery,
+            no_forwarding,
+            no_nginx,
+        } => {
+            run_unified_daemon(
+                config,
+                state_dir,
+                consul_addr,
+                no_discovery,
+                no_forwarding,
+                no_nginx,
+            )
+            .await
+        }
+        Commands::Sync { config, state_dir } => run_sync(config, state_dir).await,
+        Commands::Check { config } => check_config(config),
+        Commands::ForwardingSync { consul_addr } => run_forwarding_sync(&consul_addr).await,
+        Commands::NginxSync { consul_addr } => run_nginx_sync(&consul_addr).await,
+    }
+}
+
+pub async fn run_unified_daemon(
+    config_path: PathBuf,
+    state_dir: PathBuf,
+    consul_addr: String,
+    no_discovery: bool,
+    no_forwarding: bool,
+    no_nginx: bool,
+) -> Result<()> {
+    if no_discovery && no_forwarding && no_nginx {
+        bail!("All components disabled, nothing to do");
+    }
+
+    info!("Starting auto-discover daemon");
+
+    if !no_discovery {
+        let config = config_path.clone();
+        let state = state_dir.clone();
+        tokio::spawn(async move {
+            info!("Discovery component started");
+            run_daemon(config, state).await;
+            info!("Discovery component exited");
+        });
+    }
+
+    if !no_forwarding {
+        let addr = consul_addr.clone();
+        tokio::spawn(async move {
+            info!("Forwarding component started");
+            run_forwarding_daemon(addr).await;
+            info!("Forwarding component exited");
+        });
+    }
+
+    if !no_nginx {
+        let addr = consul_addr.clone();
+        tokio::spawn(async move {
+            info!("Nginx component started");
+            run_nginx_daemon(addr).await;
+            info!("Nginx component exited");
+        });
+    }
+
+    tokio::signal::ctrl_c().await?;
+    info!("Shutdown signal received");
+    Ok(())
+}
+
+async fn run_daemon(config_path: PathBuf, state_dir: PathBuf) {
+    info!("Config: {}", config_path.display());
+    info!("State dir: {}", state_dir.display());
+
+    let daemon = DiscoveryDaemon::new(config_path.clone(), state_dir);
+
+    let mut retries = 0u32;
+    loop {
+        match daemon.sync().await {
+            Ok(()) => {
+                info!("Initial sync succeeded");
+                break;
+            }
+            Err(e) => {
+                if retries < 10 {
+                    retries += 1;
+                    let delay =
+                        std::time::Duration::from_secs(2u64.saturating_mul(retries as u64).min(30));
+                    warn!(
+                        "Initial sync failed (attempt {}/10, retrying in {:?}): {}",
+                        retries, delay, e
+                    );
+                    tokio::time::sleep(delay).await;
+                } else {
+                    error!("Initial sync failed after {} attempts: {}", retries, e);
+                    break;
+                }
+            }
+        }
+    }
+
+    let docker_api = match bollard::Docker::connect_with_local_defaults() {
+        Ok(d) => d,
+        Err(e) => {
+            error!("Failed to connect to Docker: {}", e);
+            return;
+        }
+    };
+
+    let mut stream = docker_api.events(Some(EventsOptions {
+        since: None,
+        until: None,
+        filters: Some(
+            vec![
+                ("type".to_string(), vec!["container".to_string()]),
+                (
+                    "event".to_string(),
+                    vec!["start".to_string(), "die".to_string()],
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+    }));
+
+    info!("Listening for Docker events...");
+
+    while let Some(event) = stream.next().await {
+        let e = match event {
+            Ok(e) => e,
+            Err(e) => {
+                error!("Docker event error: {}", e);
+                continue;
+            }
+        };
+
+        let actor = e.actor.as_ref();
+        let attrs = actor.and_then(|a| a.attributes.as_ref());
+
+        let container_id = actor.map(|a| a.id.as_deref().unwrap_or("")).unwrap_or("");
+        let action = e.action.as_deref().unwrap_or("");
+        let compose_project = attrs
+            .and_then(|a| a.get("com.docker.compose.project"))
+            .cloned();
+
+        debug!(
+            "Event: {} container={}",
+            action,
+            &container_id[..12.min(container_id.len())]
+        );
+
+        match action {
+            "start" => {
+                if let Some(ref project) = compose_project {
+                    if let Err(e) = daemon.handle_container_start(container_id, project).await {
+                        error!("Container start error: {}", e);
+                    }
+                }
+            }
+            "die" => {
+                if let Err(e) = daemon.handle_container_die(container_id).await {
+                    error!("Container die error: {}", e);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+pub async fn run_sync(config_path: PathBuf, state_dir: PathBuf) -> Result<()> {
+    info!("Running sync...");
+    let daemon = DiscoveryDaemon::new(config_path, state_dir);
+    match daemon.sync().await {
+        Ok(()) => info!("Sync completed successfully"),
+        Err(e) => bail!("sync failed: {e}"),
+    }
+    Ok(())
+}
+
+pub fn check_config(config_path: PathBuf) -> Result<()> {
+    let config = DiscoveryConfig::load(&config_path)
+        .map_err(|e| color_eyre::eyre::eyre!("configuration error: {e}"))?;
+    println!("Configuration is valid.");
+    println!("Services defined: {}", config.networks.len());
+    for svc in &config.networks {
+        let resolved = config.resolve(svc);
+        println!(
+            "  - {} (port {}, protocol {}, template {})",
+            resolved.name, resolved.container_port, resolved.protocol, resolved.template
+        );
+    }
+    Ok(())
+}
+
+pub async fn run_forwarding_sync(consul_addr: &str) -> Result<()> {
+    info!("Running forwarding sync...");
+    crate::forwarding::sync_forwarding_rules(consul_addr).await?;
+    info!("Forwarding sync completed successfully");
+    Ok(())
+}
+
+async fn run_forwarding_daemon(consul_addr: String) {
+    info!("Forwarding daemon started");
+    loop {
+        match crate::forwarding::sync_forwarding_rules(&consul_addr).await {
+            Ok(()) => info!("Forwarding daemon sync completed"),
+            Err(e) => error!("Forwarding daemon sync failed: {}", e),
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    }
+}
+
+pub async fn run_nginx_sync(consul_addr: &str) -> Result<()> {
+    info!("Running nginx sync...");
+    let daemon = NginxDaemon::new_default_paths(consul_addr);
+    let changed = daemon.sync().await?;
+    info!("Nginx sync completed, changed={}", changed);
+    Ok(())
+}
+
+async fn run_nginx_daemon(consul_addr: String) {
+    info!("Nginx daemon started");
+    let daemon = NginxDaemon::new_default_paths(&consul_addr);
+    daemon.run_loop().await;
+}
