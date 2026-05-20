@@ -1,3 +1,20 @@
+## 0.1.6 (2026-05-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* fat refactor
+
+### New Features
+
+* Add auto-discover ([1799731](https://github.com/FAZuH/lab-ops/commit/179973185380bd3047ab56a2fc3ce47eeea92bc7))
+* Add natmap clear command ([8855146](https://github.com/FAZuH/lab-ops/commit/8855146bdd29132ed21ff0637517b0a46a4d05fc))
+
+
+### Cli
+
+* Rename argument --state-dir to --state ([926802e](https://github.com/FAZuH/lab-ops/commit/926802ef90f66f7d8f9c16ec806e55f18c3d3d50))
+
 ## 0.1.5 (2026-05-14)
 
 
@@ -40,16 +57,4 @@
 ### Documentation
 
 * Update README ([c84cedc](https://github.com/FAZuH/lab-ops/commit/c84cedccc5708d25f278b5cea7f8fb2acfa710be))
-
-## 0.1.1 (2026-05-08)
-
-
-### Build System
-
-* Improve dev.sh ([f5a16ab](https://github.com/FAZuH/lab-ops/commit/f5a16ab387a52603ee738a7eb63fc65bfef56efb))
-
-
-### New Features
-
-* Add dockernatmap command ([fa64b74](https://github.com/FAZuH/lab-ops/commit/fa64b748f215149716bb0e72912badbc54980158))
 
