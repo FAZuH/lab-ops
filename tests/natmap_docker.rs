@@ -1,5 +1,5 @@
 #[cfg(feature = "docker-tests")]
-mod docker_tests {
+mod natmap_docker {
     use std::process::Command;
     use std::sync::Once;
 
