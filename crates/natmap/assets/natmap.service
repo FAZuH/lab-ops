@@ -5,7 +5,7 @@ Wants=docker.service network-online.target
 
 [Service]
 Type=simple
-ExecStart={binary} natmap daemon --state-dir {state_dir} --socket /run/natmap.sock --socket-group {group}
+ExecStart={binary} natmap daemon --state {state_dir} --socket /run/natmap.sock --socket-group {group}
 ExecReload={binary} natmap reload
 Restart=always
 RestartSec=5
