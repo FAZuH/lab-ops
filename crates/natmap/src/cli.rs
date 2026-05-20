@@ -3,24 +3,37 @@
 //! Defines the [`Cli`] struct and [`NatMapCommand`] / [`DockerCommand`] enums
 //! that are flattened into the top-level `lab-ops` CLI via clap.
 
+use std::path::PathBuf;
 use std::process::Command;
 
 use clap::Parser;
 use clap::Subcommand;
 use color_eyre::Result;
 
-use crate::command::*;
+use crate::command::add;
+use crate::command::handle_clear;
+use crate::command::handle_dnat;
+use crate::command::handle_hairpin;
+use crate::command::handle_list;
+use crate::command::handle_snat;
+use crate::command::remap;
+use crate::command::remove;
+use crate::consts::BIN;
+use crate::consts::DAEMON_SOCK;
+use crate::consts::PKG_NAME;
+use crate::consts::STATE;
+use crate::daemon::Daemon;
 
 /// CLI arguments for the `natmap` subcommand.
 #[derive(Parser, Debug)]
 #[command(
-    name = "natmap",
+    name = PKG_NAME,
     about = "Manage iptables NAT rules (static VMs & dynamic Docker)"
 )]
 pub struct Cli {
     /// Path to the daemon's Unix socket.
-    #[arg(long, default_value = "/run/natmap.sock", global = true)]
-    pub socket: String,
+    #[arg(long, default_value = DAEMON_SOCK, global = true)]
+    pub socket: PathBuf,
 
     /// Output results as JSON instead of formatted tables.
     #[arg(long, global = true)]
@@ -97,6 +110,9 @@ pub enum NatMapCommand {
         #[arg(value_name = "CONTAINER_ID")]
         container_id: Option<String>,
     },
+    /// Removes all managed NAT rules and resets daemon state.
+    #[command(name = "clear")]
+    Clear,
     /// Manages Docker container port mappings.
     #[command(name = "docker")]
     Docker {
@@ -113,23 +129,23 @@ pub enum NatMapCommand {
     #[command(name = "daemon")]
     Daemon {
         /// Path to the state JSON file.
-        #[arg(long, default_value = "/var/lib/natmap/state.json")]
-        state_dir: String,
+        #[arg(long, default_value = STATE)]
+        state: PathBuf,
         /// Path for the Unix socket.
-        #[arg(long, default_value = "/run/natmap.sock")]
-        socket: String,
+        #[arg(long, default_value = DAEMON_SOCK)]
+        socket: PathBuf,
         /// Unix group for socket access.
-        #[arg(long, default_value = "natmap")]
+        #[arg(long, default_value = PKG_NAME)]
         socket_group: String,
     },
     /// Installs the natmap daemon as a systemd service.
     #[command(name = "install")]
     Install {
         /// Unix group for daemon access.
-        #[arg(long, default_value = "natmap")]
+        #[arg(long, default_value = PKG_NAME)]
         group: String,
         /// Path to the binary to install.
-        #[arg(long, default_value = "/usr/local/bin/lab-ops")]
+        #[arg(long, default_value = BIN)]
         binary: String,
     },
 }
@@ -211,6 +227,9 @@ pub async fn run_cli_with_args(cli: Cli) -> Result<()> {
         NatMapCommand::List { container_id } => {
             handle_list(&socket, container_id, json).await?;
         }
+        NatMapCommand::Clear => {
+            handle_clear(&socket).await?;
+        }
         NatMapCommand::Docker { cmd } => match cmd {
             DockerCommand::Add {
                 container_id,
@@ -249,11 +268,14 @@ pub async fn run_cli_with_args(cli: Cli) -> Result<()> {
             }
         }
         NatMapCommand::Daemon {
-            state_dir,
+            state,
             socket,
             socket_group,
         } => {
-            crate::daemon::run_daemon_with_paths(&socket, &state_dir, &socket_group).await?;
+            Daemon::new(socket, state, socket_group)
+                .await?
+                .run()
+                .await?;
         }
         NatMapCommand::Install { binary, group } => {
             crate::install::install_systemd(&binary, &group)?;

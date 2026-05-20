@@ -5,20 +5,21 @@
 //! natmap rules separate from Docker's own rules and ensures clean crash
 //! recovery via chain flush.
 
+use std::ffi::OsStr;
 use std::process::Command;
 
 use color_eyre::Result;
+use color_eyre::eyre::bail;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
 
-use crate::models::ActivePortMapping;
 use crate::models::DnatConfig;
+use crate::models::DockerPortMap;
 use crate::models::HairpinConfig;
 use crate::models::SnatConfig;
 
-const DOCKER_USER_CHAIN: &str = "DOCKER-USER";
-const NATMAP_CHAIN: &str = "NATMAP";
+const NATMAP: &str = "NATMAP";
 
 /// Manages the lifecycle of iptables rules used by natmap.
 ///
@@ -42,51 +43,37 @@ impl IptablesManager {
     /// Creates the `NATMAP` chains and inserts jump rules.
     ///
     /// Operates on both `iptables` (IPv4) and `ip6tables` (IPv6).
-    /// Safe to call multiple times — existing chains and rules are
-    /// not duplicated.
+    /// This method is idempotent.
     pub fn setup(&self) -> Result<()> {
         info!("Setting up iptables chains and jumps");
 
         for &cmd in &["iptables", "ip6tables"] {
             // Verify DOCKER-USER exists (it should, Docker makes it). Create if missing.
-            if !self.chain_exists(cmd, "filter", DOCKER_USER_CHAIN) {
-                self.run(cmd, &["-t", "filter", "-N", DOCKER_USER_CHAIN], true)?;
-                self.run(
-                    cmd,
-                    &["-t", "filter", "-I", "FORWARD", "-j", DOCKER_USER_CHAIN],
-                    true,
-                )?;
+            if !self.chain_exists(cmd, "filter", "DOCKER-USER") {
+                // create new DOCKER-USER chain
+                self.run_success(cmd, ["-t", "filter", "-N", "DOCKER-USER"])?;
+                // insert a jump rule on first position of FORWARD chain to DOCKER-USER
+                self.run_success(cmd, ["-t", "filter", "-I", "FORWARD", "-j", "DOCKER-USER"])?;
             }
 
             // Create NATMAP subchain in nat table (DNAT rules live here)
-            if !self.chain_exists(cmd, "nat", NATMAP_CHAIN) {
-                self.run(cmd, &["-t", "nat", "-N", NATMAP_CHAIN], true)?;
+            if !self.chain_exists(cmd, "nat", NATMAP) {
+                self.run_success(cmd, ["-t", "nat", "-N", NATMAP])?;
             }
 
             // Create NATMAP subchain in filter table (FORWARD ACCEPT rules live here)
-            if !self.chain_exists(cmd, "filter", NATMAP_CHAIN) {
-                self.run(cmd, &["-t", "filter", "-N", NATMAP_CHAIN], true)?;
+            if !self.chain_exists(cmd, "filter", NATMAP) {
+                self.run_success(cmd, ["-t", "filter", "-N", NATMAP])?;
             }
 
             // Jump from DOCKER-USER to NATMAP in filter table (if not exists)
-            if !self.rule_exists(
-                cmd,
-                &["-t", "filter", "-C", DOCKER_USER_CHAIN, "-j", NATMAP_CHAIN],
-            ) {
-                self.run(
-                    cmd,
-                    &["-t", "filter", "-I", DOCKER_USER_CHAIN, "-j", NATMAP_CHAIN],
-                    true,
-                )?;
+            if !self.rule_exists(cmd, &["-t", "filter", "-C", "DOCKER-USER", "-j", NATMAP]) {
+                self.run(cmd, ["-t", "filter", "-I", "DOCKER-USER", "-j", NATMAP])?;
             }
 
             // Jump from PREROUTING to NATMAP in nat table (if not exists)
-            if !self.rule_exists(cmd, &["-t", "nat", "-C", "PREROUTING", "-j", NATMAP_CHAIN]) {
-                self.run(
-                    cmd,
-                    &["-t", "nat", "-I", "PREROUTING", "-j", NATMAP_CHAIN],
-                    true,
-                )?;
+            if !self.rule_exists(cmd, &["-t", "nat", "-C", "PREROUTING", "-j", NATMAP]) {
+                self.run_success(cmd, ["-t", "nat", "-I", "PREROUTING", "-j", NATMAP])?;
             }
         }
 
@@ -94,26 +81,27 @@ impl IptablesManager {
     }
 
     /// Installs DNAT, FORWARD ACCEPT, MASQUERADE, and OUTPUT DNAT rules for a Docker mapping.
-    pub fn install_mapping(&self, mapping: &ActivePortMapping) -> Result<()> {
-        debug!("Installing mapping: {:?}", mapping);
-        let cmd = self.cmd_for(mapping.request.is_ipv6());
+    pub fn install_dockermap(&self, map: &DockerPortMap) -> Result<()> {
+        debug!("Installing mapping: {map:?}");
+        let cmd = self.cmd_for(map.request.is_ipv6());
+        let req = &map.request;
 
-        let host_ip = mapping.request.host_addr.ip();
-        let host_port = mapping.request.host_addr.port().to_string();
-        let container_addr = mapping.request.container_addr.to_string();
-        let container_ip = mapping.request.container_addr.ip().to_string();
-        let container_port = mapping.request.container_addr.port().to_string();
-        let proto = mapping.request.proto.to_string();
-        let comment = &mapping.rule_comment;
+        let host_ip = req.host_addr.ip();
+        let host_port = req.host_addr.port().to_string();
+        let container_addr = req.container_addr.to_string();
+        let container_ip = req.container_addr.ip().to_string();
+        let container_port = req.container_addr.port().to_string();
+        let proto = req.proto.to_string();
+        let comment = &map.rule_comment;
 
-        // 1. DNAT rule (nat/PREROUTING via NATMAP)
+        // 1. DNAT rule via nat NATMAP
         self.run(
             cmd,
-            &[
+            [
                 "-t",
                 "nat",
                 "-A",
-                NATMAP_CHAIN,
+                NATMAP,
                 "-p",
                 &proto,
                 "--dport",
@@ -127,17 +115,16 @@ impl IptablesManager {
                 "--comment",
                 comment,
             ],
-            true,
         )?;
 
-        // 2. FORWARD ACCEPT rule in filter/NATMAP
+        // 2. FORWARD ACCEPT rule in filter NATMAP
         self.run(
             cmd,
-            &[
+            [
                 "-t",
                 "filter",
                 "-A",
-                NATMAP_CHAIN,
+                NATMAP,
                 "-d",
                 &container_ip,
                 "-p",
@@ -151,13 +138,12 @@ impl IptablesManager {
                 "--comment",
                 comment,
             ],
-            true,
         )?;
 
         // 3. Masquerade (hairpin NAT)
         self.run(
             cmd,
-            &[
+            [
                 "-t",
                 "nat",
                 "-A",
@@ -177,24 +163,23 @@ impl IptablesManager {
                 "--comment",
                 comment,
             ],
-            true,
         )?;
 
         // 4. OUTPUT DNAT rule — always needed for locally-generated traffic.
         //    PREROUTING only catches forwarded/ingress traffic; locally-generated
         //    packets (curl localhost, curl <host-ip>) go through OUTPUT.
         let output_dst = if host_ip.is_unspecified() {
-            if mapping.request.is_ipv6() {
+            if map.request.is_ipv6() {
                 "::1"
             } else {
                 "127.0.0.1"
             }
         } else {
-            &mapping.request.host_addr.ip().to_string()
+            &map.request.host_addr.ip().to_string()
         };
         self.run(
             cmd,
-            &[
+            [
                 "-t",
                 "nat",
                 "-A",
@@ -214,31 +199,7 @@ impl IptablesManager {
                 "--comment",
                 comment,
             ],
-            true,
         )?;
-
-        Ok(())
-    }
-
-    /// Removes all iptables rules associated with a Docker mapping by its rule comment.
-    pub fn remove_mapping(&self, mapping: &ActivePortMapping) -> Result<()> {
-        debug!("Removing mapping: {:?}", mapping);
-        self.remove_by_comment(&mapping.rule_comment, mapping.request.is_ipv6())?;
-        Ok(())
-    }
-
-    /// Deletes rules matching the comment string across all relevant tables and chains.
-    fn remove_by_comment(&self, comment: &str, is_ipv6: bool) -> Result<()> {
-        let cmd = self.cmd_for(is_ipv6);
-
-        // Delete from NATMAP in nat table
-        self.delete_all_matching(cmd, "nat", NATMAP_CHAIN, comment)?;
-        // Delete from NATMAP in filter table
-        self.delete_all_matching(cmd, "filter", NATMAP_CHAIN, comment)?;
-        // Delete from POSTROUTING in nat table
-        self.delete_all_matching(cmd, "nat", "POSTROUTING", comment)?;
-        // Delete from OUTPUT in nat table (localhost DNAT)
-        self.delete_all_matching(cmd, "nat", "OUTPUT", comment)?;
 
         Ok(())
     }
@@ -252,10 +213,10 @@ impl IptablesManager {
         info!("Flushing all NATMAP iptables rules");
 
         for &cmd in &["iptables", "ip6tables"] {
-            let _ = self.flush_chain(cmd, "nat", NATMAP_CHAIN);
-            let _ = self.flush_chain(cmd, "filter", NATMAP_CHAIN);
-            let _ = self.delete_all_natmap_comments(cmd, "nat", "POSTROUTING");
-            let _ = self.delete_all_natmap_comments(cmd, "nat", "OUTPUT");
+            let _ = self.flush_chain(cmd, "nat", NATMAP);
+            let _ = self.flush_chain(cmd, "filter", NATMAP);
+            let _ = self.delete_all_natmap(cmd, "nat", "POSTROUTING");
+            let _ = self.delete_all_natmap(cmd, "nat", "OUTPUT");
         }
         Ok(())
     }
@@ -282,12 +243,12 @@ impl IptablesManager {
             format!("{}:{}", config.int_ip, config.ports)
         };
         pre_args.extend(vec!["-j", "DNAT", "--to-destination", &dest]);
-        self.run("iptables", &pre_args.to_vec(), true)?;
+        self.run_success("iptables", &pre_args)?;
 
         let mut fwd_args = vec!["-A", "FORWARD", "-p", proto, "-d", &config.int_ip];
         fwd_args.extend(port_args);
         fwd_args.extend(vec!["-j", "ACCEPT"]);
-        self.run("iptables", &fwd_args.to_vec(), true)?;
+        self.run_success("iptables", &fwd_args)?;
         Ok(())
     }
 
@@ -313,12 +274,12 @@ impl IptablesManager {
             format!("{}:{}", config.int_ip, config.ports)
         };
         pre_args.extend(vec!["-j", "DNAT", "--to-destination", &dest]);
-        let _ = self.run("iptables", &pre_args.to_vec(), false);
+        let _ = self.run("iptables", &pre_args);
 
         let mut fwd_args = vec!["-D", "FORWARD", "-p", proto, "-d", &config.int_ip];
         fwd_args.extend(port_args);
         fwd_args.extend(vec!["-j", "ACCEPT"]);
-        let _ = self.run("iptables", &fwd_args.to_vec(), false);
+        let _ = self.run("iptables", &fwd_args);
         Ok(())
     }
 
@@ -338,7 +299,7 @@ impl IptablesManager {
             "--to-source",
             &config.ext_ip,
         ];
-        self.run("iptables", &args, true)?;
+        self.run_success("iptables", &args)?;
         Ok(())
     }
 
@@ -358,7 +319,7 @@ impl IptablesManager {
             "--to-source",
             &config.ext_ip,
         ];
-        let _ = self.run("iptables", &args, false);
+        let _ = self.run("iptables", &args);
         Ok(())
     }
 
@@ -386,7 +347,7 @@ impl IptablesManager {
         ];
         pre_args.extend(port_args.clone());
         pre_args.extend(vec!["-j", "DNAT", "--to-destination", &config.int_ip]);
-        self.run("iptables", &pre_args.to_vec(), true)?;
+        self.run_success("iptables", &pre_args)?;
 
         let mut post_args = vec![
             "-t",
@@ -402,7 +363,7 @@ impl IptablesManager {
         ];
         post_args.extend(port_args);
         post_args.extend(vec!["-j", "MASQUERADE"]);
-        self.run("iptables", &post_args.to_vec(), true)?;
+        self.run_success("iptables", &post_args)?;
         Ok(())
     }
 
@@ -430,7 +391,7 @@ impl IptablesManager {
         ];
         pre_args.extend(port_args.clone());
         pre_args.extend(vec!["-j", "DNAT", "--to-destination", &config.int_ip]);
-        let _ = self.run("iptables", &pre_args.to_vec(), false);
+        let _ = self.run("iptables", &pre_args);
 
         let mut post_args = vec![
             "-t",
@@ -446,26 +407,19 @@ impl IptablesManager {
         ];
         post_args.extend(port_args);
         post_args.extend(vec!["-j", "MASQUERADE"]);
-        let _ = self.run("iptables", &post_args.to_vec(), false);
-        Ok(())
-    }
-
-    /// Flushes and deletes a specific chain in a given table.
-    fn flush_chain(&self, cmd: &str, table: &str, chain: &str) -> Result<()> {
-        let _ = self.run(cmd, &["-t", table, "-F", chain], false);
-        let _ = self.run(cmd, &["-t", table, "-X", chain], false);
+        let _ = self.run("iptables", &post_args);
         Ok(())
     }
 
     /// Deletes all rules in a chain whose comment starts with "natmap:".
-    fn delete_all_natmap_comments(&self, cmd: &str, table: &str, chain: &str) -> Result<()> {
+    fn delete_all_natmap(&self, cmd: &str, table: &str, chain: &str) -> Result<()> {
         loop {
             let rules = self.get_rules(cmd, table, chain)?;
             let mut deleted = false;
             for (line_num, rule) in rules.iter().enumerate() {
                 if rule.contains("--comment \"natmap:") || rule.contains("--comment natmap:") {
                     let num = (line_num + 1).to_string();
-                    self.run(cmd, &["-t", table, "-D", chain, &num], false)?;
+                    self.run(cmd, ["-t", table, "-D", chain, &num])?;
                     deleted = true;
                     break;
                 }
@@ -477,6 +431,38 @@ impl IptablesManager {
         Ok(())
     }
 
+    /// Removes all iptables rules associated with a Docker mapping by its rule comment.
+    pub fn remove_mapping(&self, map: &DockerPortMap) -> Result<()> {
+        debug!("Removing mapping: {map:?}");
+        self.remove_by_comment(&map.rule_comment, map.request.is_ipv6())?;
+        Ok(())
+    }
+
+    /// Deletes rules matching the comment string across all relevant tables and chains.
+    fn remove_by_comment(&self, comment: &str, is_ipv6: bool) -> Result<()> {
+        let cmd = self.cmd_for(is_ipv6);
+
+        // Delete from NATMAP in nat table
+        self.delete_all_matching(cmd, "nat", NATMAP, comment)?;
+        // Delete from NATMAP in filter table
+        self.delete_all_matching(cmd, "filter", NATMAP, comment)?;
+        // Delete from POSTROUTING in nat table
+        self.delete_all_matching(cmd, "nat", "POSTROUTING", comment)?;
+        // Delete from OUTPUT in nat table (localhost DNAT)
+        self.delete_all_matching(cmd, "nat", "OUTPUT", comment)?;
+
+        Ok(())
+    }
+
+    /// Flushes and deletes a specific chain in a given table.
+    fn flush_chain(&self, cmd: &str, table: &str, chain: &str) -> Result<()> {
+        // flush chain
+        let _ = self.run(cmd, ["-t", table, "-F", chain]);
+        // delete chain
+        let _ = self.run(cmd, ["-t", table, "-X", chain]);
+        Ok(())
+    }
+
     // --- Helper functions ---
 
     /// Returns `"ip6tables"` or `"iptables"` based on address family.
@@ -484,30 +470,51 @@ impl IptablesManager {
         if is_ipv6 { "ip6tables" } else { "iptables" }
     }
 
-    /// Executes an iptables command. If `fail_on_error` is true, returns an error on failure.
-    fn run(&self, cmd: &str, args: &[&str], fail_on_error: bool) -> Result<bool> {
-        let out = Command::new(cmd).args(args).output()?;
+    /// Runs a command. Fails and logs an error if the command returned a non-zero exit status.
+    fn run_success(
+        &self,
+        program: impl AsRef<OsStr>,
+        args: impl IntoIterator<Item = impl AsRef<OsStr>>,
+    ) -> Result<std::process::Output> {
+        let args: Vec<_> = args.into_iter().collect();
+        let out = self.run(&program, &args)?;
         if out.status.success() {
-            Ok(true)
+            Ok(out)
         } else {
             let err = String::from_utf8_lossy(&out.stderr);
-            if fail_on_error {
-                error!("{} {} failed: {}", cmd, args.join(" "), err);
-                color_eyre::eyre::bail!("{} failed: {}", cmd, err);
-            }
-            Ok(false)
+            let args_str = args
+                .iter()
+                .map(|a| a.as_ref().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let program = program.as_ref().to_string_lossy();
+            error!("{program} {args_str} failed: {err}");
+            bail!("{program} failed: {err}");
         }
+    }
+
+    /// Runs a command.
+    fn run(
+        &self,
+        program: impl AsRef<OsStr>,
+        args: impl IntoIterator<Item = impl AsRef<OsStr>>,
+    ) -> Result<std::process::Output> {
+        Ok(Command::new(program.as_ref()).args(args).output()?)
     }
 
     /// Checks whether a chain exists in the given table.
     fn chain_exists(&self, cmd: &str, table: &str, chain: &str) -> bool {
-        self.run(cmd, &["-t", table, "-L", chain, "-n"], false)
+        self.run(cmd, ["-t", table, "-L", chain, "-n"])
+            .map(|o| o.status.success())
             .unwrap_or(false)
     }
 
     /// Checks whether a specific iptables rule already exists.
     fn rule_exists(&self, cmd: &str, args: &[&str]) -> bool {
-        self.run(cmd, args, false).unwrap_or(false)
+        // cmd_success logs on fail
+        self.run(cmd, args)
+            .map(|o| o.status.success())
+            .unwrap_or(false)
     }
 
     /// Deletes all rules in a chain whose comment matches the given string.
@@ -518,18 +525,17 @@ impl IptablesManager {
         chain: &str,
         comment: &str,
     ) -> Result<()> {
-        // This is a simplistic approach: loop finding and deleting using `iptables-save` logic or repeated `-D`
-        // We will read rules and find line numbers.
+        // Rules and delete by line numbers.
         loop {
             let rules = self.get_rules(cmd, table, chain)?;
             let mut deleted = false;
             for (line_num, rule) in rules.iter().enumerate() {
-                if rule.contains(&format!("--comment \"{}\"", comment))
-                    || rule.contains(&format!("--comment {}", comment))
+                if rule.contains(&format!("--comment \"{comment}\""))
+                    || rule.contains(&format!("--comment {comment}"))
                 {
                     // Delete by line number from bottom up (or just one by one)
                     let num = (line_num + 1).to_string();
-                    self.run(cmd, &["-t", table, "-D", chain, &num], false)?;
+                    self.run_success(cmd, ["-t", table, "-D", chain, &num])?;
                     deleted = true;
                     break; // Start over since line numbers changed
                 }
@@ -543,13 +549,12 @@ impl IptablesManager {
 
     /// Returns the list of active rules in a chain (lines starting with `-A` or `-I`).
     fn get_rules(&self, cmd: &str, table: &str, chain: &str) -> Result<Vec<String>> {
-        let out = Command::new(cmd)
-            .args(["-t", table, "-S", chain])
-            .output()?;
+        // -S -- short for --list-rules
+        let out = self.run(cmd, ["-t", table, "-S", chain])?;
 
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        // filter out the chain declaration itself (-N or -P)
-        let rules: Vec<String> = stdout
+        // Get only -A (append) and -I (insert)
+        // Ignore others, such as chain declarations
+        let rules = String::from_utf8_lossy(&out.stdout)
             .lines()
             .filter(|l| l.starts_with("-A ") || l.starts_with("-I "))
             .map(|l| l.to_string())

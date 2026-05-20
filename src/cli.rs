@@ -9,6 +9,8 @@ pub const CMD_CF2ANSIBLE: &str = "cf2ansible";
 pub const CMD_DOCKERNET: &str = "dockernet";
 /// Subcommand name for the NAT mapping tool.
 pub const CMD_NATMAP: &str = "natmap";
+/// Subcommand name for the service discovery daemon.
+pub const CMD_AUTO_DISCOVER: &str = "auto-discover";
 
 /// Top-level CLI argument parser for `lab-ops`.
 #[derive(Parser)]
@@ -37,5 +39,12 @@ pub enum Command {
     NatMap {
         #[command(flatten)]
         args: natmap::cli::Cli,
+    },
+    /// Service discovery daemon: watches Docker events, manages port forwarding,
+    /// registers services with Consul, and generates nginx configs.
+    #[command(name = CMD_AUTO_DISCOVER)]
+    AutoDiscover {
+        #[command(flatten)]
+        args: auto_discover::cli::Cli,
     },
 }

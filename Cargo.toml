@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/natmap"]
+members = ["crates/natmap", "crates/auto-discover"]
 
 [package]
 name = "lab-ops"
@@ -16,4 +16,10 @@ bollard = "0.21.0"
 color-eyre = "0.6.5"
 comfy-table = "7.2.2"
 tokio = { version = "1.52.2", features = ["rt"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 natmap = { path = "./crates/natmap" }
+auto-discover = { path = "./crates/auto-discover" }
+
+[lints.clippy]
+uninlined_format_args = "warn"
+new_without_default = "allow"

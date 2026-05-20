@@ -13,8 +13,10 @@
 //! The daemon exposes an HTTP API over a Unix socket. CLI commands in the
 //! parent crate communicate with it through [`cli::run_cli_with_args`].
 
+pub mod api;
 pub mod cli;
 pub mod command;
+pub mod consts;
 pub mod daemon;
 pub mod docker;
 pub mod install;

@@ -8,7 +8,7 @@ impl TestOutput {
     fn new(file: &str) -> Self {
         let output = Command::new(env!("CARGO_BIN_EXE_lab-ops"))
             .arg(lab_ops::cli::CMD_CF2ANSIBLE)
-            .arg(format!("tests/{}", file))
+            .arg(format!("tests/{file}"))
             .output()
             .expect("Failed to run binary");
 
@@ -48,7 +48,7 @@ impl TestOutput {
     }
 
     fn assert_type_count(&self, rtype: &str, expected: usize) {
-        let needle = format!("\n    type: {}\n", rtype);
+        let needle = format!("\n    type: {rtype}\n");
         assert_eq!(
             self.count(&needle),
             expected,
@@ -69,7 +69,7 @@ fn domain0() {
     t.assert_type_count("AAAA", 1);
     // A and AAAA must be counted separately since "type: A" would also match "type: AAAA"
     let a_count = t.count("\n    type: A\n");
-    assert_eq!(a_count, 3, "Expected 3 A records, got {}", a_count);
+    assert_eq!(a_count, 3, "Expected 3 A records, got {a_count}");
     t.assert_type_count("CNAME", 13);
     t.assert_type_count("MX", 1);
     t.assert_type_count("SRV", 12);
@@ -159,11 +159,7 @@ fn all_files_no_data_block() {
         "domain3.com.txt",
     ] {
         let t = TestOutput::new(file);
-        assert!(
-            !t.contains("data:"),
-            "{} should not contain data block",
-            file
-        );
+        assert!(!t.contains("data:"), "{file} should not contain data block");
     }
 }
 
@@ -180,8 +176,7 @@ fn all_files_api_token_in_every_task() {
         let token_count = t.count("api_token:");
         assert_eq!(
             token_count, task_count,
-            "{} should have api_token in every task ({} tasks, {} tokens)",
-            file, task_count, token_count
+            "{file} should have api_token in every task ({task_count} tasks, {token_count} tokens)"
         );
     }
 }

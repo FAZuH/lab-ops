@@ -13,18 +13,30 @@ lab-ops/
 │       ├── cf2ansible.rs         # DNS zone → Ansible converter
 │       └── dockernet.rs          # Docker network inspector
 ├── crates/
-│   └── natmap/                   # NAT management crate
+│   ├── natmap/                   # NAT management crate
+│   │   └── src/
+│   │       ├── lib.rs            # Module declarations
+│   │       ├── cli.rs            # NatMapCommand enum + CLI dispatch
+│   │       ├── command.rs        # Handler functions for all subcommands
+│   │       ├── daemon.rs         # Axum API server, state management
+│   │       ├── models.rs         # Data types (configs, requests, state)
+│   │       ├── iptables.rs       # IptablesManager (rule CRUD)
+│   │       ├── port_allocator.rs # PortAllocator (socket reservation)
+│   │       ├── docker.rs         # Docker API client (bollard)
+│   │       ├── install.rs        # Systemd service installation
+│   │       └── utils.rs          # HTTP client for daemon communication
+│   └── auto-discover/            # Service discovery daemon
 │       └── src/
 │           ├── lib.rs            # Module declarations
-│           ├── cli.rs            # NatMapCommand enum + CLI dispatch
-│           ├── command.rs        # Handler functions for all subcommands
-│           ├── daemon.rs         # Axum API server, state management
-│           ├── models.rs         # Data types (configs, requests, state)
-│           ├── iptables.rs       # IptablesManager (rule CRUD)
-│           ├── port_allocator.rs # PortAllocator (socket reservation)
-│           ├── docker.rs         # Docker API client (bollard)
-│           ├── install.rs        # Systemd service installation
-│           └── utils.rs          # HTTP client for daemon communication
+│           ├── cli.rs            # CLI definitions and dispatch
+│           ├── config.rs         # YAML config parsing
+│           ├── consul.rs         # Consul service registration
+│           ├── daemon.rs         # Core discovery daemon
+│           ├── docker.rs         # Docker API client
+│           ├── forwarding.rs     # Proxy-side DNAT rule sync
+│           ├── natmap.rs         # Natmap CLI client
+│           ├── nginx_daemon.rs   # Nginx config generation watcher
+│           └── ports.rs          # Port state management
 ├── tests/                        # Integration tests
 │   ├── integration.rs            # cf2ansible integration tests
 │   └── natmap_docker.rs          # Docker-based NAT integration tests

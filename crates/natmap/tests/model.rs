@@ -2,15 +2,15 @@ use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::str::FromStr;
 
-use natmap::models::ActivePortMapping;
-use natmap::models::AddMappingRequest;
-use natmap::models::PortMappingRequest;
+use natmap::models::DockerAddMapRequest;
+use natmap::models::DockerPortMap;
+use natmap::models::DockerPortMapRequest;
 use natmap::models::TransportProtocol;
 
 #[test]
 fn add_mapping_request_defaults() {
     let json = r#"{"host_port": 8080, "container_port": 80}"#;
-    let req: AddMappingRequest = serde_json::from_str(json).unwrap();
+    let req: DockerAddMapRequest = serde_json::from_str(json).unwrap();
     assert_eq!(req.host_ip, "0.0.0.0");
     assert_eq!(req.host_port, 8080);
     assert_eq!(req.container_port, 80);
@@ -21,7 +21,7 @@ fn add_mapping_request_defaults() {
 fn add_mapping_request_full_fields() {
     let json =
         r#"{"host_ip": "127.0.0.1", "host_port": 3000, "container_port": 3000, "proto": "udp"}"#;
-    let req: AddMappingRequest = serde_json::from_str(json).unwrap();
+    let req: DockerAddMapRequest = serde_json::from_str(json).unwrap();
     assert_eq!(req.host_ip, "127.0.0.1");
     assert_eq!(req.host_port, 3000);
     assert_eq!(req.container_port, 3000);
@@ -30,7 +30,7 @@ fn add_mapping_request_full_fields() {
 
 #[test]
 fn add_mapping_request_serialize_defaults() {
-    let req = AddMappingRequest {
+    let req = DockerAddMapRequest {
         host_ip: "0.0.0.0".into(),
         host_port: 443,
         container_port: 443,
@@ -49,14 +49,14 @@ fn transport_protocol_display() {
 
 #[test]
 fn port_mapping_request_is_ipv6() {
-    let ipv4 = PortMappingRequest {
+    let ipv4 = DockerPortMapRequest {
         host_addr: SocketAddr::new(IpAddr::from_str("0.0.0.0").unwrap(), 80),
         container_addr: SocketAddr::new(IpAddr::from_str("172.17.0.2").unwrap(), 80),
         proto: TransportProtocol::Tcp,
     };
     assert!(!ipv4.is_ipv6());
 
-    let ipv6 = PortMappingRequest {
+    let ipv6 = DockerPortMapRequest {
         host_addr: SocketAddr::new(IpAddr::from_str("::").unwrap(), 80),
         container_addr: SocketAddr::new(IpAddr::from_str("172.17.0.2").unwrap(), 80),
         proto: TransportProtocol::Tcp,
@@ -66,12 +66,12 @@ fn port_mapping_request_is_ipv6() {
 
 #[test]
 fn active_port_mapping_rule_comment_format() {
-    let req = PortMappingRequest {
+    let req = DockerPortMapRequest {
         host_addr: SocketAddr::new(IpAddr::from_str("0.0.0.0").unwrap(), 8080),
         container_addr: SocketAddr::new(IpAddr::from_str("172.17.0.2").unwrap(), 80),
         proto: TransportProtocol::Tcp,
     };
-    let mapping = ActivePortMapping::new(1, req, "abc123".into(), "my-nginx".into());
+    let mapping = DockerPortMap::new(1, req, "abc123".into(), "my-nginx".into());
     assert_eq!(mapping.rule_comment, "natmap:abc123:8080");
     assert_eq!(mapping.container_id, "abc123");
     assert_eq!(mapping.container_name, "my-nginx");

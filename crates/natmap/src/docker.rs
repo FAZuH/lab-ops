@@ -8,9 +8,8 @@ use bollard::Docker;
 use color_eyre::Result;
 use tracing::debug;
 
-use crate::models::ActivePortMapping;
-use crate::models::PortMappingRequest;
-use crate::models::TransportProtocol;
+use crate::models::DockerPortMap;
+use crate::models::DockerPortMapRequest;
 
 /// Connects to the local Docker daemon via its default Unix socket.
 pub fn connect() -> Result<Docker> {
@@ -20,112 +19,84 @@ pub fn connect() -> Result<Docker> {
 /// Discovers all published port mappings for a container.
 ///
 /// Inspects the container's network settings and parses its exposed ports
-/// into [`ActivePortMapping`] entries. Handles both IPv4 and IPv6 host
+/// into [`DockerPortMap`] entries. Handles both IPv4 and IPv6 host
 /// bindings when the host IP is unspecified (`0.0.0.0`).
-pub async fn get_port_mappings(
-    docker: &Docker,
-    container_id: &str,
-) -> Result<Vec<ActivePortMapping>> {
-    let inspect = docker.inspect_container(container_id, None).await?;
-    let container_name = inspect
+pub async fn get_port_mappings(docker: &Docker, c_id: &str) -> Result<Vec<DockerPortMap>> {
+    let inspect = docker.inspect_container(c_id, None).await?;
+    let c_name = inspect
         .name
         .unwrap_or_else(|| "unknown".to_string())
         .trim_start_matches('/')
         .to_string();
 
-    let mut mappings = Vec::new();
-
-    let network_settings = match inspect.network_settings {
-        Some(ns) => ns,
-        None => return Ok(mappings),
+    let Some(network_settings) = inspect.network_settings else {
+        return Ok(vec![]);
     };
 
     // Find the primary container IP address. We check networks attached.
-    let mut container_ip = None;
-    if let Some(networks) = &network_settings.networks {
-        for net in networks.values() {
-            if let Some(ip) = &net.ip_address
-                && !ip.is_empty()
-                && let Ok(addr) = IpAddr::from_str(ip)
-            {
-                container_ip = Some(addr);
-                break;
-            }
-        }
-    }
-
-    let container_ip = match container_ip {
-        Some(ip) => ip,
-        None => {
-            debug!(
-                "Container {} has no IP address, skipping ports",
-                container_id
-            );
-            return Ok(mappings);
-        }
+    let Some(c_ip) = network_settings.networks.as_ref().and_then(|networks| {
+        networks.values().find_map(|net| {
+            net.ip_address
+                .as_ref()
+                .filter(|ip| !ip.is_empty())
+                .and_then(|ip| IpAddr::from_str(ip).ok())
+        })
+    }) else {
+        debug!("Container {c_id} has no IP address, skipping ports");
+        return Ok(vec![]);
     };
 
-    let ports = match network_settings.ports {
-        Some(p) => p,
-        None => return Ok(mappings),
+    let Some(ports) = network_settings.ports else {
+        return Ok(vec![]);
     };
 
+    let mut mappings = vec![];
     for (port_proto, bindings) in ports {
-        let bindings = match bindings {
-            Some(b) => b,
-            None => continue,
-        };
+        let Some(bindings) = bindings else { continue };
 
         // Parse container port and proto, e.g., "80/tcp"
         let parts: Vec<&str> = port_proto.split('/').collect();
         if parts.len() != 2 {
+            // this shouldn't happen
             continue;
         }
-        let c_port = match u16::from_str(parts[0]) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        let proto = match parts[1].to_lowercase().as_str() {
-            "tcp" => TransportProtocol::Tcp,
-            "udp" => TransportProtocol::Udp,
-            _ => continue,
+
+        let Ok(c_port) = u16::from_str(parts[0]) else {
+            continue;
         };
 
-        let container_addr = SocketAddr::new(container_ip, c_port);
+        let Ok(proto) = parts[1].to_lowercase().try_into() else {
+            continue;
+        };
 
-        for binding in bindings {
-            let host_port_str = binding.host_port.unwrap_or_default();
-            let host_ip_str = binding.host_ip.unwrap_or_default();
+        let container_addr = SocketAddr::new(c_ip, c_port);
 
-            // Ignore ranges for now or parse the first port in range
-            let host_port =
-                match u16::from_str(host_port_str.split('-').next().unwrap_or(&host_port_str)) {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                };
-
-            let mut add_mapping = |ip_str: &str| {
-                if let Ok(host_ip) = IpAddr::from_str(ip_str) {
-                    let req = PortMappingRequest {
-                        host_addr: SocketAddr::new(host_ip, host_port),
-                        container_addr,
-                        proto,
-                    };
-                    mappings.push(ActivePortMapping::new(
-                        0,
-                        req,
-                        container_id.to_string(),
-                        container_name.clone(),
-                    ));
-                }
+        for bind in bindings {
+            let Some(host_port) = bind
+                .host_port
+                .as_deref()
+                // Ignore ranges for now or parse the first port in range
+                .and_then(|s| s.split('-').next())
+                .and_then(|s| s.parse::<u16>().ok())
+            else {
+                continue;
             };
 
-            if host_ip_str.is_empty() || host_ip_str == "0.0.0.0" {
-                add_mapping("0.0.0.0");
-                add_mapping("::"); // Add IPv6 as well mirroring Docker behavior
+            let host_ip_str = bind.host_ip.as_deref().unwrap_or_default();
+            let ips: &[&str] = if host_ip_str.is_empty() || host_ip_str == "0.0.0.0" {
+                &["0.0.0.0", "::"]
             } else {
-                add_mapping(&host_ip_str);
-            }
+                &[host_ip_str]
+            };
+            mappings.extend(ips.iter().filter_map(|ip| {
+                let host_ip = IpAddr::from_str(ip).ok()?;
+                let req = DockerPortMapRequest {
+                    host_addr: SocketAddr::new(host_ip, host_port),
+                    container_addr,
+                    proto,
+                };
+                Some(DockerPortMap::new(0, req, c_id.to_string(), c_name.clone()))
+            }));
         }
     }
 

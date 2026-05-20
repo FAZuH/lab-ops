@@ -12,12 +12,13 @@ Without port reservation, `natmap` only creates iptables rules to redirect traff
 
 ## How It Works
 
-The `PortAllocator` struct maintains a `HashMap<String, TcpListener>` keyed by `"{ip}:{port}"`. When a rule is added that needs a port reservation (DNAT, hairpin, Docker mapping):
+The `PortAllocator` struct maintains a `HashMap<SocketAddr, TcpListener>` keyed by `SocketAddr`. When a rule is added that needs a port reservation (DNAT, hairpin, Docker mapping):
 
-1. `TcpListener::bind("0.0.0.0:{port}")` is called
-2. The kernel reserves the port, preventing any other process from binding to it
-3. The `TcpListener` is stored in the HashMap (keeping the reservation alive)
-4. iptables rules are then installed (redirecting traffic away from the bound socket)
+1. A raw TCP socket is created and configured with the `IP_FREEBIND` (Linux) socket option
+2. The socket is bound to the exact `{ext_ip}:{port}` using `TcpListener::bind()`
+3. The kernel reserves the port, preventing any other process from binding to it
+4. The `TcpListener` is stored in the HashMap (keeping the reservation alive)
+5. iptables rules are then installed (redirecting traffic away from the bound socket)
 
 When a rule is removed:
 
@@ -25,16 +26,16 @@ When a rule is removed:
 2. The `TcpListener` entry is removed from the HashMap
 3. Rust drops the `TcpListener`, which closes the socket and releases the port
 
-## Why 0.0.0.0?
+## Why IP_FREEBIND?
 
-The port is always bound to `0.0.0.0` regardless of the external IP in the DNAT rule. This is because:
-- The external IP may not be configured on the local machine (it could be a floating IP or Tailscale IP)
-- Binding to `0.0.0.0` reserves the port for ALL interfaces
-- The iptables rules handle the IP-specific routing decisions
+Instead of binding to `0.0.0.0` or failing when an IP isn't present, the socket uses Linux's `IP_FREEBIND` capability. This solves two major issues:
+
+- **Floating IPs**: The external IP might not be configured on any local network interface (e.g., Tailscale IPs, HA floating IPs, or pending interfaces). `IP_FREEBIND` instructs the kernel to allow binding to these non-local IPs.
+- **Port Sharing**: By binding to the exact external IP instead of `0.0.0.0`, `natmap` allows the same port to be reserved simultaneously under different external IPs (e.g., mapping both `1.1.1.1:80` and `2.2.2.2:80`). Binding to `0.0.0.0` would have prevented this.
 
 ## Port Reservation Keys
 
-Keys are formatted as `"{ip}:{port}"` (e.g., `"139.99.69.43:25"`). The IP in the key is the external IP from the DNAT/hairpin config, used for uniqueness. This allows the same port to be reserved under different external IPs (though binding is always to `0.0.0.0`).
+Keys are the actual `SocketAddr` object (e.g., `203.0.113.43:25`). The IP in the key is the external IP from the DNAT/hairpin config.
 
 ## Which Rules Reserve Ports?
 
@@ -48,12 +49,12 @@ Keys are formatted as `"{ip}:{port}"` (e.g., `"139.99.69.43:25"`). The IP in the
 
 ## Error Handling
 
-If `TcpListener::bind()` fails:
+If `TcpListener::bind()` fails (e.g. port is already in use by another application on that IP):
 - The daemon returns HTTP `409 Conflict` to the CLI
 - No iptables rules are created
 - No state changes are persisted
 
 If `IptablesManager::install_*()` fails after successful port binding:
-- All reserved ports are released (`deallocate`)
+- All reserved ports for that request are released (`deallocate`)
 - Returns HTTP `500 Internal Server Error`
 - No state changes are persisted
