@@ -22,72 +22,15 @@ lab-ops dockernet
 lab-ops natmap <command> [args...]
 ```
 
-Manage iptables NAT rules for static VMs and dynamic Docker port remapping.
-
-#### Static VM NAT Rules
-
-Add or delete DNAT forwarding rules:
-```bash
-lab-ops natmap dnat --ext-ip 203.0.113.43 --int-ip 10.0.0.101 --ports 25,465
-lab-ops natmap dnat --ext-ip 203.0.113.43 --int-ip 10.0.0.101 --ports 25,465 --delete
-```
-
-Add or delete SNAT rules:
-```bash
-lab-ops natmap snat --ext-ip 203.0.113.43 --int-ip 10.0.0.101 --ext-if vmbr0
-```
-
-Add or delete hairpin NAT rules:
-```bash
-lab-ops natmap hairpin --ext-ip 203.0.113.43 --int-ip 10.0.0.101 --ports 25,465
-```
-
-Enable IP forwarding and persist rules:
-```bash
-lab-ops natmap fwd
-lab-ops natmap save
-```
-
-#### Dynamic Docker Port Remapping
-
-The `natmap` daemon installs iptables DNAT rules in the `NATMAP` chain and exposes an API to remap host ports at runtime without restarting containers.
-
-**Daemon**
+Manage iptables NAT rules for static VMs and dynamic Docker port remapping. Runs as a systemd daemon with a Unix socket API. See [docs/natmap/usage.md](docs/natmap/usage.md) for full documentation.
 
 ```bash
-# Run the daemon
-sudo lab-ops natmap daemon
-
-# Run with custom paths (for testing)
-lab-ops natmap daemon --state /tmp/natmap_state.json --socket /tmp/natmap.sock
-```
-
-**Install as systemd service**
-
-```bash
-sudo lab-ops natmap install
-```
-
-Creates a `natmap` group, adds the current user to it, copies the binary to `/usr/local/bin/lab-ops`, writes a systemd service file, and enables + starts it. Users in the `natmap` group can use the CLI without sudo (re-login required after install).
-
-**Manage Mappings**
-
-```bash
-# List all NAT rules (static iptables + Docker)
-lab-ops natmap ls
-lab-ops natmap ls <container-id-or-name>
-
-# Add a new mapping
-lab-ops natmap docker add my-nginx 8080:80
-lab-ops natmap docker add my-nginx 100.64.0.10:80:80
-lab-ops natmap docker add my-nginx 8443:443/tcp
-
-# Remap a host port
-lab-ops natmap docker remap my-nginx 8080:9090
-
-# Remove a mapping
-lab-ops natmap docker rm my-nginx 8080/tcp
-lab-ops natmap docker rm --id 1
+lab-ops natmap daemon                   # Start the daemon
+sudo lab-ops natmap install             # Install as systemd service
+lab-ops natmap dnat --ext-ip ... --int-ip ... --ports 80  # Static DNAT
+lab-ops natmap docker add nginx 8080:80 # Docker port mapping
+lab-ops natmap ls                       # List all rules
+lab-ops natmap clear                    # Remove all managed rules
 ```
 
 ### auto-discover

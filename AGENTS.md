@@ -60,7 +60,9 @@ When editing code, update the relevant docs in the same commit:
 
 | If you change... | Update... |
 |---|---|
-| auto-discover CLI | `docs/auto-discover/usage.md` |
+| natmap crate | `docs/natmap/usage.md` |
+| auto-discover crate | `docs/auto-discover/usage.md` |
+| Root CLI (dockernet, cf2ansible) | `docs/lab-ops/usage.md` |
 | Code structure / modules | `docs/dev/modules.md` |
 | Conventions / rules | `docs/dev/standards.md` |
 | Test layout or counts | `docs/dev/testing.md` |

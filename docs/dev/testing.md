@@ -41,12 +41,9 @@ Located in `tests/` or `crates/*/tests/` directories.
 
 ### Docker Integration Tests
 
-Located in `tests/natmap_docker.rs` and `tests/auto_discover_integration.rs`, behind `#[cfg(feature = "docker-tests")]`.
+Located in `tests/natmap_docker.rs` and `tests/auto_discover.rs`, behind `#[cfg(feature = "docker-tests")]`.
 
-**natmap Docker tests** (`tests/natmap_docker.rs`, 28 tests):
-Spins up a privileged Docker container (Ubuntu 24.04 + iptables) running the `lab-ops` binary and verifies end-to-end iptables behavior.
-
-**auto-discover Docker tests** (`tests/auto_discover_integration.rs`, 9 tests):
+**auto-discover Docker tests** (`tests/auto_discover.rs`, 9 tests):
 Spins up a privileged Docker container (Ubuntu 24.04 + Consul + iptables) running Consul, natmap, and auto-discover daemons. Verifies Consul registration, nginx config KV storage, forwarding metadata, and container lifecycle cleanup.
 
 | Category | Count |
