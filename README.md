@@ -59,7 +59,7 @@ The `natmap` daemon installs iptables DNAT rules in the `NATMAP` chain and expos
 sudo lab-ops natmap daemon
 
 # Run with custom paths (for testing)
-lab-ops natmap daemon --state-dir /tmp/natmap --socket /tmp/natmap.sock
+lab-ops natmap daemon --state /tmp/natmap_state.json --socket /tmp/natmap.sock
 ```
 
 **Install as systemd service**
@@ -101,6 +101,7 @@ lab-ops auto-discover daemon --no-discovery                  # Forwarding + ngin
 lab-ops auto-discover sync                                   # Single-sync pass
 lab-ops auto-discover check                                  # Validate config
 lab-ops auto-discover forwarding-sync [--consul-addr URL]    # One-shot DNAT sync
+lab-ops auto-discover nginx-sync [--consul-addr URL]         # One-shot nginx config sync
 ```
 
 ## License
