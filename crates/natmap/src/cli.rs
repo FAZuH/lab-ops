@@ -10,7 +10,14 @@ use clap::Parser;
 use clap::Subcommand;
 use color_eyre::Result;
 
-use crate::command::*;
+use crate::command::add;
+use crate::command::handle_clear;
+use crate::command::handle_dnat;
+use crate::command::handle_hairpin;
+use crate::command::handle_list;
+use crate::command::handle_snat;
+use crate::command::remap;
+use crate::command::remove;
 use crate::consts::BIN;
 use crate::consts::DAEMON_SOCK;
 use crate::consts::PKG_NAME;

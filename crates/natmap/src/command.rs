@@ -10,7 +10,16 @@ use color_eyre::eyre::Result;
 use color_eyre::eyre::bail;
 use hyper::Method;
 
-use crate::models::*;
+use crate::models::DnatConfig;
+use crate::models::DnatRequest;
+use crate::models::DockerAddMapRequest;
+use crate::models::DockerPortMap;
+use crate::models::DockerRemapRequest;
+use crate::models::HairpinConfig;
+use crate::models::HairpinRequest;
+use crate::models::ListResponse;
+use crate::models::SnatConfig;
+use crate::models::SnatRequest;
 use crate::utils::request_json;
 
 /// Displays a combined listing of static iptables NAT rules and daemon-managed state.

@@ -11,7 +11,18 @@ use color_eyre::Result;
 
 use crate::daemon::AppState;
 use crate::daemon::ErrorResponse;
-use crate::models::*;
+use crate::models::DnatConfig;
+use crate::models::DnatRequest;
+use crate::models::DockerAddMapRequest;
+use crate::models::DockerPortMap;
+use crate::models::DockerPortMapRequest;
+use crate::models::DockerRemapRequest;
+use crate::models::HairpinConfig;
+use crate::models::HairpinRequest;
+use crate::models::ListResponse;
+use crate::models::SnatConfig;
+use crate::models::SnatRequest;
+use crate::models::TransportProtocol;
 use crate::port_allocator::PortAllocator;
 
 /// `GET /mappings` — Returns all managed DNAT, SNAT, hairpin, and Docker mappings.
