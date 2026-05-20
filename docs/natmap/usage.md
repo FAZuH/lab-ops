@@ -1,67 +1,17 @@
-# lab-ops Usage Guide
+## Terms
 
-## Installation
+- **natmap daemon**: Central authority for ALL iptables NAT rules. Installs DNAT rules in the `NATMAP` chain, manages port reservations, persists state to `/var/lib/natmap/state.json`
+- **natmap CLI**: Communicates with the daemon via Unix socket (`/run/natmap.sock`) for all rule management commands
+- **DNAT**: Destination NAT — forwards traffic from an external IP:port to an internal host. Creates PREROUTING and FORWARD rules
+- **SNAT**: Source NAT — rewrites source IP of outgoing traffic from internal hosts. Creates POSTROUTING rules
+- **Hairpin NAT**: Allows internal hosts to reach themselves via the external IP. Creates PREROUTING DNAT + POSTROUTING MASQUERADE rules
+- **Docker mapping**: Dynamic port remapping managed by natmap — maps a host port to a container port without restarting the container
 
-```bash
-cargo build --release
-sudo cp target/release/lab-ops /usr/local/bin/
-```
+## Daemon
 
-## Overview
+The natmap daemon is the central authority for all iptables NAT rules. All rule management commands (`dnat`, `snat`, `hairpin`, `docker add`, `docker rm`, `docker remap`) require the daemon to be running. The daemon handles port reservation, state persistence, and iptables rule management.
 
-`lab-ops` is a homelab operations toolkit with three main commands:
-
-| Command | Purpose |
-|---------|---------|
-| `dockernet` | List IP addresses and port bindings of Docker containers |
-| `cf2ansible` | Convert BIND DNS zone files to Ansible Cloudflare DNS tasks |
-| `natmap` | Manage iptables NAT rules (static VMs & dynamic Docker mappings) |
-
----
-
-## Global Options
-
-The `natmap` command accepts global options that apply to all subcommands:
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--socket` | `/run/natmap.sock` | Path to the natmap daemon Unix socket |
-| `--json` | off | Output in JSON format instead of tables |
-
----
-
-## dockernet
-
-Lists Docker container network information.
-
-```bash
-lab-ops dockernet
-```
-
-Displays a table with container names, network names, IP addresses, and port bindings.
-
----
-
-## cf2ansible
-
-Converts BIND DNS zone files into Ansible tasks for Cloudflare DNS management.
-
-```bash
-lab-ops cf2ansible /path/to/zone-file.txt
-
-# Override the zone name (defaults to SOA record)
-lab-ops cf2ansible /path/to/zone-file.txt example.com
-```
-
-The output is YAML suitable for use with `community.general.cloudflare_dns`.
-
----
-
-## natmap
-
-The natmap subcommands manage iptables NAT rules. All rule management commands (`dnat`, `snat`, `hairpin`, `docker add`, `docker rm`, `docker remap`) require the natmap **daemon** to be running. The daemon handles port reservation and state persistence.
-
-### Starting the Daemon
+### Starting
 
 ```bash
 # Install as a systemd service (recommended)
@@ -72,12 +22,64 @@ sudo lab-ops natmap daemon
 
 # Run with custom paths (for testing)
 lab-ops natmap daemon \
-  --state-dir /tmp/natmap/state.json \
+  --state /tmp/natmap_state.json \
   --socket /tmp/natmap.sock \
   --socket-group root
 ```
 
-**Important:** All `natmap` commands that modify rules (`dnat`, `snat`, `hairpin`, `docker add/rm/remap`) must communicate with the running daemon. If the daemon is not running, these commands will fail with a connection error.
+### Systemd Installation
+
+```bash
+sudo lab-ops natmap install
+```
+
+This command:
+1. Copies the `lab-ops` binary to `/usr/local/bin/`
+2. Creates a `natmap` system group and adds your user to it
+3. Writes `/etc/systemd/system/natmap.service`
+4. Runs `systemctl daemon-reload` and `systemctl enable --now natmap`
+
+After re-login (for group membership), you can use `lab-ops natmap ...` without `sudo`.
+
+### Service Control
+
+```bash
+# Check status
+systemctl status natmap
+
+# View logs
+journalctl -u natmap -f
+
+# Restart after binary update
+sudo systemctl restart natmap
+```
+
+### State Persistence
+
+The daemon persists state to `/var/lib/natmap/state.json`. On restart or crash recovery, it:
+- Flushes all stale iptables rules
+- Releases all port reservations
+- Reads the state file and rebinds only rules whose ports are still available
+- Skips rules for ports taken by other services (logged as warnings)
+
+### Socket
+
+All CLI commands communicate with the daemon via a Unix socket. Default: `/run/natmap.sock`.
+
+```bash
+# Non-default socket
+lab-ops natmap --socket /tmp/natmap.sock dnat --ext-ip ... --int-ip ... --ports 80
+lab-ops natmap --socket /tmp/natmap.sock ls
+```
+
+## CLI Commands
+
+### Global Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--socket` | `/run/natmap.sock` | Path to the natmap daemon Unix socket |
+| `--json` | off | Output in JSON format instead of tables |
 
 ### Utility Commands
 
@@ -94,10 +96,6 @@ lab-ops natmap clear
 
 The `clear` command removes all daemon-managed rules (static DNAT, SNAT, hairpin, and Docker port mappings), releases all port reservations, and resets the persisted state. It is useful for bulk cleanup without restarting the daemon.
 
----
-
----
-
 ### Static NAT Rules
 
 #### DNAT (Destination NAT)
@@ -107,8 +105,8 @@ Forward traffic from an external IP/port to an internal host. Creates PREROUTING
 ```bash
 # Forward ports 25 and 465
 lab-ops natmap dnat \
-  --ext-ip 139.99.69.43 \
-  --int-ip 10.10.10.101 \
+  --ext-ip 203.0.113.43 \
+  --int-ip 10.0.0.101 \
   --ports 25,465
 
 # Forward a single port with a specific protocol
@@ -120,15 +118,15 @@ lab-ops natmap dnat \
 
 # Restrict to a specific interface
 lab-ops natmap dnat \
-  --ext-ip 139.99.69.43 \
-  --int-ip 10.10.10.101 \
+  --ext-ip 203.0.113.43 \
+  --int-ip 10.0.0.101 \
   --ports 80,443 \
   --ext-if vmbr0
 
 # Delete rules
 lab-ops natmap dnat \
-  --ext-ip 139.99.69.43 \
-  --int-ip 10.10.10.101 \
+  --ext-ip 203.0.113.43 \
+  --int-ip 10.0.0.101 \
   --ports 25,465 \
   --delete
 ```
@@ -142,15 +140,15 @@ Rewrite the source IP of outgoing traffic from an internal host. Creates POSTROU
 ```bash
 # Add SNAT rule
 lab-ops natmap snat \
-  --int-ip 10.10.10.101 \
+  --int-ip 10.0.0.101 \
   --ext-if vmbr0 \
-  --ext-ip 139.99.69.43
+  --ext-ip 203.0.113.43
 
 # Delete SNAT rule (same flags + --delete)
 lab-ops natmap snat \
-  --int-ip 10.10.10.101 \
+  --int-ip 10.0.0.101 \
   --ext-if vmbr0 \
-  --ext-ip 139.99.69.43 \
+  --ext-ip 203.0.113.43 \
   --delete
 ```
 
@@ -163,19 +161,17 @@ Allows an internal host to reach itself via the external IP. Creates PREROUTING 
 ```bash
 # Add hairpin NAT
 lab-ops natmap hairpin \
-  --ext-ip 139.99.69.43 \
-  --int-ip 10.10.10.101 \
+  --ext-ip 203.0.113.43 \
+  --int-ip 10.0.0.101 \
   --ports 25,465,587
 
 # Delete hairpin NAT
 lab-ops natmap hairpin \
-  --ext-ip 139.99.69.43 \
-  --int-ip 10.10.10.101 \
+  --ext-ip 203.0.113.43 \
+  --int-ip 10.0.0.101 \
   --ports 25,465,587 \
   --delete
 ```
-
----
 
 ### Docker Container Mappings
 
@@ -227,9 +223,7 @@ Change an existing mapping's host port without restarting the container.
 lab-ops natmap docker remap my-nginx 8080:9090
 ```
 
----
-
-### JSON Output
+## JSON Output
 
 Any `natmap` subcommand supports `--json` for machine-readable output:
 
@@ -237,17 +231,6 @@ Any `natmap` subcommand supports `--json` for machine-readable output:
 lab-ops natmap --json ls
 lab-ops natmap --json docker add my-nginx 8080:80
 ```
-
-### Custom Socket Path
-
-If the daemon is running on a non-default socket:
-
-```bash
-lab-ops natmap --socket /tmp/natmap.sock dnat --ext-ip ... --int-ip ... --ports 80
-lab-ops natmap --socket /tmp/natmap.sock ls
-```
-
----
 
 ## Real-World Examples
 
@@ -257,8 +240,8 @@ Expose all mail-related ports from a public IP to an internal VM:
 
 ```bash
 #!/bin/bash
-INT_IP="10.10.10.101"
-EXT_IP="139.99.69.43"
+INT_IP="10.0.0.101"
+EXT_IP="203.0.113.43"
 EXT_IF="vmbr0"
 PORTS="25,465,587,143,993,110,995,4190"
 
@@ -313,42 +296,3 @@ lab-ops natmap ls
 # Remove a mapping when no longer needed
 lab-ops natmap docker rm grafana 3000
 ```
-
----
-
-## Daemon Management
-
-### Install as Systemd Service
-
-```bash
-sudo lab-ops natmap install
-```
-
-This command:
-1. Copies the `lab-ops` binary to `/usr/local/bin/`
-2. Creates a `natmap` system group and adds your user to it
-3. Writes `/etc/systemd/system/natmap.service`
-4. Runs `systemctl daemon-reload` and `systemctl enable --now natmap`
-
-After re-login (for group membership), you can use `lab-ops natmap ...` without `sudo`.
-
-### Service Control
-
-```bash
-# Check status
-systemctl status natmap
-
-# View logs
-journalctl -u natmap -f
-
-# Restart after binary update
-sudo systemctl restart natmap
-```
-
-### State Persistence
-
-The daemon stores all rules in `/var/lib/natmap/state.json`. On restart or crash recovery, it:
-- Flushes all stale iptables rules
-- Releases all port reservations
-- Reads the state file and rebinds only rules whose ports are still available
-- Skips rules for ports taken by other services (logged as warnings)

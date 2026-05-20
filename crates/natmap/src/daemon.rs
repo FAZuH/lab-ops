@@ -10,7 +10,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
-use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -38,10 +37,23 @@ use tower_service::Service;
 use tracing::error;
 use tracing::info;
 
-use crate::api::*;
+use crate::api::add_dnat;
+use crate::api::add_hairpin;
+use crate::api::add_mapping;
+use crate::api::add_snat;
+use crate::api::clear_all;
+use crate::api::list_mappings;
+use crate::api::remap_port;
+use crate::api::remove_dnat;
+use crate::api::remove_hairpin;
+use crate::api::remove_mapping;
+use crate::api::remove_mapping_by_id;
+use crate::api::remove_snat;
+use crate::api::unbind_ports;
 use crate::docker;
 use crate::iptables::IptablesManager;
-use crate::models::*;
+use crate::models::DaemonState;
+use crate::models::DockerPortMap;
 use crate::port_allocator::PortAllocator;
 
 /// Shared application state held by all Axum route handlers.
@@ -430,29 +442,29 @@ impl Daemon {
     }
 
     async fn reconcile_hairpins(&self, daemon_state: &mut DaemonState) {
-        let mut kept_hairpins = Vec::new();
+        let mut keep = Vec::new();
         for config in daemon_state.hairpins.drain(..) {
             if Self::should_reconcile(&config.ports, &config.ext_ip, &self.state.ports).await {
                 let _ = self.state.iptables.install_hairpin(&config);
-                kept_hairpins.push(config);
+                keep.push(config);
             } else {
                 unbind_ports(self.state.ports.clone(), &config.ext_ip, &config.ports).await;
             }
         }
-        daemon_state.hairpins = kept_hairpins;
+        daemon_state.hairpins = keep;
     }
 
     async fn reconcile_dnats(&self, daemon_state: &mut DaemonState) {
-        let mut kept_dnats = Vec::new();
+        let mut keep = Vec::new();
         for config in daemon_state.dnats.drain(..) {
             if Self::should_reconcile(&config.ports, &config.ext_ip, &self.state.ports).await {
                 let _ = self.state.iptables.install_dnat(&config);
-                kept_dnats.push(config);
+                keep.push(config);
             } else {
                 unbind_ports(self.state.ports.clone(), &config.ext_ip, &config.ports).await;
             }
         }
-        daemon_state.dnats = kept_dnats;
+        daemon_state.dnats = keep;
     }
 
     async fn reconcile_snats(&self, daemon_state: &DaemonState) {
@@ -463,7 +475,7 @@ impl Daemon {
 
     /// Check if this port can be reconciled.
     async fn should_reconcile(configs_ports: &str, ext_ip: &str, ports: &PortAllocator) -> bool {
-        let ip: IpAddr = match ext_ip.parse() {
+        let ip = match ext_ip.parse() {
             Ok(ip) => ip,
             Err(e) => {
                 error!("Invalid IP {ext_ip}: {e}");

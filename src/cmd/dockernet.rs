@@ -5,7 +5,6 @@
 
 use std::collections::HashMap;
 
-use bollard;
 use bollard::Docker;
 use bollard::plugin::EndpointSettings;
 use bollard::plugin::PortBinding;

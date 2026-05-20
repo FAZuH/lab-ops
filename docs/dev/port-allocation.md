@@ -35,7 +35,7 @@ Instead of binding to `0.0.0.0` or failing when an IP isn't present, the socket 
 
 ## Port Reservation Keys
 
-Keys are the actual `SocketAddr` object (e.g., `139.99.69.43:25`). The IP in the key is the external IP from the DNAT/hairpin config.
+Keys are the actual `SocketAddr` object (e.g., `203.0.113.43:25`). The IP in the key is the external IP from the DNAT/hairpin config.
 
 ## Which Rules Reserve Ports?
 

@@ -2,7 +2,7 @@
 //!
 //! Parses CLI arguments and dispatches to the appropriate subcommand handler.
 
-use clap::Parser as _;
+use clap::Parser;
 use color_eyre::Result;
 use lab_ops::cli::Cli;
 use lab_ops::cli::Command;
@@ -11,6 +11,14 @@ use lab_ops::cmd::dockernet;
 
 fn main() -> Result<()> {
     color_eyre::install()?;
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -28,6 +36,11 @@ fn main() -> Result<()> {
             use tokio::runtime::Builder;
             let rt = Builder::new_current_thread().enable_all().build()?;
             rt.block_on(natmap::cli::run_cli_with_args(args))?;
+        }
+        Command::AutoDiscover { args } => {
+            use tokio::runtime::Builder;
+            let rt = Builder::new_current_thread().enable_all().build()?;
+            rt.block_on(auto_discover::cli::run_cli(args))?;
         }
     };
 

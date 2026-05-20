@@ -10,7 +10,16 @@ use color_eyre::eyre::Result;
 use color_eyre::eyre::bail;
 use hyper::Method;
 
-use crate::models::*;
+use crate::models::DnatConfig;
+use crate::models::DnatRequest;
+use crate::models::DockerAddMapRequest;
+use crate::models::DockerPortMap;
+use crate::models::DockerRemapRequest;
+use crate::models::HairpinConfig;
+use crate::models::HairpinRequest;
+use crate::models::ListResponse;
+use crate::models::SnatConfig;
+use crate::models::SnatRequest;
 use crate::utils::request_json;
 
 /// Displays a combined listing of static iptables NAT rules and daemon-managed state.
@@ -263,7 +272,7 @@ pub async fn remap(
         host_port: parts[0].parse()?,
         new_host_port: parts[1].parse()?,
     };
-    let uri = format!("/remap/{}", container_id);
+    let uri = format!("/remap/{container_id}");
     let res: Vec<DockerPortMap> = request_json(socket, Method::PUT, &uri, Some(req)).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&res)?);
@@ -298,7 +307,7 @@ pub async fn add(
         container_port,
         proto: proto.try_into()?,
     };
-    let uri = format!("/mapping/{}", container_id);
+    let uri = format!("/mapping/{container_id}");
     let res: DockerPortMap = request_json(socket, Method::POST, &uri, Some(req)).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&res)?);
@@ -318,7 +327,7 @@ pub async fn remove(
     json: bool,
 ) -> Result<()> {
     if let Some(mapping_id) = id {
-        let uri = format!("/mapping/by-id/{}", mapping_id);
+        let uri = format!("/mapping/by-id/{mapping_id}");
         let _res: () = request_json(socket, Method::DELETE, &uri, None::<()>).await?;
         if !json {
             println!("Successfully removed mapping {mapping_id}.");
@@ -327,7 +336,7 @@ pub async fn remove(
         bail!("--all not implemented yet");
     } else if let (Some(cid), Some(p)) = (container_id, port) {
         let port_num: u16 = p.split('/').next().unwrap().parse()?;
-        let uri = format!("/mapping/{}/{}", cid, port_num);
+        let uri = format!("/mapping/{cid}/{port_num}");
         let _res: () = request_json(socket, Method::DELETE, &uri, None::<()>).await?;
         if !json {
             println!("Successfully removed mapping.");

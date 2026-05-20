@@ -45,7 +45,7 @@ pub async fn request_json<T: serde::de::DeserializeOwned, R: serde::Serialize>(
     });
 
     let mut req_builder = Request::builder()
-        .uri(format!("http://localhost{}", path))
+        .uri(format!("http://localhost{path}"))
         .method(method)
         .header("Host", "localhost");
 
