@@ -2,6 +2,24 @@
 
 ## `crates/natmap/src/`
 
+### `lib.rs` — Library Root
+
+Declares all modules with `pub` visibility:
+
+```rust
+pub mod cli;
+pub mod api;
+pub mod command;
+pub mod consts;
+pub mod daemon;
+pub mod docker;
+pub mod install;
+pub mod iptables;
+pub mod models;
+pub mod port_allocator;
+pub mod utils;
+```
+
 ### `cli.rs` — CLI Definitions
 
 Defines the `NatMapCommand` enum with clap derives. Each variant maps to a subcommand:
@@ -93,7 +111,7 @@ pub struct PortAllocator {
 | `is_allocated(key)` | Check if a key has an active reservation |
 | `deallocate_all()` | Clear all reservations |
 
-Port keys follow the format `"{ip}:{port}"` (e.g., `"139.99.69.43:8080"`).
+Port keys follow the format `"{ip}:{port}"` (e.g., `"203.0.113.43:8080"`).
 
 ### `docker.rs` — Docker Client
 
@@ -114,3 +132,102 @@ Wraps the `bollard` Docker API crate:
 
 Generic HTTP client for daemon communication:
 - `request_json<T, R>(socket_path, method, path, body)` — Sends HTTP request to Unix socket, deserializes JSON response
+
+## `crates/auto-discover/src/`
+
+### `lib.rs` — Library Root
+
+Declares all modules. Only `cli` is `pub` (consumed by the root `lab-ops` binary for CLI dispatch):
+
+```rust
+pub mod cli;
+mod config;
+mod consul;
+mod daemon;
+mod docker;
+mod forwarding;
+mod natmap;
+mod nginx_daemon;
+mod ports;
+```
+
+### `cli.rs` — CLI Definitions
+
+Defines `Cli` struct and `Commands` enum with clap derives. The `run_cli()` function dispatches each variant. Subcommands:
+
+| Variant | Purpose |
+|---|---|
+| `Daemon` | Unified long-running daemon (discovery + forwarding + nginx) |
+| `Sync` | One-shot discovery sync pass |
+| `Check` | Validate `discovery.yaml` |
+| `ForwardingSync` | One-shot proxy-side DNAT rule sync |
+| `NginxSync` | One-shot proxy-side nginx config sync |
+
+### `config.rs` — DiscoveryConfig
+
+Parses `/etc/auto-discover/discovery.yaml`:
+
+- **`DiscoveryConfig`**: Top-level config (`name`, `bind_ip`, `bind_interface`, `networks`, `defaults`)
+- **`NetworkEntry`**: Per-network config (`name`, `container_port`, `protocol`, `template`, `nginx_generator`, `forwarding`, `preprocess`, `postprocess`)
+- **`ResolvedService`**: Fully resolved config with all defaults applied
+
+### `consul.rs` — ConsulClient
+
+Interacts with Consul Agent API:
+
+- `register_service()` — Register/update a service with metadata
+- `deregister_by_container()` — Remove all services matching a container ID
+- `get_services_by_container()` — Query services by container ID
+- `get_forwarding_services()` — Query catalog for forwarding services across all agents
+- `get_nginx_configs()`, `watch_nginx_configs()` — KV operations for nginx configs
+
+### `daemon.rs` — DiscoveryDaemon
+
+Orchestrates the full discovery lifecycle:
+
+- `sync()` — Full reconciliation: sync running containers against config
+- `handle_container_start()` — Match started container to network entries, allocate ports, register
+- `handle_container_die()` — Deregister stale services
+- `run_config_watcher()` — Watch `discovery.yaml` for file changes and re-sync
+
+### `docker.rs` — Docker Client
+
+Wraps bollard:
+- `get_exposed_ports()` — Extract port bindings from container inspect
+
+### `forwarding.rs` — Forwarding Rule Sync
+
+Proxy-side DNAT management:
+- `sync_forwarding_rules()` — Query Consul for forwarding services, apply DNAT rules via `lab-ops natmap dnat`
+
+### `natmap.rs` — Natmap CLI Client
+
+Calls `lab-ops natmap docker add/rm` as an external command via `std::process::Command`:
+- `add_mapping()`, `remove_mapping()` — Manage Docker port mappings through natmap daemon
+
+### `nginx_daemon.rs` — NginxDaemon
+
+Proxy-side nginx config management:
+- `sync()` — Pull configs from Consul KV, run postprocs, write to disk, reload nginx
+- `run_loop()` — Blocking-query watch loop
+
+### `ports.rs` — PortState
+
+Manages ephemeral port allocation (32768-60999) with JSON persistence:
+- `allocate()` — Assign unique port from pool
+- `remove()` — Free a port
+- `port_is_free()` — Check if a port is bound by any process
+
+## `src/` (Root Crate)
+
+### `cli.rs` — Top-Level CLI
+
+Defines the root `Cli` struct and `Command` enum. Each variant delegates to a workspace crate via `#[command(flatten)]` or to a `src/cmd/` module.
+
+### `cmd/cf2ansible.rs` — DNS Zone Converter
+
+Converts BIND DNS zone files to Ansible YAML for Cloudflare DNS management.
+
+### `cmd/dockernet.rs` — Docker Network Viewer
+
+Displays Docker container IPs and port bindings in a formatted table.

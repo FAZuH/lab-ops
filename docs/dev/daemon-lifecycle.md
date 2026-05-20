@@ -75,8 +75,8 @@ If the daemon process is killed (SIGKILL, OOM, power loss):
   },
   "dnats": [
     {
-      "ext_ip": "139.99.69.43",
-      "int_ip": "10.10.10.101",
+      "ext_ip": "203.0.113.43",
+      "int_ip": "10.0.0.101",
       "ports": "25,465",
       "proto": "tcp",
       "ext_if": "vmbr0"
@@ -84,15 +84,15 @@ If the daemon process is killed (SIGKILL, OOM, power loss):
   ],
   "snats": [
     {
-      "int_ip": "10.10.10.101",
-      "ext_ip": "139.99.69.43",
+      "int_ip": "10.0.0.101",
+      "ext_ip": "203.0.113.43",
       "ext_if": "vmbr0"
     }
   ],
   "hairpins": [
     {
-      "ext_ip": "139.99.69.43",
-      "int_ip": "10.10.10.101",
+      "ext_ip": "203.0.113.43",
+      "int_ip": "10.0.0.101",
       "ports": "25,465",
       "proto": "tcp"
     }

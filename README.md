@@ -28,18 +28,18 @@ Manage iptables NAT rules for static VMs and dynamic Docker port remapping.
 
 Add or delete DNAT forwarding rules:
 ```bash
-lab-ops natmap dnat --ext-ip 139.99.69.43 --int-ip 10.10.10.101 --ports 25,465
-lab-ops natmap dnat --ext-ip 139.99.69.43 --int-ip 10.10.10.101 --ports 25,465 --delete
+lab-ops natmap dnat --ext-ip 203.0.113.43 --int-ip 10.0.0.101 --ports 25,465
+lab-ops natmap dnat --ext-ip 203.0.113.43 --int-ip 10.0.0.101 --ports 25,465 --delete
 ```
 
 Add or delete SNAT rules:
 ```bash
-lab-ops natmap snat --ext-ip 139.99.69.43 --int-ip 10.10.10.101 --ext-if vmbr0
+lab-ops natmap snat --ext-ip 203.0.113.43 --int-ip 10.0.0.101 --ext-if vmbr0
 ```
 
 Add or delete hairpin NAT rules:
 ```bash
-lab-ops natmap hairpin --ext-ip 139.99.69.43 --int-ip 10.10.10.101 --ports 25,465
+lab-ops natmap hairpin --ext-ip 203.0.113.43 --int-ip 10.0.0.101 --ports 25,465
 ```
 
 Enable IP forwarding and persist rules:
@@ -88,6 +88,19 @@ lab-ops natmap docker remap my-nginx 8080:9090
 # Remove a mapping
 lab-ops natmap docker rm my-nginx 8080/tcp
 lab-ops natmap docker rm --id 1
+```
+
+### auto-discover
+
+`crates/auto-discover/` — Service discovery daemon that watches Docker events, manages port forwarding via `lab-ops natmap`, registers services with Consul, and generates nginx configs stored in Consul KV. See [docs/auto-discover/usage.md](docs/auto-discover/usage.md) for full documentation.
+
+```bash
+lab-ops auto-discover daemon                                 # Run unified daemon
+lab-ops auto-discover daemon --no-forwarding --no-nginx      # Discovery only
+lab-ops auto-discover daemon --no-discovery                  # Forwarding + nginx only
+lab-ops auto-discover sync                                   # Single-sync pass
+lab-ops auto-discover check                                  # Validate config
+lab-ops auto-discover forwarding-sync [--consul-addr URL]    # One-shot DNAT sync
 ```
 
 ## License

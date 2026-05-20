@@ -107,8 +107,8 @@ Forward traffic from an external IP/port to an internal host. Creates PREROUTING
 ```bash
 # Forward ports 25 and 465
 lab-ops natmap dnat \
-  --ext-ip 139.99.69.43 \
-  --int-ip 10.10.10.101 \
+  --ext-ip 203.0.113.43 \
+  --int-ip 10.0.0.101 \
   --ports 25,465
 
 # Forward a single port with a specific protocol
@@ -120,15 +120,15 @@ lab-ops natmap dnat \
 
 # Restrict to a specific interface
 lab-ops natmap dnat \
-  --ext-ip 139.99.69.43 \
-  --int-ip 10.10.10.101 \
+  --ext-ip 203.0.113.43 \
+  --int-ip 10.0.0.101 \
   --ports 80,443 \
   --ext-if vmbr0
 
 # Delete rules
 lab-ops natmap dnat \
-  --ext-ip 139.99.69.43 \
-  --int-ip 10.10.10.101 \
+  --ext-ip 203.0.113.43 \
+  --int-ip 10.0.0.101 \
   --ports 25,465 \
   --delete
 ```
@@ -142,15 +142,15 @@ Rewrite the source IP of outgoing traffic from an internal host. Creates POSTROU
 ```bash
 # Add SNAT rule
 lab-ops natmap snat \
-  --int-ip 10.10.10.101 \
+  --int-ip 10.0.0.101 \
   --ext-if vmbr0 \
-  --ext-ip 139.99.69.43
+  --ext-ip 203.0.113.43
 
 # Delete SNAT rule (same flags + --delete)
 lab-ops natmap snat \
-  --int-ip 10.10.10.101 \
+  --int-ip 10.0.0.101 \
   --ext-if vmbr0 \
-  --ext-ip 139.99.69.43 \
+  --ext-ip 203.0.113.43 \
   --delete
 ```
 
@@ -163,14 +163,14 @@ Allows an internal host to reach itself via the external IP. Creates PREROUTING 
 ```bash
 # Add hairpin NAT
 lab-ops natmap hairpin \
-  --ext-ip 139.99.69.43 \
-  --int-ip 10.10.10.101 \
+  --ext-ip 203.0.113.43 \
+  --int-ip 10.0.0.101 \
   --ports 25,465,587
 
 # Delete hairpin NAT
 lab-ops natmap hairpin \
-  --ext-ip 139.99.69.43 \
-  --int-ip 10.10.10.101 \
+  --ext-ip 203.0.113.43 \
+  --int-ip 10.0.0.101 \
   --ports 25,465,587 \
   --delete
 ```
@@ -257,8 +257,8 @@ Expose all mail-related ports from a public IP to an internal VM:
 
 ```bash
 #!/bin/bash
-INT_IP="10.10.10.101"
-EXT_IP="139.99.69.43"
+INT_IP="10.0.0.101"
+EXT_IP="203.0.113.43"
 EXT_IF="vmbr0"
 PORTS="25,465,587,143,993,110,995,4190"
 
