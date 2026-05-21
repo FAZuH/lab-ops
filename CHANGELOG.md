@@ -1,3 +1,10 @@
+## 0.1.10 (2026-05-21)
+
+
+### Auto Discover
+
+* refactor!(ad): Rework discovery.yaml config spec ([9965dd2](https://github.com/FAZuH/lab-ops/commit/9965dd272c26d474be66bf6aef61fa49be36d1ae))
+
 ## 0.1.9 (2026-05-21)
 
 
@@ -41,11 +48,4 @@
 ### Cli
 
 * Rename argument --state-dir to --state ([926802e](https://github.com/FAZuH/lab-ops/commit/926802ef90f66f7d8f9c16ec806e55f18c3d3d50))
-
-## 0.1.5 (2026-05-14)
-
-
-### Bug Fixes
-
-* Stale NAT rules not deleted ([4b2c44f](https://github.com/FAZuH/lab-ops/commit/4b2c44f2ad03c62ef3a199035067167cfa7cd639))
 
