@@ -509,22 +509,16 @@ Returns all `.conf` and `.postproc` keys. The daemon processes each config throu
 
 ### Container Matching
 
-The daemon matches Docker containers to service definitions using a two-level filter:
+The daemon matches Docker containers to service definitions using the match config criteria (`project`, `container`, `container_regex`).
 
-1. **Project match**: `services.<name>.match.project == com.docker.compose.project` label (one project can match multiple services, and each service can define multiple ports)
-2. **Port match**: The container must expose one of the service's `rproxy[].port` or `forwarding[].port` values via Docker (EXPOSE or published port). This prevents:
-   - Host-networked containers (no Docker-managed ports) from being matched
-   - Wrong-port containers within a compose project from being matched (e.g., `grafana:3000` won't match `prometheus:9090` service even though both are in `example-grafana`)
-
-For `sync()`, exposed ports are read from the container list API. For Docker events (`handle_container_start`), they are looked up via `docker inspect`.
+For `sync()`, containers are matched via the match config criteria. Docker events (`handle_container_start`) trigger the same matching logic.
 
 ### Operations
 
 1. **On startup**: Parse `/etc/auto-discover/discovery.yaml`. Sync all running Docker containers matching configured services via the two-level filter above. The initial sync retries up to 10 times with exponential backoff (2s → 30s) in case `natmap.service` socket is not yet ready — this prevents the race condition where `lab-ops auto-discover` starts before natmap creates `/run/natmap.sock`.
 
 2. **On Docker event (start)**:
-   - Look up container's exposed ports via `docker inspect`
-   - Match container to all services in `discovery.yaml` where `services.<name>.match.project == compose_project` AND `container.exposed_ports` contains one of the service's `rproxy[].port` or `forwarding[].port` values
+   - Match container to all services in `discovery.yaml` where `services.<name>.match.project == compose_project`
    - Determine bind IP via the resolution chain (service bind_ip → bind_interface → defaults → container IP)
    - **Forwarding service**: Use `ext_ports[0]` (remote) or `bind_port` (local) as a static port (verify with `port_is_free`). Skip ephemeral allocation and `ports.json` persistence
    - **Non-forwarding service**: Allocate a persistent free host port from the ephemeral range (32768-60999)

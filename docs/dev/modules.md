@@ -195,7 +195,8 @@ Orchestrates the full discovery lifecycle:
 ### `docker.rs` — Docker Client
 
 Wraps bollard:
-- `get_exposed_ports()` — Extract port bindings from container inspect
+- `list_running_containers()` — List running containers with metadata
+- `inspect_container()` — Inspect a single container by ID, returns all metadata
 
 ### `forwarding.rs` — Forwarding Rule Sync
 

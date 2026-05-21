@@ -794,25 +794,26 @@ echo "PASS: host-networked container correctly skipped"
     }
 
     #[test]
-    fn wrong_exposed_port_skipped() {
-        let cname = "it-wrong-port";
+    fn port_not_exposed_still_matched() {
+        let cname = "it-no-exp";
         let yaml = r#"
 networks:
-  - name: it-svc-wrongport
+  - name: it-svc-noexp
     container_port: 9999
     template: REVERSE_PROXY_PRIVATE
     domains:
-      - it-svc-wrongport.test.local
+      - it-svc-noexp.test.local
 "#;
         let script = format!(
             r#"{setup}
-docker run -d --name {cname} -l "com.docker.compose.project=it-svc-wrongport" nginx:alpine
+docker rm -f {cname} 2>/dev/null || true
+docker run -d --name {cname} -l "com.docker.compose.project=it-svc-noexp" nginx:alpine
 sleep 4
 
-SVC=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-wrongport") | .value.Port // empty')
-if [ -n "$SVC" ]; then echo "FAIL: mismatched port container should not be registered, got port=$SVC" >&2; exit 1; fi
+SVC=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-noexp") | .value.Port // empty')
+if [ -z "$SVC" ]; then echo "FAIL: container not registered (port exposure not required)" >&2; exit 1; fi
 
-echo "PASS: wrong exposed port correctly skipped"
+echo "PASS: container matched despite no port exposure"
 {teardown}
 "#,
             setup = test_setup(yaml, ""),
@@ -820,7 +821,7 @@ echo "PASS: wrong exposed port correctly skipped"
             cname = cname,
         );
         let out = run(&script);
-        assert_pass(&out, "Phase 4 — wrong port skip");
+        assert_pass(&out, "Phase 4 — no port exposure still matched");
     }
 
     // ══════════════════════════════════════════════════════════════════
