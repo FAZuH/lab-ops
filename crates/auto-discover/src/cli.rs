@@ -266,17 +266,21 @@ pub fn check_config(config_path: PathBuf) -> Result<()> {
     let config = DiscoveryConfig::load(&config_path)
         .map_err(|e| color_eyre::eyre::eyre!("configuration error: {e}"))?;
     println!("Configuration is valid.");
-    println!("Services defined: {}", config.networks.len());
-    for svc in &config.networks {
-        let resolved = config.resolve(svc);
-        let kind = if resolved.local_ip.is_some() {
-            format!("local ({})", resolved.local_ip.as_deref().unwrap())
+    let resolved = config.resolve_all();
+    println!("Services defined: {}", resolved.len());
+    for svc in &resolved {
+        let kind = if svc.local_address.is_some() {
+            format!("local ({})", svc.local_address.as_deref().unwrap())
         } else {
             "docker".into()
         };
+        let template = match &svc.port_type {
+            crate::config::ResolvedPortType::RProxy { template, .. } => template.clone(),
+            _ => "forwarding".into(),
+        };
         println!(
             "  - {} (port {}, protocol {}, template {}, type {})",
-            resolved.name, resolved.container_port, resolved.protocol, resolved.template, kind
+            svc.service_name, svc.container_port, svc.protocol, template, kind
         );
     }
     Ok(())

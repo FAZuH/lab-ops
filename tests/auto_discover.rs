@@ -112,6 +112,7 @@ cat <<EOF
 server {{
     server_name ${{AUTO_DISCOVER_DOMAIN:-_}};
     listen ${{AUTO_DISCOVER_PROXY_IP:-__TAILSCALE_IP__}}:80;
+    proxy_pass http://${{AUTO_DISCOVER_BIND_IP}}:${{AUTO_DISCOVER_HOST_PORT}}/;
 }}
 EOF
 GENEOF
@@ -151,6 +152,29 @@ sleep 1
             output.contains("PASS"),
             "{test_name} failed.\nOutput:\n{output}"
         );
+    }
+
+    /// Writes new-format YAML config via extra_setup overwrite.
+    /// The services_yaml must contain the `services:` block.
+    fn new_format_setup(services_yaml: &str, extra_setup: &str) -> String {
+        new_format_setup_ext(services_yaml, extra_setup, "--no-forwarding --no-nginx")
+    }
+
+    fn new_format_setup_ext(services_yaml: &str, extra_setup: &str, daemon_flags: &str) -> String {
+        let full_yaml = format!(
+            r#"node:
+  name: int-test-node
+defaults:
+  nginx_generator: /tmp/gen-nginx
+{services_yaml}"#
+        );
+        let extra = format!(
+            r#"cat > /tmp/discovery.yaml <<'YAMLEOF'
+{full_yaml}
+YAMLEOF
+{extra_setup}"#,
+        );
+        test_setup_ext("", &extra, daemon_flags)
     }
 
     // ── Test A: Default Binding (0.0.0.0) ────────────────────────────
@@ -595,6 +619,7 @@ cat <<EOF
 server {{
     server_name ${{AUTO_DISCOVER_DOMAIN:-_}};
     listen ${{AUTO_DISCOVER_PROXY_IP:-__TAILSCALE_IP__}}:80;
+    proxy_pass http://${{AUTO_DISCOVER_BIND_IP}}:${{AUTO_DISCOVER_HOST_PORT}}/;
 }}
 EOF
 GENEOF
@@ -683,6 +708,7 @@ cat <<EOF
 server {{
     server_name ${{AUTO_DISCOVER_DOMAIN:-_}};
     listen ${{AUTO_DISCOVER_PROXY_IP:-__TAILSCALE_IP__}}:80;
+    proxy_pass http://${{AUTO_DISCOVER_BIND_IP}}:${{AUTO_DISCOVER_HOST_PORT}}/;
 }}
 EOF
 GENEOF
@@ -2050,41 +2076,378 @@ networks:
 
 PORT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-local-app") | .value.Port')
 if [ -z "$PORT" ] || [ "$PORT" = "null" ]; then echo "FAIL: not registered with Consul" >&2; cat /tmp/discovery.log; exit 1; fi
+if [ "$PORT" != "3000" ]; then echo "FAIL: expected port 3000, got $PORT" >&2; exit 1; fi
 
 ADDR=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-local-app") | .value.Address')
 if [ "$ADDR" != "10.99.99.99" ]; then echo "FAIL: expected address 10.99.99.99, got $ADDR" >&2; exit 1; fi
 
-# Verify iptables DNAT rule points to the local IP
-iptables -t nat -S NATMAP | grep -q "to-destination 10.99.99.99:3000" || \
-    {{ echo "FAIL: no DNAT rule for 10.99.99.99:3000" >&2; iptables -t nat -S NATMAP >&2; exit 1; }}
-
-# Verify nginx config was generated in Consul KV
-SVC_ID="int-test-node-app-local-test-${{PORT}}"
+# Verify nginx config was generated in Consul KV (local services bypass NAT, proxy directly to local_ip:local_port)
+SVC_ID="int-test-node-app-local-test-3000"
 NGINX_CONFIG=$(curl -sf "$CONSUL_HTTP_ADDR/v1/kv/nginx-configs/sites/${{SVC_ID}}.conf?raw" 2>/dev/null || echo "")
 if [ -z "$NGINX_CONFIG" ]; then echo "FAIL: no nginx config in Consul KV" >&2; curl -sf "$CONSUL_HTTP_ADDR/v1/kv/nginx-configs/sites?keys" 2>/dev/null || true; exit 1; fi
 
 echo "$NGINX_CONFIG" | grep -q "server_name app.local.test" || \
     {{ echo "FAIL: nginx config missing server_name" >&2; echo "$NGINX_CONFIG"; exit 1; }}
 
-# Verify actual reachability: start a local HTTP service, curl through the forwarded port
-apt-get update -qq && apt-get install -y -qq socat >/dev/null 2>&1
+echo "$NGINX_CONFIG" | grep -q "proxy_pass http://10.99.99.99:3000/;" || \
+    {{ echo "FAIL: nginx config missing proxy_pass to local IP" >&2; echo "$NGINX_CONFIG"; exit 1; }}
 
-# Start a simple HTTP responder on the local service IP/port
-ip addr add 10.99.99.99/32 dev dummy0 2>/dev/null || true
-socat TCP-LISTEN:3000,bind=10.99.99.99,fork,reuseaddr SYSTEM:'echo "HTTP/1.1 200 OK"; echo "Content-Type: text/plain"; echo ""; echo "local-service-ok"' &
-sleep 1
-
-# Curl through the host port (natmap DNAT forwards to 10.99.99.99:3000)
-RESULT=$(timeout 3 curl -sf http://127.0.0.1:${{PORT}}/ 2>/dev/null || echo "FAIL")
-if [ "$RESULT" != "local-service-ok" ]; then echo "FAIL: local service not reachable through natmap DNAT (got: $RESULT)" >&2; exit 1; fi
-
-echo "PASS: local service registered at $ADDR:$PORT, reachable via DNAT, nginx config verified"
-kill %4 %3 %2 %1 2>/dev/null || true
+echo "PASS: local service registered at $ADDR:$PORT, NAT bypassed, nginx config verified"
+kill %3 %2 %1 2>/dev/null || true
 sleep 1
 "#,
             setup = test_setup_ext(yaml, "", "--no-forwarding"),
         );
         let out = run(&script);
-        assert_pass(&out, "Local service — auto-discover");
+        assert_pass(&out, "local_service");
+    }
+
+    // ── Local Service + Forwarding Remote ────────────────────────────
+
+    #[test]
+    fn local_forwarding_remote() {
+        let yaml = r#"
+networks:
+  - name: it-local-fwd
+    local_ip: 10.99.99.99
+    local_port: 4000
+    forwarding:
+      ext_ip: 203.0.113.43
+      ext_ports: [40000]
+      proto: tcp
+"#;
+
+        let script = format!(
+            r#"{setup}
+
+PORT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-local-fwd") | .value.Port')
+if [ -z "$PORT" ] || [ "$PORT" = "null" ]; then echo "FAIL: not registered with Consul" >&2; exit 1; fi
+if [ "$PORT" != "40000" ]; then echo "FAIL: expected static port 40000, got $PORT" >&2; exit 1; fi
+
+ADDR=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-local-fwd") | .value.Address')
+if [ "$ADDR" != "10.99.99.99" ]; then echo "FAIL: expected address 10.99.99.99, got $ADDR" >&2; exit 1; fi
+
+SVC=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq 'to_entries[] | select(.value.Service == "it-local-fwd") | .value.Meta')
+FORWARDING=$(echo "$SVC" | jq -r '.forwarding')
+if [ "$FORWARDING" != "true" ]; then echo "FAIL: missing forwarding meta" >&2; exit 1; fi
+
+EXT_IP=$(echo "$SVC" | jq -r '.ext_ip')
+if [ "$EXT_IP" != "203.0.113.43" ]; then echo "FAIL: missing ext_ip meta" >&2; exit 1; fi
+
+EXT_PORTS=$(echo "$SVC" | jq -r '.ext_ports')
+if [ "$EXT_PORTS" != "40000" ]; then echo "FAIL: missing ext_ports meta" >&2; exit 1; fi
+
+# Verify no nginx KV config (local forwarding remote has empty template)
+KEYS=$(curl -sf "$CONSUL_HTTP_ADDR/v1/kv/nginx-configs/?recurse=true" | jq -r '.[].Key // empty')
+MATCH=$(echo "$KEYS" | grep "it-local-fwd" || true)
+if [ -n "$MATCH" ]; then echo "FAIL: forwarding-only service should have no nginx KV config, got $MATCH" >&2; exit 1; fi
+
+echo "PASS: local forwarding remote at 10.99.99.99:40000 with forwarding meta"
+kill %3 %2 %1 2>/dev/null || true
+sleep 1
+"#,
+            setup = test_setup_ext(yaml, "", "--no-forwarding"),
+        );
+        let out = run(&script);
+        assert_pass(&out, "local_forwarding_remote");
+    }
+
+    // ── Docker RProxy — Full Reachability ────────────────────────────
+
+    #[test]
+    fn docker_reachability() {
+        let cname = "it-reach";
+        let yaml = r#"
+networks:
+  - name: it-svc-reach
+    container_port: 80
+    template: REVERSE_PROXY
+    domains:
+      - reach.test.local
+"#;
+
+        let script = format!(
+            r#"{setup}
+docker run -d --name {cname} -l "com.docker.compose.project=it-svc-reach" nginx:alpine
+sleep 4
+
+PORT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-reach") | .value.Port')
+if [ -z "$PORT" ] || [ "$PORT" = "null" ]; then echo "FAIL: not registered with Consul" >&2; cat /tmp/discovery.log; exit 1; fi
+
+# Verify iptables DNAT rule exists
+iptables -t nat -S NATMAP | grep -q "to-destination.*:80" || \
+    {{ echo "FAIL: no DNAT rule for port $PORT" >&2; iptables -t nat -S NATMAP >&2; exit 1; }}
+
+# Verify FORWARD ACCEPT rule exists
+iptables -t filter -S NATMAP 2>/dev/null | grep -q "ACCEPT" || \
+    {{ echo "FAIL: no FORWARD ACCEPT rule" >&2; iptables -t filter -S NATMAP >&2; exit 1; }}
+
+# Verify OUTPUT DNAT rule exists for localhost traffic
+iptables -t nat -S OUTPUT 2>/dev/null | grep -q "to-destination.*:80" || \
+    {{ echo "FAIL: no OUTPUT DNAT rule" >&2; iptables -t nat -S OUTPUT >&2; exit 1; }}
+
+# Verify container is running and serving traffic directly
+docker exec {cname} wget -q -O - http://localhost:80/ 2>/dev/null | grep -qi nginx || \
+    {{ echo "FAIL: nginx container not serving traffic" >&2; docker exec {cname} wget -O - http://localhost:80/ 2>&1 || true; exit 1; }}
+
+echo "PASS: reachable, DNAT rules verified, container serving"
+{teardown}
+"#,
+            setup = test_setup(yaml, ""),
+            teardown = test_teardown(&[cname]),
+            cname = cname,
+        );
+        let out = run(&script);
+        assert_pass(&out, "docker_reachability");
+    }
+
+    // ── Docker Combined: RProxy + Forwarding (same project, different ports) ──
+
+    #[test]
+    fn docker_rproxy_and_forwarding() {
+        let cname = "it-combo";
+        let yaml = r#"
+networks:
+  - name: it-svc-combo
+    container_port: 80
+    template: REVERSE_PROXY
+    domains:
+      - combo.test.local
+  - name: it-svc-combo
+    container_port: 80
+    forwarding:
+      ext_ip: 203.0.113.43
+      ext_ports: [36000]
+      proto: tcp
+"#;
+
+        let script = format!(
+            r#"{setup}
+docker run -d --name {cname} -l "com.docker.compose.project=it-svc-combo" nginx:alpine
+sleep 4
+
+# Should be exactly 1 Consul entry (rproxy + forwarding merged into one)
+COUNT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq '[to_entries[] | select(.value.Service == "it-svc-combo")] | length')
+if [ "$COUNT" != "1" ]; then echo "FAIL: expected 1 Consul entry, got $COUNT" >&2; curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq '[to_entries[] | select(.value.Service == "it-svc-combo") | .key, .value.Port, .value.Meta.forwarding // "n/a"]' >&2; exit 1; fi
+
+# The entry should have BOTH forwarding meta AND template meta
+SVC_META=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq 'to_entries[] | select(.value.Service == "it-svc-combo") | .value.Meta')
+
+FORWARDING=$(echo "$SVC_META" | jq -r '.forwarding')
+if [ "$FORWARDING" != "true" ]; then echo "FAIL: missing forwarding meta" >&2; exit 1; fi
+
+EXT_IP=$(echo "$SVC_META" | jq -r '.ext_ip')
+if [ "$EXT_IP" != "203.0.113.43" ]; then echo "FAIL: missing ext_ip meta" >&2; exit 1; fi
+
+TEMPLATE=$(echo "$SVC_META" | jq -r '.template')
+if [ "$TEMPLATE" != "REVERSE_PROXY" ]; then echo "FAIL: expected template REVERSE_PROXY, got $TEMPLATE" >&2; exit 1; fi
+
+PORT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-combo") | .value.Port')
+echo "PASS: merged rproxy+forwarding entry at port $PORT with template=$TEMPLATE forwarding=$FORWARDING"
+{teardown}
+"#,
+            setup = test_setup(yaml, ""),
+            teardown = test_teardown(&[cname]),
+            cname = cname,
+        );
+        let out = run(&script);
+        assert_pass(&out, "docker_rproxy_and_forwarding");
+    }
+
+    // ── ForwardingLocal Tests ─────────────────────────────────────────
+
+    #[test]
+    fn docker_forwarding_local_bind_port() {
+        let cname = "it-fwd-local";
+        let services_yaml = r#"
+services:
+  it-svc-fwd-local:
+    type: docker
+    match:
+      project: it-svc-fwd-local
+    forwarding:
+      - type: local
+        port: 80
+        bind_port: 36000
+"#;
+
+        let script = format!(
+            r#"{setup}
+docker rm -f {cname} 2>/dev/null || true
+docker run -d --name {cname} -l "com.docker.compose.project=it-svc-fwd-local" nginx:alpine
+sleep 4
+
+SVC=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq 'to_entries[] | select(.value.Service == "it-svc-fwd-local") | .value')
+PORT=$(echo "$SVC" | jq -r '.Port')
+if [ "$PORT" != "36000" ]; then echo "FAIL: expected static port 36000, got $PORT" >&2; exit 1; fi
+
+FORWARDING=$(echo "$SVC" | jq -r '.Meta.forwarding')
+if [ "$FORWARDING" != "true" ]; then echo "FAIL: missing forwarding meta" >&2; exit 1; fi
+
+FWD_TYPE=$(echo "$SVC" | jq -r '.Meta.forwarding_type')
+if [ "$FWD_TYPE" != "local" ]; then echo "FAIL: expected forwarding_type=local, got $FWD_TYPE" >&2; exit 1; fi
+
+KEYS=$(curl -sf "$CONSUL_HTTP_ADDR/v1/kv/nginx-configs/?recurse=true" | jq -r '.[].Key // empty')
+MATCH=$(echo "$KEYS" | grep "it-svc-fwd-local" || true)
+if [ -n "$MATCH" ]; then echo "FAIL: forwarding-local should have no nginx KV config, got $MATCH" >&2; exit 1; fi
+
+echo "PASS: forwarding local bind_port=36000 with forwarding_type=local"
+{teardown}
+"#,
+            setup = new_format_setup(services_yaml, ""),
+            teardown = test_teardown(&[cname]),
+            cname = cname,
+        );
+
+        let out = run(&script);
+        assert_pass(&out, "docker_forwarding_local_bind_port");
+    }
+
+    #[test]
+    fn docker_forwarding_local_with_template() {
+        let cname = "it-fwd-local-tpl";
+        let services_yaml = r#"
+services:
+  it-svc-fwd-local-tpl:
+    type: docker
+    match:
+      project: it-svc-fwd-local-tpl
+    rproxy:
+      - port: 80
+        template: REVERSE_PROXY
+        domains:
+          - fwd-local-tpl.test.local
+    forwarding:
+      - type: local
+        port: 80
+        bind_port: 36001
+"#;
+
+        let script = format!(
+            r#"{setup}
+docker rm -f {cname} 2>/dev/null || true
+docker run -d --name {cname} -l "com.docker.compose.project=it-svc-fwd-local-tpl" nginx:alpine
+sleep 4
+
+COUNT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq '[to_entries[] | select(.value.Service == "it-svc-fwd-local-tpl")] | length')
+if [ "$COUNT" != "1" ]; then echo "FAIL: expected 1 Consul entry, got $COUNT" >&2; exit 1; fi
+
+SVC=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq 'to_entries[] | select(.value.Service == "it-svc-fwd-local-tpl") | .value')
+PORT=$(echo "$SVC" | jq -r '.Port')
+if [ "$PORT" != "36001" ]; then echo "FAIL: expected static port 36001, got $PORT" >&2; exit 1; fi
+
+META=$(echo "$SVC" | jq '.Meta')
+FORWARDING=$(echo "$META" | jq -r '.forwarding')
+if [ "$FORWARDING" != "true" ]; then echo "FAIL: missing forwarding meta" >&2; exit 1; fi
+
+FWD_TYPE=$(echo "$META" | jq -r '.forwarding_type')
+if [ "$FWD_TYPE" != "local" ]; then echo "FAIL: expected forwarding_type=local, got $FWD_TYPE" >&2; exit 1; fi
+
+TEMPLATE=$(echo "$META" | jq -r '.template')
+if [ "$TEMPLATE" != "REVERSE_PROXY" ]; then echo "FAIL: expected template=REVERSE_PROXY, got $TEMPLATE" >&2; exit 1; fi
+
+# Verify nginx KV config exists (non-empty template)
+KEYS=$(curl -sf "$CONSUL_HTTP_ADDR/v1/kv/nginx-configs/?recurse=true" | jq -r '.[].Key // empty')
+MATCH=$(echo "$KEYS" | grep "it-svc-fwd-local-tpl" || true)
+if [ -z "$MATCH" ]; then echo "FAIL: forwarding-local with template should have nginx KV config" >&2; exit 1; fi
+
+echo "PASS: forwarding local with template merged, port=$PORT forwarding=$FORWARDING template=$TEMPLATE"
+{teardown}
+"#,
+            setup = new_format_setup_ext(services_yaml, "", "--no-forwarding"),
+            teardown = test_teardown(&[cname]),
+            cname = cname,
+        );
+
+        let out = run(&script);
+        assert_pass(&out, "docker_forwarding_local_with_template");
+    }
+
+    #[test]
+    fn local_forwarding_local_bind_port() {
+        let services_yaml = r#"
+services:
+  it-local-fwd-local:
+    type: local
+    address: 10.99.99.99
+    forwarding:
+      - type: local
+        port: 5000
+        bind_port: 50000
+"#;
+
+        let script = format!(
+            r#"{setup}
+
+PORT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-local-fwd-local") | .value.Port')
+if [ -z "$PORT" ] || [ "$PORT" = "null" ]; then echo "FAIL: not registered with Consul" >&2; exit 1; fi
+if [ "$PORT" != "50000" ]; then echo "FAIL: expected static port 50000, got $PORT" >&2; exit 1; fi
+
+ADDR=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-local-fwd-local") | .value.Address')
+if [ "$ADDR" != "10.99.99.99" ]; then echo "FAIL: expected address 10.99.99.99, got $ADDR" >&2; exit 1; fi
+
+META=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq 'to_entries[] | select(.value.Service == "it-local-fwd-local") | .value.Meta')
+FORWARDING=$(echo "$META" | jq -r '.forwarding')
+if [ "$FORWARDING" != "true" ]; then echo "FAIL: missing forwarding meta" >&2; exit 1; fi
+
+FWD_TYPE=$(echo "$META" | jq -r '.forwarding_type')
+if [ "$FWD_TYPE" != "local" ]; then echo "FAIL: expected forwarding_type=local, got $FWD_TYPE" >&2; exit 1; fi
+
+# Verify no nginx KV config (empty template)
+KEYS=$(curl -sf "$CONSUL_HTTP_ADDR/v1/kv/nginx-configs/?recurse=true" | jq -r '.[].Key // empty')
+MATCH=$(echo "$KEYS" | grep "it-local-fwd-local" || true)
+if [ -n "$MATCH" ]; then echo "FAIL: forwarding-local should have no nginx KV config, got $MATCH" >&2; exit 1; fi
+
+echo "PASS: local forwarding local at 10.99.99.99:50000 with forwarding_type=local"
+kill %3 %2 %1 2>/dev/null || true
+sleep 1
+"#,
+            setup = new_format_setup(services_yaml, ""),
+        );
+        let out = run(&script);
+        assert_pass(&out, "local_forwarding_local_bind_port");
+    }
+
+    #[test]
+    fn docker_forwarding_local_no_bind() {
+        let cname = "it-fwd-local-nb";
+        let services_yaml = r#"
+services:
+  it-svc-fwd-local-nb:
+    type: docker
+    match:
+      project: it-svc-fwd-local-nb
+    forwarding:
+      - type: local
+        port: 80
+"#;
+
+        let script = format!(
+            r#"{setup}
+docker rm -f {cname} 2>/dev/null || true
+docker run -d --name {cname} -l "com.docker.compose.project=it-svc-fwd-local-nb" nginx:alpine
+sleep 4
+
+SVC=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq 'to_entries[] | select(.value.Service == "it-svc-fwd-local-nb") | .value')
+PORT=$(echo "$SVC" | jq -r '.Port')
+if [ -z "$PORT" ] || [ "$PORT" = "null" ]; then echo "FAIL: not registered with Consul" >&2; exit 1; fi
+if [ "$PORT" -lt 32768 ] || [ "$PORT" -gt 61000 ]; then echo "FAIL: expected ephemeral port in 32768-61000, got $PORT" >&2; exit 1; fi
+
+FORWARDING=$(echo "$SVC" | jq -r '.Meta.forwarding')
+if [ "$FORWARDING" != "true" ]; then echo "FAIL: missing forwarding meta" >&2; exit 1; fi
+
+FWD_TYPE=$(echo "$SVC" | jq -r '.Meta.forwarding_type')
+if [ "$FWD_TYPE" != "local" ]; then echo "FAIL: expected forwarding_type=local, got $FWD_TYPE" >&2; exit 1; fi
+
+echo "PASS: forwarding local no bind (ephemeral), port=$PORT with forwarding_type=local"
+{teardown}
+"#,
+            setup = new_format_setup(services_yaml, ""),
+            teardown = test_teardown(&[cname]),
+            cname = cname,
+        );
+
+        let out = run(&script);
+        assert_pass(&out, "docker_forwarding_local_no_bind");
     }
 }
