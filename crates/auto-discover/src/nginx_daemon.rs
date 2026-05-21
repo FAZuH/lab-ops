@@ -5,9 +5,15 @@
 //! per-service postproc scripts and common postprocs from `/etc/auto-discover/postprocs.d/`,
 //! writes the result to disk, creates symlinks in `sites-available` /
 //! `streams-available`, and reloads nginx.
+//!
+//! Orphaned KV entries (where the corresponding service no longer exists in
+//! the Consul catalog) are periodically garbage-collected every 5 minutes.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
+use std::time::Duration;
+use std::time::Instant;
 
 use color_eyre::eyre::bail;
 use color_eyre::eyre::WrapErr;
@@ -30,6 +36,7 @@ pub struct NginxDaemon {
     sites_available: PathBuf,
     streams_available: PathBuf,
     postproc_dir: PathBuf,
+    last_gc: Mutex<Instant>,
 }
 
 impl NginxDaemon {
@@ -56,6 +63,7 @@ impl NginxDaemon {
             sites_available,
             streams_available,
             postproc_dir,
+            last_gc: Mutex::new(Instant::now()),
         }
     }
 
@@ -108,8 +116,27 @@ impl NginxDaemon {
     /// One-shot sync: read all nginx configs from Consul KV, apply postprocs,
     /// write config files, create symlinks, and reload nginx.
     ///
+    /// Also runs a periodic GC sweep (every 5 min) to delete orphaned KV
+    /// entries whose registered services no longer exist in the Consul catalog.
+    ///
     /// Returns `Ok(true)` if configs changed and nginx was reloaded.
     pub async fn sync(&self) -> Result<bool> {
+        // Periodic GC: sweep orphaned nginx config KV entries every 5 min
+        let should_gc = {
+            let mut last_gc = self.last_gc.lock().unwrap();
+            if last_gc.elapsed() >= Duration::from_secs(300) {
+                *last_gc = Instant::now();
+                true
+            } else {
+                false
+            }
+        };
+        if should_gc {
+            if let Err(e) = self.gc_orphaned_kv_entries().await {
+                tracing::warn!("nginx config GC failed: {}", e);
+            }
+        }
+
         let entries = self
             .consul
             .list_kv_prefix("nginx-configs/")
@@ -330,6 +357,55 @@ impl NginxDaemon {
         Ok(removed)
     }
 
+    /// GC sweep: delete orphaned nginx config KV entries whose registered
+    /// services no longer exist in the Consul catalog.
+    ///
+    /// Lists all KV entries under `nginx-configs/`, queries the catalog for
+    /// all known service instance IDs, and deletes any KV entry whose
+    /// service ID is not found. Handles both `.conf` and `.postproc` entries
+    /// under both `sites/` and `streams/` prefixes.
+    async fn gc_orphaned_kv_entries(&self) -> Result<()> {
+        let entries = self
+            .consul
+            .list_kv_prefix("nginx-configs/")
+            .await
+            .wrap_err("failed to list nginx config KV entries for GC")?;
+
+        let catalog_ids = self
+            .consul
+            .get_all_catalog_service_ids()
+            .await
+            .wrap_err("failed to query Consul catalog for GC")?;
+
+        let mut orphaned = Vec::new();
+
+        for entry in &entries {
+            let Some(service_id) = extract_service_id(&entry.key) else {
+                continue;
+            };
+
+            if !catalog_ids.contains(service_id) {
+                orphaned.push(service_id.to_string());
+            }
+        }
+
+        orphaned.sort();
+        orphaned.dedup();
+
+        for id in &orphaned {
+            tracing::info!("GC removing orphaned nginx config KV for {}", id);
+            if let Err(e) = self.consul.delete_nginx_config_kv(id).await {
+                tracing::warn!("GC failed to delete KV for {}: {}", id, e);
+            }
+        }
+
+        if !orphaned.is_empty() {
+            tracing::info!("GC removed {} orphaned nginx config(s)", orphaned.len());
+        }
+
+        Ok(())
+    }
+
     /// Run `nginx -t` to validate config syntax, then `systemctl reload nginx`
     /// to apply changes.
     fn validate_and_reload(&self) -> Result<()> {
@@ -353,5 +429,66 @@ impl NginxDaemon {
         }
 
         Ok(())
+    }
+}
+
+/// Extract the service ID from a Consul KV key under `nginx-configs/`.
+///
+/// Returns the service ID only for `.conf` entries (skipping `.postproc`).
+///
+/// # Examples
+///
+/// ```ignore
+/// assert_eq!(extract_service_id("nginx-configs/sites/svc-123.conf"), Some("svc-123"));
+/// assert_eq!(extract_service_id("nginx-configs/streams/mysvc-8080.conf"), Some("mysvc-8080"));
+/// assert_eq!(extract_service_id("nginx-configs/sites/svc-123.postproc"), None);
+/// ```
+fn extract_service_id(kv_key: &str) -> Option<&str> {
+    let rest = kv_key.strip_prefix("nginx-configs/")?;
+    if !rest.ends_with(".conf") {
+        return None;
+    }
+    rest.strip_suffix(".conf")?.split('/').next_back()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_service_id_sites_conf() {
+        assert_eq!(
+            extract_service_id("nginx-configs/sites/node1-example-com-32000.conf"),
+            Some("node1-example-com-32000"),
+        );
+    }
+
+    #[test]
+    fn test_extract_service_id_streams_conf() {
+        assert_eq!(
+            extract_service_id("nginx-configs/streams/node2-dns-53530.conf"),
+            Some("node2-dns-53530"),
+        );
+    }
+
+    #[test]
+    fn test_extract_service_id_postproc_is_none() {
+        assert_eq!(
+            extract_service_id("nginx-configs/sites/svc-123.postproc"),
+            None,
+        );
+    }
+
+    #[test]
+    fn test_extract_service_id_unrelated_key_is_none() {
+        assert_eq!(extract_service_id("some-other-prefix/foo.conf"), None);
+    }
+
+    #[test]
+    fn test_extract_service_id_with_hyphens_and_numbers() {
+        assert_eq!(
+            extract_service_id("nginx-configs/sites/service-node-1-drive-example-com-32000.conf"),
+            Some("service-node-1-drive-example-com-32000"),
+        );
     }
 }

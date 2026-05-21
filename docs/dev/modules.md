@@ -180,6 +180,8 @@ Interacts with Consul Agent API:
 - `get_services_by_container()` — Query services by container ID
 - `get_forwarding_services()` — Query catalog for forwarding services across all agents
 - `get_nginx_configs()`, `watch_nginx_configs()` — KV operations for nginx configs
+- `get_all_catalog_service_ids()` — Query the Consul catalog cluster-wide for all registered service instance IDs. Used by the nginx daemon GC to detect orphaned KV entries
+- `delete_nginx_config_kv()` — Delete all nginx config and postproc KV entries for a service ID (both `sites/` and `streams/` prefixes)
 
 ### `daemon.rs` — DiscoveryDaemon
 
@@ -208,8 +210,9 @@ Calls `lab-ops natmap docker add/rm` as an external command via `std::process::C
 ### `nginx_daemon.rs` — NginxDaemon
 
 Proxy-side nginx config management:
-- `sync()` — Pull configs from Consul KV, run postprocs, write to disk, reload nginx
+- `sync()` — Pull configs from Consul KV, run postprocs, write to disk, reload nginx. Also runs a periodic GC sweep (every 5 min) that cross-references KV entries against the Consul catalog and deletes orphaned entries
 - `run_loop()` — Blocking-query watch loop
+- `gc_orphaned_kv_entries()` — GC sweep that finds and deletes KV entries whose service IDs no longer exist in the Consul catalog
 
 ### `ports.rs` — PortState
 

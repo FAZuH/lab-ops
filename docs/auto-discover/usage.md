@@ -105,151 +105,178 @@ Each service server has a single YAML file at `/etc/auto-discover/discovery.yaml
 ```yaml
 # /etc/auto-discover/discovery.yaml
 
-name: service-node-1          # node identity (used for Consul service IDs and stale cleanup)
+node:
+  name: service-node-1        # node identity (used for Consul service IDs and stale cleanup)
 
 defaults:
-  proxy_ip: 203.0.113.43  # cascades to each network entry
-  bind_ip: 10.0.0.101   # cascades: per-network → defaults → container IP (fallback)
-  bind_interface: eth0     # resolved via `ip -j -4 addr show <iface>`
-  protocol: tcp
+  proxy_ip: 203.0.113.43      # cascades to each service entry
+  proxy_on: proxy-node-1       # proxy server node name (optional, for multi-proxy)
+  bind_ip: 10.0.0.101         # cascades: per-service → defaults → container IP (fallback)
+  bind_interface: eth0         # resolved via `ip -j -4 addr show <iface>`
+  nginx_generator: /usr/local/bin/auto-discover-gen-nginx  # path to generator script
+  preprocess: ""               # default preprocess script (runs on service node)
+  postprocess: ""              # default postprocess script (runs on proxy)
 
-networks:                       # NOT "services" — was renamed
-  - name: example-drive           # must match com.docker.compose.project label
-    container_port: 80          # must match a port the container exposes (Docker EXPOSE)
-    domains:
-      - drive.example.com
-    template: REVERSE_PROXY
+services:
+  example-drive:
+    type: docker               # "docker" or "local"
+    match:
+      project: example-drive   # must match com.docker.compose.project label
+    rproxy:                    # reverse proxy entries (nginx configs)
+      - port: 80
+        template: REVERSE_PROXY
+        domains:
+          - drive.example.com
 
-  - name: example-mail
-    container_port: 80
-    domains:
-      - mail.internal.example.com
-    template: REVERSE_PROXY_PRIVATE
+  example-mail:
+    type: docker
+    match:
+      project: example-mail
     extra:
       eas: "true"
-    bind_ip: 10.0.0.101       # overrides defaults.bind_ip
+    bind_ip: 10.0.0.101        # overrides defaults.bind_ip
+    rproxy:
+      - port: 80
+        template: REVERSE_PROXY_PRIVATE
+        domains:
+          - mail.internal.example.com
 
-  - name: example-mc              # same project, multiple ports (multi-entry matching)
-    container_port: 25565
-    template: STREAM
-
-  - name: example-mc              # second entry for same project (UDP port)
-    container_port: 19132
-    template: STREAM
-    protocol: udp
-
-  - name: example-mc              # forwarding entry (kernel NAT, no nginx)
-    container_port: 25565
-    forwarding:
-      ext_ip: 203.0.113.43
-      ext_ports: [25565]
-      proto: tcp
-      hairpin: true
-    template: ""                # empty template = forwarding only
+  example-mc:                  # same project, multiple ports
+    type: docker
+    match:
+      project: example-mc
+    rproxy:
+      - port: 25565            # TCP entry
+        template: STREAM
+      - port: 19132            # UDP entry
+        template: STREAM
+    forwarding:                # kernel-level NAT (bypasses NGINX)
+      - type: remote
+        port: 25565
+        ext_ip: 203.0.113.43
+        ext_ports: [25565]
+        proto: tcp
+        hairpin: true
 ```
 
 **Top-level fields:**
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `name` | Yes | Node identity. Used for Consul service ID prefix and stale-service cleanup. Replaces the old `server.json` |
-| `defaults` | No | Cascade defaults for all networks (see below) |
-| `networks` | Yes | List of network/service definitions (formerly `services`) |
+| `node` | Yes | Node identity (see below) |
+| `config_dir` | No | Directory for generated configs. Default: none |
+| `defaults` | No | Cascade defaults for all services (see below) |
+| `services` | Yes | Map of service definitions (key = service name, used as Consul service name) |
 
-**Per-network fields:**
+**`node` fields:**
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `name` | Yes | Must match `com.docker.compose.project` Docker label (for Docker containers) or arbitrary name (for local services). One project can have multiple entries (e.g. TCP + UDP ports) |
-| `container_port` | No* | Port the service listens on inside the container. Required for Docker containers — the container must expose this via Docker EXPOSE. Leave unset when using `local_port` for a local (non-Docker) service |
-| `local_ip` | No | IP address of a local (non-Docker) service. When set, the service is treated as running directly on the host — no Docker event matching or container inspection is performed |
-| `local_port` | No | Port for a local (non-Docker) service. Alternative to `container_port`. Mutually exclusive — use `local_port` + `local_ip` instead of `container_port` for services not running in Docker |
-| `domains` | No | Domain names for NGINX `server_name`. First domain is the primary — also used as a discriminator in the Consul service ID to prevent collisions when multiple entries share the same name+port |
-| `template` | Yes (unless `forwarding` is set) | Nginx template type: `REVERSE_PROXY`, `REVERSE_PROXY_PRIVATE`, `STREAM`, or `STREAM_PRIVATE`. Can be `""` when `forwarding` is used |
-| `protocol` | No | `tcp` or `udp`. Defaults to `tcp` |
-| `forwarding` | No | Kernel-level NAT config (iptables DNAT). When set, bypasses NGINX — uses static port from `ext_ports[0]` instead of ephemeral allocation. See [[#Forwarding Config]] below |
-| `proxy_ip` | No | Override for the proxy server IP. Cascades from `defaults.proxy_ip` |
+| `name` | Yes | Node identity. Used for Consul service ID prefix and stale-service cleanup |
+
+**Per-service fields (`services.<name>`):**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `type` | Yes | `docker` (matches Docker containers) or `local` (runs directly on host) |
+| `match` | Yes (docker) | Container matching rules. Required for `type: docker` to avoid matching unrelated containers. See [[#Match Config]] below |
+| `address` | No | IP address for `type: local` services. Not used for Docker services |
 | `bind_ip` | No | IP to bind the natmap host port on. Cascades from `defaults.bind_ip`. Falls back to container Docker IP |
 | `bind_interface` | No | Interface name to resolve an IP from via `ip -j -4 addr show`. Cascades from `defaults.bind_interface` |
+| `rproxy` | No | List of reverse proxy port entries. Each entry generates an nginx config stored in Consul KV. See [[#RProxy Config]] below |
+| `forwarding` | No | List of kernel-level NAT port entries (iptables DNAT). See [[#Forwarding Config]] below |
 | `extra` | No | Arbitrary key-value pairs passed to the generator script as `AUTO_DISCOVER_EXTRA_<key>` env vars |
-| `nginx_generator` | No | Path to nginx config generator script. Cascades per-network → defaults → `/usr/local/bin/auto-discover-gen-nginx` |
-| `preprocess` | No | Inline shell script run on the service node after the generator. stdin = generator output, stdout = stored config |
-| `postprocess` | No | Inline shell script stored in Consul KV, run on the proxy. stdin = config from KV, stdout = final nginx config. Exit 1 = skip |
+
+**Match Config (`services.<name>.match`):**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `project` | No | Only match containers with this `com.docker.compose.project` label |
+| `container` | No | Only match a container with this exact name |
+| `container_regex` | No | Only match containers whose name matches this regex |
+
+At least one match field should be set. If `match` is absent, the service matches **any** container exposing the configured port — use with caution.
+
+**RProxy Config (`services.<name>.rproxy[]`):**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `port` | Yes | Container/host port the service listens on |
+| `template` | Yes | Nginx template type: `REVERSE_PROXY`, `REVERSE_PROXY_PRIVATE`, `STREAM`, or `STREAM_PRIVATE` |
+| `domains` | No | Domain names for NGINX `server_name`. First domain is the primary — also used as a discriminator in the Consul service ID to prevent collisions when multiple entries share the same name+port |
+| `proxy_on` | No | Only generate nginx config on this specific proxy server node name. Useful for multi-proxy setups |
+| `proxy_ip` | No | Override for the proxy server IP. Cascades from `defaults.proxy_ip` |
+| `nginx_generator` | No | Path to nginx config generator script. Cascades from `defaults.nginx_generator`. Default: `/usr/local/bin/auto-discover-gen-nginx` |
+| `preprocess` | No | Inline shell script run on the service node after the generator. stdin = generator output, stdout = stored config. Cascades from `defaults.preprocess` |
+| `postprocess` | No | Inline shell script stored in Consul KV, run on the proxy. stdin = config from KV, stdout = final nginx config. Exit 1 = skip. Cascades from `defaults.postprocess` |
 
 **Defaults fields:**
 
 | Field | Description |
 |-------|-------------|
-| `proxy_ip` | Default proxy server listen IP for all networks |
-| `bind_ip` | Default natmap bind IP for all networks |
+| `proxy_on` | Default proxy server node name for all services |
+| `proxy_ip` | Default proxy server listen IP for all services |
+| `bind_ip` | Default natmap bind IP for all services |
 | `bind_interface` | Default interface for IP resolution |
-| `protocol` | Default protocol for all networks |
+| `nginx_generator` | Default path to nginx config generator script |
+| `preprocess` | Default preprocess script |
+| `postprocess` | Default postprocess script |
 
-**Bind IP resolution order (per network):**
-1. `networks[].bind_ip` (explicit IP)
-2. `networks[].bind_interface` → resolved via `ip -j -4 addr show`
+**Bind IP resolution order (per service):**
+1. `services.<name>.bind_ip` (explicit IP)
+2. `services.<name>.bind_interface` → resolved via `ip -j -4 addr show`
 3. `defaults.bind_ip`
 4. `defaults.bind_interface` → resolved
 5. Container's Docker network IP (fallback)
 
-### Global Defaults
-
-Node-level defaults cascade to all network entries. Per-network fields override defaults.
-
-```yaml
-name: service-node-1
-
-defaults:
-  proxy_ip: 203.0.113.43
-  bind_ip: 10.0.0.101
-  bind_interface: tailscale0
-  protocol: tcp
-
-networks:
-  - name: example-drive
-    container_port: 80
-    domains:
-      - drive.example.com
-    template: REVERSE_PROXY
-```
-
 ### Forwarding Config
 
-When `forwarding` is set on a network entry, the service uses kernel-level NAT (iptables DNAT) instead of going through NGINX reverse proxy. This eliminates proxy latency for game servers and avoids double-TLS-termination for mail servers.
+Each entry in `services.<name>.forwarding[]` defines a kernel-level NAT port. Forwarding bypasses NGINX entirely — it creates iptables DNAT rules to route traffic directly from an external IP to the service, eliminating proxy latency for game servers, mail servers, etc.
 
 There are two forwarding types:
 
-- **`remote`** (legacy default, proxy-server DNAT): Registers Consul metadata (`forwarding=true`, `ext_ip`, `ext_ports`, `hairpin`) for the proxy server's forwarding daemon to sync DNAT rules across the cluster. The proxy server handles the iptables DNAT from a public IP to the service node address.
-- **`local`** (direct node DNAT): Creates the iptables DNAT rule directly on the service node via natmap. Uses `bind_port` as a static host port instead of ephemeral allocation. No proxy-server forwarding sync needed.
+- **`remote`** (proxy-server DNAT): Registers Consul metadata (`forwarding=true`, `ext_ip`, `ext_ports`, `hairpin`) for the proxy server's forwarding daemon to sync DNAT rules. The proxy server handles the iptables DNAT from a public IP to the service node address.
+- **`local`** (direct node DNAT): Creates the iptables DNAT rule directly on the service node via `lab-ops natmap`. No proxy-server forwarding sync needed.
 
-In the legacy `networks:` format, all forwarding entries default to `type: remote`. To use `type: local`, write the config in the new `services:` format (see [[#New Format Configuration]] below).
+When a forwarding entry shares a `port` with an `rproxy` entry, they are **merged**: both the nginx config and the DNAT rule are created for the same port. The nginx config uses the rproxy's `template` and `domains`, while traffic matching the DNAT rule bypasses NGINX.
 
-**Forwarding fields:**
+**Forwarding Config (`services.<name>.forwarding[]`):**
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `type` | No | `local` or `remote`. Defaults to `remote` in legacy format. `local` creates DNAT on the service node directly; `remote` adds Consul metadata for proxy-server DNAT sync |
+| `type` | Yes | `local` or `remote` |
+| `port` | Yes | Container/host port to forward |
+| `proto` | No | Protocol for the iptables DNAT rule. Defaults to `tcp` |
+| `bind_ip` | No | Override for the natmap bind IP on this forwarding entry. Cascades from service-level `bind_ip` |
+| `bind_interface` | No | Override for the interface on this forwarding entry. Cascades from service-level `bind_interface` |
+| `bind_port` | No | Static host port for `type: local`. When set, uses this port directly (no ephemeral allocation). When absent, allocates from the ephemeral pool |
 | `ext_ip` | Yes (remote) | Public IP on the proxy server to forward FROM. Only used for `type: remote` |
 | `ext_ports` | Yes (remote) | Static port(s) on the public IP (not auto-allocated from ephemeral range). First port (`ext_ports[0]`) is used as the natmap host port. Only used for `type: remote` |
-| `bind_port` | No | Static host port for `type: local`. When set, uses this port directly (no ephemeral allocation). When absent, allocates from the ephemeral pool |
-| `proto` | No | Protocol for the iptables DNAT rule. Defaults to `tcp` |
 | `hairpin` | No | Create hairpin NAT rules (internal hosts can reach themselves via external IP). Defaults to `false`. Only used for `type: remote` |
+| `proxy_on` | No | Only apply DNAT rules on this specific proxy server node name |
 
 **Examples:**
 
-Legacy format (ForwardingRemote only):
+ForwardingRemote (proxy-server DNAT) with merged rproxy:
 ```yaml
-networks:
-  - name: example-mc
-    container_port: 25565
+services:
+  example-mc:
+    type: docker
+    match:
+      project: example-mc
+    rproxy:
+      - port: 25565
+        template: STREAM
     forwarding:
-      ext_ip: 203.0.113.43
-      ext_ports: [25565]
-      proto: tcp
-      hairpin: true
+      - type: remote
+        port: 25565
+        ext_ip: 203.0.113.43
+        ext_ports: [25565]
+        proto: tcp
+        hairpin: true
 ```
 
-New format (ForwardingLocal with static bind port):
+ForwardingLocal (direct node DNAT):
 ```yaml
 services:
   example-mc:
@@ -280,6 +307,25 @@ services:
 2. **Service node**: Registers in Consul with `forwarding=true`, `forwarding_type=local`. No `ext_ip`, `ext_ports`, or `hairpin` metadata.
 3. **No proxy-server DNAT sync**: ForwardingLocal does NOT participate in the proxy-server forwarding daemon. DNAT is local to the service node.
 
+### Legacy Config Format
+
+The old `networks:` format is still supported for backward compatibility. It is automatically detected when `name:` is at the top level (instead of `node:`):
+
+```yaml
+# Legacy format (auto-detected)
+name: service-node-1
+defaults:
+  proxy_ip: 203.0.113.43
+networks:
+  - name: example-drive
+    container_port: 80
+    domains:
+      - drive.example.com
+    template: REVERSE_PROXY
+```
+
+The legacy format maps each `networks[]` entry to a single `services.<name>` entry. All entries with the same `name` are merged into one service. Forwarding entries in legacy format always use `type: remote`. New deployments should use the `services:` format above.
+
 ### Proxy Server NGINX Config Generation
 
 The proxy server runs **`lab-ops auto-discover daemon --no-discovery`** as a systemd daemon that watches Consul KV for nginx config changes using Consul's blocking-query mechanism.
@@ -294,6 +340,8 @@ The proxy server runs **`lab-ops auto-discover daemon --no-discovery`** as a sys
    - Symlinks to `/etc/nginx/sites-available/` or `/etc/nginx/streams-available/`
    - Runs `nginx -t && systemctl reload nginx` if configs changed
 3. nginx-ui manages `sites-enabled/` and `streams-enabled/` symlinks — the daemon never touches them
+
+**Stale config GC:** Every 5 minutes, the daemon performs a GC sweep that cross-references the KV entries against the Consul catalog. If a KV entry's service ID no longer exists in any registered Consul service (e.g., a node crashed and `DeregisterCriticalServiceAfter` auto-removed the service after 5 minutes), the orphaned config and postproc KV entries are deleted. This prevents stale configs from accumulating and disrupting nginx with references to dead upstream addresses.
 
 **Generator script** (`/usr/local/bin/auto-discover-gen-nginx`):
 - Receives service data via `AUTO_DISCOVER_*` env vars
@@ -461,24 +509,24 @@ Returns all `.conf` and `.postproc` keys. The daemon processes each config throu
 
 ### Container Matching
 
-The daemon matches Docker containers to network entries using a two-level filter:
+The daemon matches Docker containers to service definitions using a two-level filter:
 
-1. **Project match**: `networks[].name == com.docker.compose.project` label (one project can match multiple network entries)
-2. **Port match**: The container must expose `networks[].container_port` via Docker (EXPOSE or published port). This prevents:
+1. **Project match**: `services.<name>.match.project == com.docker.compose.project` label (one project can match multiple services, and each service can define multiple ports)
+2. **Port match**: The container must expose one of the service's `rproxy[].port` or `forwarding[].port` values via Docker (EXPOSE or published port). This prevents:
    - Host-networked containers (no Docker-managed ports) from being matched
-   - Wrong-port containers within a compose project from being matched (e.g., `grafana:3000` won't match `prometheus:9090` entry even though both are in `example-grafana`)
+   - Wrong-port containers within a compose project from being matched (e.g., `grafana:3000` won't match `prometheus:9090` service even though both are in `example-grafana`)
 
 For `sync()`, exposed ports are read from the container list API. For Docker events (`handle_container_start`), they are looked up via `docker inspect`.
 
 ### Operations
 
-1. **On startup**: Parse `/etc/auto-discover/discovery.yaml`. Sync all running Docker containers matching configured networks via the two-level filter above. The initial sync retries up to 10 times with exponential backoff (2s → 30s) in case `natmap.service` socket is not yet ready — this prevents the race condition where `lab-ops auto-discover` starts before natmap creates `/run/natmap.sock`.
+1. **On startup**: Parse `/etc/auto-discover/discovery.yaml`. Sync all running Docker containers matching configured services via the two-level filter above. The initial sync retries up to 10 times with exponential backoff (2s → 30s) in case `natmap.service` socket is not yet ready — this prevents the race condition where `lab-ops auto-discover` starts before natmap creates `/run/natmap.sock`.
 
 2. **On Docker event (start)**:
    - Look up container's exposed ports via `docker inspect`
-   - Match container to all network entries in `discovery.yaml` where `networks[].name == compose_project` AND `container.exposed_ports` contains `networks[].container_port`
-   - Determine bind IP via the resolution chain (per-network bind_ip → bind_interface → defaults → container IP)
-   - **Forwarding service**: Use `ext_ports[0]` as a static port (verify with `port_is_free`). Skip ephemeral allocation and `ports.json` persistence
+   - Match container to all services in `discovery.yaml` where `services.<name>.match.project == compose_project` AND `container.exposed_ports` contains one of the service's `rproxy[].port` or `forwarding[].port` values
+   - Determine bind IP via the resolution chain (service bind_ip → bind_interface → defaults → container IP)
+   - **Forwarding service**: Use `ext_ports[0]` (remote) or `bind_port` (local) as a static port (verify with `port_is_free`). Skip ephemeral allocation and `ports.json` persistence
    - **Non-forwarding service**: Allocate a persistent free host port from the ephemeral range (32768-60999)
    - Run `lab-ops natmap docker add <container_id> [bind_ip:]<host_port>:<container_port>/<protocol>`
    - Register the service to Consul with all metadata (including forwarding meta when applicable)
@@ -547,11 +595,11 @@ Ports are allocated from the range 32768-60999 and persisted to `/var/lib/auto-d
 
 ## Generation Tracking
 
-Each configuration deployment generates a `generation_id` (`{node_name}-{sha256_of_discovery_yaml[:16]}`). The node name is taken from the top-level `name` field in `discovery.yaml`. This allows cleanup of stale Consul registrations from previous deployments and ensures per-node isolation.
+Each configuration deployment generates a `generation_id` (`{node_name}-{sha256_of_discovery_yaml[:16]}`). The node name is taken from `node.name` in `discovery.yaml`. This allows cleanup of stale Consul registrations from previous deployments and ensures per-node isolation.
 
 ## Node Identity
 
-The `name` field in `discovery.yaml` is the single source of node identity. It replaces:
+The `node.name` field in `discovery.yaml` is the single source of node identity. It replaces:
 - `hostname::get()` (unreliable across environments)
 - `server.json` `name` field (was never wired up, now removed)
 - `server.json` `pass_ip` → now `defaults.bind_ip`
