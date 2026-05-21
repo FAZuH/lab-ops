@@ -1,3 +1,10 @@
+## 0.1.11 (2026-05-21)
+
+
+### Auto Discover
+
+* Delete stale Consul K/V configs ([7e0c46e](https://github.com/FAZuH/lab-ops/commit/7e0c46e5c7dc1729e87fd496529edc53d603de6d))
+
 ## 0.1.10 (2026-05-21)
 
 
@@ -31,21 +38,4 @@
 ### Bug Fixes
 
 * Fix stale DNAT rules not cleaned up properly ([9994710](https://github.com/FAZuH/lab-ops/commit/99947108f53792ffac9f4e16ed28fe2556499201))
-
-## 0.1.6 (2026-05-20)
-
-
-### ⚠ BREAKING CHANGES
-
-* fat refactor
-
-### New Features
-
-* Add auto-discover ([1799731](https://github.com/FAZuH/lab-ops/commit/179973185380bd3047ab56a2fc3ce47eeea92bc7))
-* Add natmap clear command ([8855146](https://github.com/FAZuH/lab-ops/commit/8855146bdd29132ed21ff0637517b0a46a4d05fc))
-
-
-### Cli
-
-* Rename argument --state-dir to --state ([926802e](https://github.com/FAZuH/lab-ops/commit/926802ef90f66f7d8f9c16ec806e55f18c3d3d50))
 
