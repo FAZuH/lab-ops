@@ -156,12 +156,13 @@ pub enum DockerCommand {
     /// Adds a new port mapping to a running container.
     #[command(name = "add")]
     Add {
-        /// Container ID or name.
+        /// Container ID.
         #[arg(value_name = "CONTAINER_ID")]
         container_id: String,
-        /// Port mapping in the form `[HOST_IP:]HOST_PORT:CONTAINER_PORT[/PROTO]`.
-        #[arg(value_name = "[HOST_IP:]HOST_PORT:CONTAINER_PORT[/PROTO]")]
-        mapping: String,
+        /// Port mapping in the form `[HOST_IP:]HOST_PORT[:[TARGET_IP:]TARGET_PORT][/PROTO]`.
+        /// Optional when --name is used (CONTAINER_ID becomes the mapping).
+        #[arg(value_name = "MAPPING")]
+        mapping: Option<String>,
         /// Container name (alternative to CONTAINER_ID). When set, CONTAINER_ID is treated as the mapping.
         #[arg(long)]
         name: Option<String>,

@@ -86,15 +86,27 @@ pub struct ForwardingConfig {
 /// A single network/service definition from `discovery.yaml`.
 ///
 /// Describes one Docker Compose project's port mapping, nginx routing,
-/// and optional kernel-level forwarding.
+/// and optional kernel-level forwarding. For local (non-Docker) services,
+/// set `local_ip` instead of (or in addition to) `container_port`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NetworkConfig {
     /// Must match the `com.docker.compose.project` Docker label.
     /// One project can have multiple entries (e.g. TCP + UDP ports).
     pub name: String,
-    /// Port the service listens on inside the container. The container must
-    /// expose this port via Docker (EXPOSE directive).
-    pub container_port: u16,
+    /// Port the service listens on (inside container for Docker, or on host
+    /// for local services). Required for Docker containers; for local services
+    /// use `local_port` instead if `container_port` is not set.
+    #[serde(default)]
+    pub container_port: Option<u16>,
+    /// IP address of a local (non-Docker) service. When set, the service is
+    /// treated as running directly on the host — no Docker inspection or
+    /// container matching is performed.
+    #[serde(default)]
+    pub local_ip: Option<String>,
+    /// Port for a local (non-Docker) service. Alternative to `container_port`
+    /// when `local_ip` is set. Mutually exclusive with `container_port`.
+    #[serde(default)]
+    pub local_port: Option<u16>,
     /// Domain names for nginx `server_name`. First domain is the primary.
     #[serde(default)]
     pub domains: Vec<String>,
@@ -187,9 +199,26 @@ impl DiscoveryConfig {
             .or_else(|| self.defaults.postprocess.clone())
             .unwrap_or_default();
 
+        let is_local = service.local_ip.is_some() || service.local_port.is_some();
+        let local_ip = if is_local {
+            Some(
+                service
+                    .local_ip
+                    .clone()
+                    .unwrap_or_else(|| "127.0.0.1".to_string()),
+            )
+        } else {
+            None
+        };
+        let container_port = service
+            .local_port
+            .or(service.container_port)
+            .expect("either container_port or local_port must be set");
+
         ResolvedService {
             name: service.name.clone(),
-            container_port: service.container_port,
+            container_port,
+            local_ip,
             domains: service.domains.clone(),
             template: service.template.clone(),
             protocol,
@@ -216,8 +245,12 @@ impl DiscoveryConfig {
 pub struct ResolvedService {
     /// Service name (from the `name` field in `discovery.yaml`).
     pub name: String,
-    /// Container port to forward traffic to.
+    /// Port to forward traffic to (container port for Docker, or local port
+    /// for local services).
     pub container_port: u16,
+    /// Local IP for non-Docker services. `None` for Docker containers (IP
+    /// is resolved from `docker inspect` at runtime).
+    pub local_ip: Option<String>,
     /// Domain names for nginx routing. The first domain is the primary.
     pub domains: Vec<String>,
     /// Nginx template identifier.
@@ -270,7 +303,7 @@ networks:
         assert_eq!(config.name, "service-node-1");
         assert_eq!(config.networks.len(), 1);
         assert_eq!(config.networks[0].name, "example-drive");
-        assert_eq!(config.networks[0].container_port, 80);
+        assert_eq!(config.networks[0].container_port, Some(80));
         assert!(config.networks[0].domains.is_empty());
     }
 
@@ -356,6 +389,7 @@ networks:
         let resolved = ResolvedService {
             name: "test".into(),
             container_port: 80,
+            local_ip: None,
             domains: vec!["drive.example.com".into(), "www.example.com".into()],
             template: "t.ctmpl".into(),
             protocol: "tcp".into(),
@@ -496,6 +530,7 @@ networks:
         let resolved = ResolvedService {
             name: "test".into(),
             container_port: 80,
+            local_ip: None,
             domains: vec![],
             template: "t.ctmpl".into(),
             protocol: "tcp".into(),
