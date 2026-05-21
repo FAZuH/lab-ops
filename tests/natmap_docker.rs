@@ -597,4 +597,18 @@ mod natmap_docker {
         ]);
         assert!(out.contains("PASS"), "UDP protocol rule failed:\n{out}");
     }
+
+    /// `--name` flag with target_ip in mapping skips Docker inspect.
+    #[test]
+    fn natmap_docker_local_service() {
+        let out = run_in_docker(&[
+            "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
+            "sleep 2",
+            "&&",
+            "lab-ops natmap --socket /tmp/ns docker add 8080:127.0.0.1:80 --name my-local-service",
+            "&&",
+            "iptables -t nat -S NATMAP | grep -q 'to-destination 127.0.0.1:80' && echo 'PASS' || (iptables -t nat -S NATMAP >&2 && exit 1)",
+        ]);
+        assert!(out.contains("PASS"), "Local service mapping failed:\n{out}");
+    }
 }

@@ -490,6 +490,7 @@ mod tests {
         let service = ResolvedService {
             name: "example-drive".into(),
             container_port: 80,
+            local_ip: None,
             domains: vec!["drive.example.com".into()],
             template: "example-drive.ctmpl".into(),
             protocol: "tcp".into(),
@@ -531,6 +532,7 @@ mod tests {
         let service = ResolvedService {
             name: "dns".into(),
             container_port: 53,
+            local_ip: None,
             domains: vec!["dns.example.com".into()],
             template: "dns.ctmpl".into(),
             protocol: "udp".into(),
@@ -584,6 +586,7 @@ mod tests {
         let service = ResolvedService {
             name: "example-mc".into(),
             container_port: 25565,
+            local_ip: None,
             domains: vec!["mc.example.com".into()],
             template: "".into(),
             protocol: "tcp".into(),

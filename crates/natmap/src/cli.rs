@@ -156,17 +156,21 @@ pub enum DockerCommand {
     /// Adds a new port mapping to a running container.
     #[command(name = "add")]
     Add {
-        /// Container ID or name.
+        /// Container ID.
         #[arg(value_name = "CONTAINER_ID")]
         container_id: String,
-        /// Port mapping in the form `[HOST_IP:]HOST_PORT:CONTAINER_PORT[/PROTO]`.
-        #[arg(value_name = "[HOST_IP:]HOST_PORT:CONTAINER_PORT[/PROTO]")]
-        mapping: String,
+        /// Port mapping in the form `[HOST_IP:]HOST_PORT[:[TARGET_IP:]TARGET_PORT][/PROTO]`.
+        /// Optional when --name is used (CONTAINER_ID becomes the mapping).
+        #[arg(value_name = "MAPPING")]
+        mapping: Option<String>,
+        /// Container name (alternative to CONTAINER_ID). When set, CONTAINER_ID is treated as the mapping.
+        #[arg(long)]
+        name: Option<String>,
     },
     /// Removes one or more Docker port mappings.
     #[command(name = "rm")]
     Remove {
-        /// Container ID or name (required unless `--id` is used).
+        /// Container ID or name (required unless `--id` or `--name` is used).
         #[arg(value_name = "CONTAINER_ID")]
         container_id: Option<String>,
         /// Port and optional protocol (e.g., `8080/tcp`).
@@ -178,6 +182,9 @@ pub enum DockerCommand {
         /// Removes a mapping by its numeric ID.
         #[arg(long)]
         id: Option<u64>,
+        /// Container name (alternative to CONTAINER_ID).
+        #[arg(long)]
+        name: Option<String>,
     },
     /// Remaps a host port for a running container without restarting it.
     #[command(name = "remap")]
@@ -234,16 +241,18 @@ pub async fn run_cli_with_args(cli: Cli) -> Result<()> {
             DockerCommand::Add {
                 container_id,
                 mapping,
+                name,
             } => {
-                add(container_id, mapping, &socket, json).await?;
+                add(container_id, mapping, name, &socket, json).await?;
             }
             DockerCommand::Remove {
                 container_id,
                 port,
                 all,
                 id,
+                name,
             } => {
-                remove(container_id, port, all, id, &socket, json).await?;
+                remove(container_id, port, all, id, name, &socket, json).await?;
             }
             DockerCommand::Remap {
                 container_id,

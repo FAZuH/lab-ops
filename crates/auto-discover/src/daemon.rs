@@ -119,6 +119,7 @@ impl DiscoveryDaemon {
                             host_port,
                             resolved.container_port,
                             &resolved.protocol,
+                            None,
                         )
                         .wrap_err("natmap command failed")?;
                 }
@@ -148,6 +149,83 @@ impl DiscoveryDaemon {
 
                 current_service_ids.push(registration.id.clone());
             }
+        }
+
+        // Handle local (non-Docker) services
+        for network in &config.networks {
+            if network.local_ip.is_none() && network.local_port.is_none() {
+                continue;
+            }
+            let resolved = config.resolve(network);
+            let local_ip = resolved.local_ip.as_deref().unwrap_or("127.0.0.1");
+            let natmap_bind_ip = self.get_natmap_bind_ip(&resolved);
+
+            let port_key = format!("{}-{}", resolved.name, resolved.container_port);
+            let (host_port, skip_natmap) = if let Some(ref fwd) = resolved.forwarding {
+                let p = fwd.ext_ports[0];
+                if !port_is_free("0.0.0.0", p) {
+                    tracing::warn!(
+                        "Forwarding port {} already in use for {} (host-published, skipping natmap)",
+                        p,
+                        resolved.name
+                    );
+                    (p, true)
+                } else {
+                    (p, false)
+                }
+            } else if let Some(p) = port_assignments.get(&port_key) {
+                (p, false)
+            } else {
+                match allocate_port(&port_assignments) {
+                    Some(p) => {
+                        port_assignments.set(port_key.clone(), p);
+                        (p, false)
+                    }
+                    None => {
+                        tracing::warn!("No free ports available for {}", resolved.name);
+                        continue;
+                    }
+                }
+            };
+
+            if !skip_natmap {
+                self.natmap
+                    .add_docker_mapping(
+                        &resolved.name,
+                        natmap_bind_ip.as_deref(),
+                        host_port,
+                        resolved.container_port,
+                        &resolved.protocol,
+                        Some(local_ip),
+                    )
+                    .wrap_err("natmap command failed")?;
+            }
+
+            let consul_ip = local_ip.to_string();
+            let registration = build_consul_service(
+                &resolved,
+                host_port,
+                &server_name,
+                &generation_id,
+                &resolved.name,
+                &consul_ip,
+            );
+
+            self.consul
+                .register_service(&registration)
+                .await
+                .wrap_err("Consul API error")?;
+
+            if !resolved.template.is_empty() {
+                if let Err(e) = self
+                    .store_nginx_config(&resolved, &registration.id, host_port, &consul_ip)
+                    .await
+                {
+                    tracing::warn!("Failed to store nginx config for {}: {}", resolved.name, e);
+                }
+            }
+
+            current_service_ids.push(registration.id.clone());
         }
 
         port_assignments
@@ -195,6 +273,7 @@ impl DiscoveryDaemon {
         let resolved_services: Vec<ResolvedService> = config
             .networks
             .iter()
+            .filter(|s| s.local_ip.is_none() && s.local_port.is_none())
             .filter(|s| s.name == compose_project)
             .map(|s| config.resolve(s))
             .collect();
@@ -270,6 +349,7 @@ impl DiscoveryDaemon {
                         host_port,
                         resolved.container_port,
                         &resolved.protocol,
+                        None,
                     )
                     .wrap_err("natmap command failed")?;
             }
@@ -337,6 +417,9 @@ impl DiscoveryDaemon {
     /// Match a container against the discovery config using a two-level filter:
     /// 1. Compose project name matches `networks[].name`
     /// 2. Container exposes `networks[].container_port`
+    ///
+    /// Entries with `local_ip` or `local_port` set (local non-Docker services)
+    /// are skipped — they are handled separately in the sync loop.
     fn match_services(
         &self,
         config: &DiscoveryConfig,
@@ -349,8 +432,12 @@ impl DiscoveryDaemon {
         config
             .networks
             .iter()
+            .filter(|s| s.local_ip.is_none() && s.local_port.is_none())
             .filter(|s| s.name == project)
-            .filter(|s| container.exposed_ports.contains(&s.container_port))
+            .filter(|s| {
+                s.container_port
+                    .is_some_and(|p| container.exposed_ports.contains(&p))
+            })
             .map(|s| config.resolve(s))
             .collect()
     }
@@ -426,29 +513,29 @@ impl DiscoveryDaemon {
         };
 
         let mut envs: HashMap<String, String> = HashMap::new();
-        envs.insert("LAB_DISCOVERY_SERVICE_NAME".into(), service.name.clone());
-        envs.insert("LAB_DISCOVERY_SERVICE_ID".into(), service_id.to_string());
+        envs.insert("AUTO_DISCOVER_SERVICE_NAME".into(), service.name.clone());
+        envs.insert("AUTO_DISCOVER_SERVICE_ID".into(), service_id.to_string());
         envs.insert(
-            "LAB_DISCOVERY_DOMAIN".into(),
+            "AUTO_DISCOVER_DOMAIN".into(),
             service.primary_domain().to_string(),
         );
         envs.insert(
-            "LAB_DISCOVERY_ALL_DOMAINS".into(),
+            "AUTO_DISCOVER_ALL_DOMAINS".into(),
             service.domains.join(" "),
         );
         if let Some(ref proxy_ip) = service.proxy_ip {
-            envs.insert("LAB_DISCOVERY_PROXY_IP".into(), proxy_ip.clone());
+            envs.insert("AUTO_DISCOVER_PROXY_IP".into(), proxy_ip.clone());
         }
-        envs.insert("LAB_DISCOVERY_BIND_IP".into(), consul_ip.to_string());
-        envs.insert("LAB_DISCOVERY_HOST_PORT".into(), host_port.to_string());
+        envs.insert("AUTO_DISCOVER_BIND_IP".into(), consul_ip.to_string());
+        envs.insert("AUTO_DISCOVER_HOST_PORT".into(), host_port.to_string());
         envs.insert(
-            "LAB_DISCOVERY_CONTAINER_PORT".into(),
+            "AUTO_DISCOVER_CONTAINER_PORT".into(),
             service.container_port.to_string(),
         );
-        envs.insert("LAB_DISCOVERY_TEMPLATE".into(), service.template.clone());
-        envs.insert("LAB_DISCOVERY_PROTOCOL".into(), service.protocol.clone());
+        envs.insert("AUTO_DISCOVER_TEMPLATE".into(), service.template.clone());
+        envs.insert("AUTO_DISCOVER_PROTOCOL".into(), service.protocol.clone());
         for (k, v) in &service.extra {
-            envs.insert(format!("LAB_DISCOVERY_EXTRA_{k}"), v.clone());
+            envs.insert(format!("AUTO_DISCOVER_EXTRA_{k}"), v.clone());
         }
 
         let output = std::process::Command::new(&service.nginx_generator)

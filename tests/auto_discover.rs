@@ -66,6 +66,11 @@ mod auto_discover {
 
     /// Shared setup preamble.
     fn test_setup(yaml_body: &str, extra_setup: &str) -> String {
+        test_setup_ext(yaml_body, extra_setup, "--no-forwarding --no-nginx")
+    }
+
+    /// Shared setup preamble with custom daemon flags.
+    fn test_setup_ext(yaml_body: &str, extra_setup: &str, daemon_flags: &str) -> String {
         format!(
             r#"
 set -e
@@ -94,11 +99,19 @@ YAMLEOF
 
 cat > /tmp/gen-nginx <<'GENEOF'
 #!/bin/bash
+if [ -n "${{LAB_DISCOVERY_SERVICE_NAME:-}}" ]; then
+    echo "FAIL: LAB_DISCOVERY_ environment variables are set!" >&2
+    exit 1
+fi
+if [ -z "${{AUTO_DISCOVER_SERVICE_NAME:-}}" ]; then
+    echo "FAIL: AUTO_DISCOVER_ environment variables are NOT set!" >&2
+    exit 1
+fi
 cat <<EOF
-# Service: ${{LAB_DISCOVERY_SERVICE_NAME:-unknown}}
+# Service: ${{AUTO_DISCOVER_SERVICE_NAME:-unknown}}
 server {{
-    server_name ${{LAB_DISCOVERY_DOMAIN:-_}};
-    listen ${{LAB_DISCOVERY_PROXY_IP:-__TAILSCALE_IP__}}:80;
+    server_name ${{AUTO_DISCOVER_DOMAIN:-_}};
+    listen ${{AUTO_DISCOVER_PROXY_IP:-__TAILSCALE_IP__}}:80;
 }}
 EOF
 GENEOF
@@ -108,8 +121,7 @@ chmod +x /tmp/gen-nginx
 
 lab-ops auto-discover daemon /tmp/discovery.yaml \
     --state-dir /tmp/state \
-    --no-forwarding \
-    --no-nginx \
+    {daemon_flags} \
     --consul-addr http://127.0.0.1:8500 \
     >/tmp/discovery.log 2>&1 &
 sleep 2
@@ -570,11 +582,19 @@ YAMLEOF
 
 cat > /tmp/gen-nginx <<'GENEOF'
 #!/bin/bash
+if [ -n "${{LAB_DISCOVERY_SERVICE_NAME:-}}" ]; then
+    echo "FAIL: LAB_DISCOVERY_ environment variables are set!" >&2
+    exit 1
+fi
+if [ -z "${{AUTO_DISCOVER_SERVICE_NAME:-}}" ]; then
+    echo "FAIL: AUTO_DISCOVER_ environment variables are NOT set!" >&2
+    exit 1
+fi
 cat <<EOF
-# Service: ${{LAB_DISCOVERY_SERVICE_NAME:-unknown}}
+# Service: ${{AUTO_DISCOVER_SERVICE_NAME:-unknown}}
 server {{
-    server_name ${{LAB_DISCOVERY_DOMAIN:-_}};
-    listen ${{LAB_DISCOVERY_PROXY_IP:-__TAILSCALE_IP__}}:80;
+    server_name ${{AUTO_DISCOVER_DOMAIN:-_}};
+    listen ${{AUTO_DISCOVER_PROXY_IP:-__TAILSCALE_IP__}}:80;
 }}
 EOF
 GENEOF
@@ -650,11 +670,19 @@ YAMLEOF
 
 cat > /tmp/gen-nginx <<'GENEOF'
 #!/bin/bash
+if [ -n "${{LAB_DISCOVERY_SERVICE_NAME:-}}" ]; then
+    echo "FAIL: LAB_DISCOVERY_ environment variables are set!" >&2
+    exit 1
+fi
+if [ -z "${{AUTO_DISCOVER_SERVICE_NAME:-}}" ]; then
+    echo "FAIL: AUTO_DISCOVER_ environment variables are NOT set!" >&2
+    exit 1
+fi
 cat <<EOF
-# Service: ${{LAB_DISCOVERY_SERVICE_NAME:-unknown}}
+# Service: ${{AUTO_DISCOVER_SERVICE_NAME:-unknown}}
 server {{
-    server_name ${{LAB_DISCOVERY_DOMAIN:-_}};
-    listen ${{LAB_DISCOVERY_PROXY_IP:-__TAILSCALE_IP__}}:80;
+    server_name ${{AUTO_DISCOVER_DOMAIN:-_}};
+    listen ${{AUTO_DISCOVER_PROXY_IP:-__TAILSCALE_IP__}}:80;
 }}
 EOF
 GENEOF
@@ -1034,7 +1062,7 @@ sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: natmap died"; cat /tmp/natmap.l
 
 cat > /tmp/gen-nginx <<'GENEOF'
 #!/bin/bash
-echo "server { server_name ${LAB_DISCOVERY_DOMAIN:-_}; listen 80; }"
+echo "server { server_name ${AUTO_DISCOVER_DOMAIN:-_}; listen 80; }"
 GENEOF
 chmod +x /tmp/gen-nginx
 
@@ -1112,7 +1140,7 @@ sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: natmap died"; cat /tmp/natmap.l
 
 cat > /tmp/gen-nginx <<'GENEOF'
 #!/bin/bash
-echo "server { server_name ${LAB_DISCOVERY_DOMAIN:-_}; listen 80; }"
+echo "server { server_name ${AUTO_DISCOVER_DOMAIN:-_}; listen 80; }"
 GENEOF
 chmod +x /tmp/gen-nginx
 
@@ -1183,7 +1211,7 @@ sleep 2; kill -0 $! 2>/dev/null || {{ echo "FAIL: natmap died"; cat /tmp/natmap.
 
 cat > /tmp/gen-nginx <<'GENEOF'
 #!/bin/bash
-echo "server {{ server_name ${{LAB_DISCOVERY_DOMAIN:-_}}; listen 80; }}"
+echo "server {{ server_name ${{AUTO_DISCOVER_DOMAIN:-_}}; listen 80; }}"
 GENEOF
 chmod +x /tmp/gen-nginx
 
@@ -1280,7 +1308,7 @@ sleep 2; kill -0 $! 2>/dev/null || {{ echo "FAIL: natmap died"; cat /tmp/natmap.
 
 cat > /tmp/gen-nginx <<'GENEOF'
 #!/bin/bash
-echo "server {{ server_name ${{LAB_DISCOVERY_DOMAIN:-_}}; listen 80; }}"
+echo "server {{ server_name ${{AUTO_DISCOVER_DOMAIN:-_}}; listen 80; }}"
 GENEOF
 chmod +x /tmp/gen-nginx
 
@@ -1999,5 +2027,64 @@ sleep 1
         );
         let out = run(&script);
         assert_pass(&out, "Phase 9 — large config");
+    }
+
+    /// Local (non-Docker) services: defined via local_ip/local_port in config.
+    /// Verifies Consul registration with the correct IP, iptables DNAT rules,
+    /// actual reachability through the forwarded port, and nginx config
+    /// generation in Consul KV.
+    #[test]
+    fn local_service() {
+        let yaml = r#"
+networks:
+  - name: it-local-app
+    local_ip: 10.99.99.99
+    local_port: 3000
+    template: REVERSE_PROXY
+    domains:
+      - app.local.test
+"#;
+
+        let script = format!(
+            r#"{setup}
+
+PORT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-local-app") | .value.Port')
+if [ -z "$PORT" ] || [ "$PORT" = "null" ]; then echo "FAIL: not registered with Consul" >&2; cat /tmp/discovery.log; exit 1; fi
+
+ADDR=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-local-app") | .value.Address')
+if [ "$ADDR" != "10.99.99.99" ]; then echo "FAIL: expected address 10.99.99.99, got $ADDR" >&2; exit 1; fi
+
+# Verify iptables DNAT rule points to the local IP
+iptables -t nat -S NATMAP | grep -q "to-destination 10.99.99.99:3000" || \
+    {{ echo "FAIL: no DNAT rule for 10.99.99.99:3000" >&2; iptables -t nat -S NATMAP >&2; exit 1; }}
+
+# Verify nginx config was generated in Consul KV
+SVC_ID="int-test-node-app-local-test-${{PORT}}"
+NGINX_CONFIG=$(curl -sf "$CONSUL_HTTP_ADDR/v1/kv/nginx-configs/sites/${{SVC_ID}}.conf?raw" 2>/dev/null || echo "")
+if [ -z "$NGINX_CONFIG" ]; then echo "FAIL: no nginx config in Consul KV" >&2; curl -sf "$CONSUL_HTTP_ADDR/v1/kv/nginx-configs/sites?keys" 2>/dev/null || true; exit 1; fi
+
+echo "$NGINX_CONFIG" | grep -q "server_name app.local.test" || \
+    {{ echo "FAIL: nginx config missing server_name" >&2; echo "$NGINX_CONFIG"; exit 1; }}
+
+# Verify actual reachability: start a local HTTP service, curl through the forwarded port
+apt-get update -qq && apt-get install -y -qq socat >/dev/null 2>&1
+
+# Start a simple HTTP responder on the local service IP/port
+ip addr add 10.99.99.99/32 dev dummy0 2>/dev/null || true
+socat TCP-LISTEN:3000,bind=10.99.99.99,fork,reuseaddr SYSTEM:'echo "HTTP/1.1 200 OK"; echo "Content-Type: text/plain"; echo ""; echo "local-service-ok"' &
+sleep 1
+
+# Curl through the host port (natmap DNAT forwards to 10.99.99.99:3000)
+RESULT=$(timeout 3 curl -sf http://127.0.0.1:${{PORT}}/ 2>/dev/null || echo "FAIL")
+if [ "$RESULT" != "local-service-ok" ]; then echo "FAIL: local service not reachable through natmap DNAT (got: $RESULT)" >&2; exit 1; fi
+
+echo "PASS: local service registered at $ADDR:$PORT, reachable via DNAT, nginx config verified"
+kill %4 %3 %2 %1 2>/dev/null || true
+sleep 1
+"#,
+            setup = test_setup_ext(yaml, "", "--no-forwarding"),
+        );
+        let out = run(&script);
+        assert_pass(&out, "Local service — auto-discover");
     }
 }

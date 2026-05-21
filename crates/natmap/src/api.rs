@@ -273,63 +273,77 @@ pub async fn remap_port(
     Ok(Json(new_mappings))
 }
 
-/// `POST /mapping/:container_id` — Adds a new port mapping to a running container.
+/// `POST /mapping/:container_id` — Adds a new port mapping.
 pub async fn add_mapping(
     State(state): State<AppState>,
     Path(container_id): Path<String>,
     Json(req): Json<DockerAddMapRequest>,
 ) -> Result<Json<DockerPortMap>, (StatusCode, Json<ErrorResponse>)> {
-    let docker = state.docker.as_ref().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorResponse {
-                error: "Docker not available".into(),
-            }),
-        )
-    })?;
-    let inspect = docker
-        .inspect_container(&container_id, None)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: format!("Container not found: {e}"),
-                }),
-            )
-        })?;
-    let container_name = inspect
-        .name
-        .as_deref()
-        .unwrap_or("unknown")
-        .trim_start_matches('/')
-        .to_string();
-    let network_settings = inspect.network_settings.ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Container has no network settings".into(),
-            }),
-        )
-    })?;
-    let container_ip = network_settings
-        .networks
-        .as_ref()
-        .and_then(|nets| {
-            nets.values().find_map(|net| {
-                net.ip_address
-                    .as_deref()
-                    .and_then(|ip| IpAddr::from_str(ip).ok())
-            })
-        })
-        .ok_or_else(|| {
+    let (container_ip, container_name) = if let Some(target_ip_str) = &req.target_ip {
+        let ip = IpAddr::from_str(target_ip_str).map_err(|e| {
             (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
-                    error: "Container has no IP address".into(),
+                    error: format!("Invalid target IP: {e}"),
                 }),
             )
         })?;
+        (ip, container_id.clone())
+    } else {
+        let docker = state.docker.as_ref().ok_or_else(|| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: "Docker not available".into(),
+                }),
+            )
+        })?;
+        let inspect = docker
+            .inspect_container(&container_id, None)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorResponse {
+                        error: format!("Container not found: {e}"),
+                    }),
+                )
+            })?;
+        let container_name = inspect
+            .name
+            .as_deref()
+            .unwrap_or("unknown")
+            .trim_start_matches('/')
+            .to_string();
+        let network_settings = inspect.network_settings.ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Container has no network settings".into(),
+                }),
+            )
+        })?;
+        let container_ip = network_settings
+            .networks
+            .as_ref()
+            .and_then(|nets| {
+                nets.values().find_map(|net| {
+                    net.ip_address
+                        .as_deref()
+                        .and_then(|ip| IpAddr::from_str(ip).ok())
+                })
+            })
+            .ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "Container has no IP address".into(),
+                    }),
+                )
+            })?;
+        (container_ip, container_name)
+    };
+
     let proto = match req.proto.to_lowercase() {
         "tcp" => TransportProtocol::Tcp,
         "udp" => TransportProtocol::Udp,

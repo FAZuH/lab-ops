@@ -194,6 +194,9 @@ lab-ops natmap ls abc123def456
 # Map host port 8080 to container port 80 (all interfaces)
 lab-ops natmap docker add my-nginx 8080:80
 
+# Specify container name instead of ID (--name flag)
+lab-ops natmap docker add 8080:80 --name my-nginx
+
 # Bind to a specific host IP
 lab-ops natmap docker add my-nginx 100.64.0.10:8080:80
 
@@ -202,6 +205,12 @@ lab-ops natmap docker add my-nginx 8443:443/tcp
 
 # UDP mapping
 lab-ops natmap docker add my-dns 53:53/udp
+
+# Map to a specific target IP (skips Docker inspect)
+lab-ops natmap docker add 8080:127.0.0.1:80 --name my-local-service
+
+# Host port only — container port is the same
+lab-ops natmap docker add my-nginx 8080
 ```
 
 #### Removing a Mapping
@@ -209,6 +218,9 @@ lab-ops natmap docker add my-dns 53:53/udp
 ```bash
 # Remove by container + host port
 lab-ops natmap docker rm my-nginx 8080
+
+# Remove a local service mapping by name
+lab-ops natmap docker rm --name my-local-service 8080
 
 # Remove by mapping ID
 lab-ops natmap docker rm --id 3
