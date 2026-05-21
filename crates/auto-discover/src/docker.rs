@@ -18,7 +18,6 @@ pub struct ContainerInfo {
     /// Full container ID.
     pub id: String,
     /// Container name (leading `/` stripped).
-    #[allow(dead_code)]
     pub name: String,
     /// Docker Compose project name from the `com.docker.compose.project` label.
     pub compose_project: Option<String>,
@@ -81,6 +80,7 @@ impl DockerClient {
     ///
     /// Used by Docker event handlers that only have a container ID and need
     /// to resolve exposed ports for service matching.
+    #[allow(dead_code)]
     pub async fn get_exposed_ports(&self, container_id: &str) -> Result<HashSet<u16>> {
         let info = self
             .docker
@@ -102,5 +102,46 @@ impl DockerClient {
             })
             .unwrap_or_default();
         Ok(ports)
+    }
+
+    /// Inspect a single container and return full metadata.
+    pub async fn inspect_container(&self, container_id: &str) -> Result<ContainerInfo> {
+        let info = self
+            .docker
+            .inspect_container(container_id, None)
+            .await
+            .wrap_err_with(|| format!("failed to inspect container {container_id}"))?;
+        let name = info
+            .name
+            .as_deref()
+            .unwrap_or("")
+            .trim_start_matches('/')
+            .to_string();
+        let compose_project = info
+            .config
+            .as_ref()
+            .and_then(|c| c.labels.as_ref())
+            .and_then(|labels| labels.get("com.docker.compose.project"))
+            .cloned();
+        let exposed_ports: HashSet<u16> = info
+            .network_settings
+            .as_ref()
+            .and_then(|ns| ns.ports.as_ref())
+            .map(|ports| {
+                ports
+                    .keys()
+                    .filter_map(|k| {
+                        let port_str = k.split('/').next()?;
+                        port_str.parse::<u16>().ok()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(ContainerInfo {
+            id: container_id.to_string(),
+            name,
+            compose_project,
+            exposed_ports,
+        })
     }
 }

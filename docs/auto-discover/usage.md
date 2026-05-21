@@ -160,7 +160,6 @@ networks:                       # NOT "services" — was renamed
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `name` | Yes | Must match `com.docker.compose.project` Docker label. One project can have multiple entries (e.g. TCP + UDP ports) — the daemon matches all entries with the same project name |
 | `name` | Yes | Must match `com.docker.compose.project` Docker label (for Docker containers) or arbitrary name (for local services). One project can have multiple entries (e.g. TCP + UDP ports) |
 | `container_port` | No* | Port the service listens on inside the container. Required for Docker containers — the container must expose this via Docker EXPOSE. Leave unset when using `local_port` for a local (non-Docker) service |
 | `local_ip` | No | IP address of a local (non-Docker) service. When set, the service is treated as running directly on the host — no Docker event matching or container inspection is performed |
@@ -218,17 +217,27 @@ networks:
 
 When `forwarding` is set on a network entry, the service uses kernel-level NAT (iptables DNAT) instead of going through NGINX reverse proxy. This eliminates proxy latency for game servers and avoids double-TLS-termination for mail servers.
 
+There are two forwarding types:
+
+- **`remote`** (legacy default, proxy-server DNAT): Registers Consul metadata (`forwarding=true`, `ext_ip`, `ext_ports`, `hairpin`) for the proxy server's forwarding daemon to sync DNAT rules across the cluster. The proxy server handles the iptables DNAT from a public IP to the service node address.
+- **`local`** (direct node DNAT): Creates the iptables DNAT rule directly on the service node via natmap. Uses `bind_port` as a static host port instead of ephemeral allocation. No proxy-server forwarding sync needed.
+
+In the legacy `networks:` format, all forwarding entries default to `type: remote`. To use `type: local`, write the config in the new `services:` format (see [[#New Format Configuration]] below).
+
 **Forwarding fields:**
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `ext_ip` | Yes | Public IP on the proxy server to forward FROM |
-| `ext_ports` | Yes | Static port(s) on the public IP (not auto-allocated from ephemeral range). First port (`ext_ports[0]`) is used as the natmap host port |
+| `type` | No | `local` or `remote`. Defaults to `remote` in legacy format. `local` creates DNAT on the service node directly; `remote` adds Consul metadata for proxy-server DNAT sync |
+| `ext_ip` | Yes (remote) | Public IP on the proxy server to forward FROM. Only used for `type: remote` |
+| `ext_ports` | Yes (remote) | Static port(s) on the public IP (not auto-allocated from ephemeral range). First port (`ext_ports[0]`) is used as the natmap host port. Only used for `type: remote` |
+| `bind_port` | No | Static host port for `type: local`. When set, uses this port directly (no ephemeral allocation). When absent, allocates from the ephemeral pool |
 | `proto` | No | Protocol for the iptables DNAT rule. Defaults to `tcp` |
-| `hairpin` | No | Create hairpin NAT rules (internal hosts can reach themselves via external IP). Defaults to `false` |
+| `hairpin` | No | Create hairpin NAT rules (internal hosts can reach themselves via external IP). Defaults to `false`. Only used for `type: remote` |
 
-**Example:**
+**Examples:**
 
+Legacy format (ForwardingRemote only):
 ```yaml
 networks:
   - name: example-mc
@@ -240,10 +249,23 @@ networks:
       hairpin: true
 ```
 
-**How it works:**
+New format (ForwardingLocal with static bind port):
+```yaml
+services:
+  example-mc:
+    type: docker
+    match:
+      project: example-mc
+    forwarding:
+      - type: local
+        port: 25565
+        bind_port: 36000
+```
+
+**How it works (ForwardingRemote):**
 
 1. **Service server**: The daemon uses `ext_ports[0]` as a static host port (skips ephemeral port allocation from the pool). The port is NOT persisted to `ports.json`. Port-is-free check still applies.
-2. **Service server**: Still registers in Consul with forwarding meta (`forwarding=true`, `ext_ip`, `ext_ports`, `hairpin`)
+2. **Service server**: Registers in Consul with forwarding meta (`forwarding=true`, `type=remote`, `ext_ip`, `ext_ports`, `hairpin`)
 3. **Proxy server**: Runs `lab-ops auto-discover daemon --no-discovery --no-nginx` (or one-shot `forwarding-sync`), which:
    - Queries Consul **catalog** API (`GET /v1/catalog/services` → `GET /v1/health/service/:name?passing=true`) across all agents — NOT the local agent API. Forwarding services are registered on service VMs' agents, not the proxy's agent
    - Filters services with `Meta.forwarding=="true"`
@@ -251,6 +273,12 @@ networks:
    - Calls `lab-ops natmap dnat --ext-ip X --int-ip Y --ports Z --proto P`
    - Optionally calls `lab-ops natmap hairpin` for hairpin-enabled groups
    - Handles deregistration of stale DNAT rules
+
+**How it works (ForwardingLocal):**
+
+1. **Service node**: The daemon uses `bind_port` as a static host port (or allocates from ephemeral pool if unset). Always calls natmap to create the DNAT rule on the service node.
+2. **Service node**: Registers in Consul with `forwarding=true`, `forwarding_type=local`. No `ext_ip`, `ext_ports`, or `hairpin` metadata.
+3. **No proxy-server DNAT sync**: ForwardingLocal does NOT participate in the proxy-server forwarding daemon. DNAT is local to the service node.
 
 ### Proxy Server NGINX Config Generation
 
@@ -345,13 +373,37 @@ RestartSec=10
 
 When forwarding is configured, additional meta fields are present:
 
+**ForwardingRemote** (proxy-server DNAT):
 ```json
 {
   "Meta": {
     "forwarding": "true",
+    "forwarding_type": "remote",
     "ext_ip": "203.0.113.43",
     "ext_ports": "25565",
     "hairpin": "true"
+  }
+}
+```
+
+**ForwardingLocal** (service-node DNAT):
+```json
+{
+  "Meta": {
+    "forwarding": "true",
+    "forwarding_type": "local"
+  }
+}
+```
+
+When a ForwardingLocal is merged with an RProxy entry (via matching `port`), a `template` field is also present:
+
+```json
+{
+  "Meta": {
+    "forwarding": "true",
+    "forwarding_type": "local",
+    "template": "REVERSE_PROXY"
   }
 }
 ```
@@ -373,9 +425,11 @@ When forwarding is configured, additional meta fields are present:
 **Forwarding meta fields (only when `forwarding` is configured):**
 
 - `Meta.forwarding`: `"true"` — marker for proxy server to discover forwarding services
-- `Meta.ext_ip`: Public IP on the proxy server for DNAT
-- `Meta.ext_ports`: Comma-separated static ports (e.g., `"25565,19132"`)
-- `Meta.hairpin`: `"true"` if hairpin NAT is requested
+- `Meta.forwarding_type`: `"remote"` or `"local"` — distinguishes proxy-server DNAT from service-node DNAT
+- `Meta.ext_ip`: Public IP on the proxy server for DNAT (ForwardingRemote only)
+- `Meta.ext_ports`: Comma-separated static ports (e.g., `"25565,19132"`) (ForwardingRemote only)
+- `Meta.hairpin`: `"true"` if hairpin NAT is requested (ForwardingRemote only)
+- `Meta.template`: Present when ForwardingLocal is merged with an RProxy entry sharing the same port
 
 ### UDP Checks
 
