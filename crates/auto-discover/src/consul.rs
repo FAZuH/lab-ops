@@ -1,6 +1,7 @@
 //! Consul HTTP API client for service registration and KV storage.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use color_eyre::eyre::bail;
 use color_eyre::eyre::WrapErr;
@@ -379,6 +380,54 @@ impl ConsulClient {
                 .await;
         }
         Ok(())
+    }
+
+    /// Query the Consul catalog cluster-wide for all registered service
+    /// instance IDs.
+    ///
+    /// Iterates over all service names in the catalog and collects every
+    /// `ServiceID`. Used by the nginx daemon GC to detect orphaned KV
+    /// entries whose service no longer exists.
+    pub async fn get_all_catalog_service_ids(&self) -> Result<HashSet<String>> {
+        let services_url = format!("{}/v1/catalog/services", self.http_addr);
+        let resp = self
+            .client
+            .get(&services_url)
+            .send()
+            .await
+            .wrap_err("Consul HTTP request failed")?;
+        let catalog: HashMap<String, Vec<String>> =
+            resp.json().await.wrap_err("Consul HTTP request failed")?;
+
+        let mut ids = HashSet::new();
+
+        for svc_name in catalog.keys() {
+            let svc_url = format!(
+                "{}/v1/catalog/service/{}",
+                self.http_addr,
+                urlencoding(svc_name)
+            );
+            let resp = self
+                .client
+                .get(&svc_url)
+                .send()
+                .await
+                .wrap_err("Consul HTTP request failed")?;
+            let instances: Vec<serde_json::Value> =
+                resp.json().await.wrap_err("Consul HTTP request failed")?;
+
+            for instance in instances {
+                if let Some(sid) = instance
+                    .get("ServiceID")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                {
+                    ids.insert(sid);
+                }
+            }
+        }
+
+        Ok(ids)
     }
 }
 
