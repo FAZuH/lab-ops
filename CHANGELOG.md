@@ -1,3 +1,16 @@
+## 0.1.9 (2026-05-21)
+
+
+### Auto Discover
+
+* Fix error when generating service discovery nginx config ([f60274b](https://github.com/FAZuH/lab-ops/commit/f60274b4365fa71cdf5be32d4742c1e9de482a67))
+* Support non-Docker services configuration ([7b3d1a8](https://github.com/FAZuH/lab-ops/commit/7b3d1a8f5761fe4dffe8647863b6a87ae4e8defc))
+
+
+### Natmap
+
+* Add --name to natmap docker add and rm ([8b5c09d](https://github.com/FAZuH/lab-ops/commit/8b5c09d919074796c4df632e05cc37fab9115f7f))
+
 ## 0.1.8 (2026-05-20)
 
 
@@ -35,26 +48,4 @@
 ### Bug Fixes
 
 * Stale NAT rules not deleted ([4b2c44f](https://github.com/FAZuH/lab-ops/commit/4b2c44f2ad03c62ef3a199035067167cfa7cd639))
-
-## 0.1.4 (2026-05-12)
-
-
-### ⚠ BREAKING CHANGES
-
-* Organize and rename modules
-
-### Documentation
-
-* Add usage docs ([89a1dcc](https://github.com/FAZuH/lab-ops/commit/89a1dcc1d37689142a373a64e39be19c8496bf0e))
-
-
-### New Features
-
-* Improve nat persistence ([6abdf8b](https://github.com/FAZuH/lab-ops/commit/6abdf8bb0bdd30434f0c81d9181c453d4f50932f))
-
-
-### Code Refactoring
-
-* Merge dockernatmap into natmap ([d0a5256](https://github.com/FAZuH/lab-ops/commit/d0a52562ab0addf57a835a69f2c0dcc148fe55a0))
-* Organize and rename modules ([8ad4747](https://github.com/FAZuH/lab-ops/commit/8ad47479d09658be959cfcbc659f93acf81d46ac))
 
