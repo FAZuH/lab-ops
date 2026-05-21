@@ -269,9 +269,14 @@ pub fn check_config(config_path: PathBuf) -> Result<()> {
     println!("Services defined: {}", config.networks.len());
     for svc in &config.networks {
         let resolved = config.resolve(svc);
+        let kind = if resolved.local_ip.is_some() {
+            format!("local ({})", resolved.local_ip.as_deref().unwrap())
+        } else {
+            "docker".into()
+        };
         println!(
-            "  - {} (port {}, protocol {}, template {})",
-            resolved.name, resolved.container_port, resolved.protocol, resolved.template
+            "  - {} (port {}, protocol {}, template {}, type {})",
+            resolved.name, resolved.container_port, resolved.protocol, resolved.template, kind
         );
     }
     Ok(())

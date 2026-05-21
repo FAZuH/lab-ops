@@ -161,7 +161,10 @@ networks:                       # NOT "services" — was renamed
 | Field | Required | Description |
 |-------|----------|-------------|
 | `name` | Yes | Must match `com.docker.compose.project` Docker label. One project can have multiple entries (e.g. TCP + UDP ports) — the daemon matches all entries with the same project name |
-| `container_port` | Yes | Port the service listens on inside the container. The container must expose this port via Docker (EXPOSE directive) for auto-discover to match it. Host-networked containers and containers without matching exposed ports are automatically skipped |
+| `name` | Yes | Must match `com.docker.compose.project` Docker label (for Docker containers) or arbitrary name (for local services). One project can have multiple entries (e.g. TCP + UDP ports) |
+| `container_port` | No* | Port the service listens on inside the container. Required for Docker containers — the container must expose this via Docker EXPOSE. Leave unset when using `local_port` for a local (non-Docker) service |
+| `local_ip` | No | IP address of a local (non-Docker) service. When set, the service is treated as running directly on the host — no Docker event matching or container inspection is performed |
+| `local_port` | No | Port for a local (non-Docker) service. Alternative to `container_port`. Mutually exclusive — use `local_port` + `local_ip` instead of `container_port` for services not running in Docker |
 | `domains` | No | Domain names for NGINX `server_name`. First domain is the primary — also used as a discriminator in the Consul service ID to prevent collisions when multiple entries share the same name+port |
 | `template` | Yes (unless `forwarding` is set) | Nginx template type: `REVERSE_PROXY`, `REVERSE_PROXY_PRIVATE`, `STREAM`, or `STREAM_PRIVATE`. Can be `""` when `forwarding` is used |
 | `protocol` | No | `tcp` or `udp`. Defaults to `tcp` |

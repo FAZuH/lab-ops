@@ -32,6 +32,9 @@ impl NatmapClient {
 
     /// Add a Docker port mapping via `lab-ops natmap docker add`.
     ///
+    /// If `target_ip` is set, the daemon skips Docker inspect and uses the
+    /// given IP directly — used for local (non-Docker) services.
+    ///
     /// Handles the 409 Conflict response (mapping already exists) as a
     /// non-fatal warning rather than an error.
     pub fn add_docker_mapping(
@@ -41,12 +44,19 @@ impl NatmapClient {
         host_port: u16,
         container_port: u16,
         protocol: &str,
+        target_ip: Option<&str>,
     ) -> Result<()> {
-        let spec = match bind_ip {
-            Some(ip) if !ip.is_empty() => {
+        let spec = match (bind_ip, target_ip) {
+            (Some(ip), Some(tip)) => {
+                format!("{ip}:{host_port}:{tip}:{container_port}/{protocol}")
+            }
+            (Some(ip), None) => {
                 format!("{ip}:{host_port}:{container_port}/{protocol}")
             }
-            _ => format!("{host_port}:{container_port}/{protocol}"),
+            (None, Some(tip)) => {
+                format!("{host_port}:{tip}:{container_port}/{protocol}")
+            }
+            (None, None) => format!("{host_port}:{container_port}/{protocol}"),
         };
         self.run_docker_cmd("add", container_id, &spec)
     }

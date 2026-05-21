@@ -26,15 +26,26 @@ fn add_mapping_request_full_fields() {
     assert_eq!(req.host_port, 3000);
     assert_eq!(req.container_port, 3000);
     assert_eq!(req.proto, TransportProtocol::Udp);
+    assert_eq!(req.target_ip, None);
+}
+
+#[test]
+fn add_mapping_request_with_target_ip() {
+    let json = r#"{"host_ip": "0.0.0.0", "host_port": 8080, "container_port": 80, "target_ip": "127.0.0.1"}"#;
+    let req: DockerAddMapRequest = serde_json::from_str(json).unwrap();
+    assert_eq!(req.host_ip, "0.0.0.0");
+    assert_eq!(req.target_ip.as_deref(), Some("127.0.0.1"));
+    assert_eq!(req.container_port, 80);
 }
 
 #[test]
 fn add_mapping_request_serialize_defaults() {
     let req = DockerAddMapRequest {
         host_ip: "0.0.0.0".into(),
-        host_port: 443,
-        container_port: 443,
+        host_port: 8080,
+        container_port: 80,
         proto: TransportProtocol::Tcp,
+        ..Default::default()
     };
     let json = serde_json::to_string(&req).unwrap();
     assert!(json.contains("\"host_ip\":\"0.0.0.0\""));

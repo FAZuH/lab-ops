@@ -106,16 +106,24 @@ pub struct DockerRemapRequest {
     pub new_host_port: u16,
 }
 
-/// Request to add a new port mapping to a running container.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Request to add a new port mapping.
+///
+/// For Docker containers, `container_id` in the URL path identifies the container
+/// and its IP is resolved via `docker inspect`. For local (non-Docker) services,
+/// set `target_ip` to skip Docker inspection entirely.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DockerAddMapRequest {
     /// Host IP to bind to (defaults to `0.0.0.0`).
     #[serde(default = "default_host_ip")]
     pub host_ip: String,
     /// Port on the host.
     pub host_port: u16,
-    /// Port inside the container.
+    /// Port on the target (container or local service).
     pub container_port: u16,
+    /// Optional target IP override. When set, skips Docker inspect and uses
+    /// this IP directly — useful for local (non-Docker) services.
+    #[serde(default)]
+    pub target_ip: Option<String>,
     /// Transport protocol (`tcp` or `udp`, defaults to `tcp`).
     #[serde(default = "default_proto")]
     pub proto: TransportProtocol,
