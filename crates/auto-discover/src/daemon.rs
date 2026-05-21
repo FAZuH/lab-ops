@@ -323,11 +323,7 @@ impl DiscoveryDaemon {
             if !project_matches {
                 continue;
             }
-            // Also check port exposure
-            if !cinfo.exposed_ports.contains(&res.container_port) {
-                continue;
-            }
-            // If explicit container name or regex is set, check those too
+            // Check container name and regex match criteria
             if let Some(mc) = &res.match_cfg {
                 if let Some(c) = &mc.container {
                     if cinfo.name != *c {
@@ -568,13 +564,12 @@ impl DiscoveryDaemon {
 }
 
 /// Match a container against a resolved service definition.
+///
+/// Checks project, container name, and container_regex match criteria.
 fn container_matches(container: &ContainerInfo, resolved: &ResolvedService) -> bool {
     let mc = match &resolved.match_cfg {
         Some(m) => m,
-        None => {
-            // Without match config, match by port only
-            return container.exposed_ports.contains(&resolved.container_port);
-        }
+        None => return true,
     };
 
     if let Some(proj) = &mc.project {
@@ -597,7 +592,8 @@ fn container_matches(container: &ContainerInfo, resolved: &ResolvedService) -> b
             return false;
         }
     }
-    container.exposed_ports.contains(&resolved.container_port)
+
+    true
 }
 
 /// Check if the port type should trigger nginx config generation.
