@@ -1,3 +1,10 @@
+## 0.1.12 (2026-05-21)
+
+
+### Auto Discover
+
+* Remove requirement of exposed port ([d31135b](https://github.com/FAZuH/lab-ops/commit/d31135ba1602c42ca2351d488e995939b0e92760))
+
 ## 0.1.11 (2026-05-21)
 
 
@@ -31,11 +38,4 @@
 ### Bug Fixes
 
 * Invalid arg on natmap.service ([604b454](https://github.com/FAZuH/lab-ops/commit/604b454366e6411c133e729855f3a2bc635322ba))
-
-## 0.1.7 (2026-05-20)
-
-
-### Bug Fixes
-
-* Fix stale DNAT rules not cleaned up properly ([9994710](https://github.com/FAZuH/lab-ops/commit/99947108f53792ffac9f4e16ed28fe2556499201))
 
