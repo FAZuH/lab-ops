@@ -397,9 +397,9 @@ pub fn build_consul_service(
     bind_ip: &str,
 ) -> ConsulServiceRegistration {
     let domain = service.primary_domain().to_string();
-    let domain_slug = domain.replace('.', "-");
-    let service_id = if domain_slug.is_empty() {
-        format!("{}-{}-{}", server_name, service.name, host_port)
+    let domain_slug = service.domain_slug();
+    let service_id = if domain_slug == "_" || domain_slug.is_empty() {
+        format!("{}-{}-{}", server_name, service.service_name, host_port)
     } else {
         format!("{server_name}-{domain_slug}-{host_port}")
     };
@@ -407,39 +407,67 @@ pub fn build_consul_service(
 
     let mut meta = HashMap::new();
     meta.insert("domain".into(), domain);
-    meta.insert("template".into(), service.template.clone());
     meta.insert("protocol".into(), protocol.clone());
     meta.insert("server_name".into(), server_name.to_string());
     meta.insert("generation_id".into(), generation_id.to_string());
     meta.insert("container_id".into(), container_id.to_string());
 
-    if let Some(ref proxy_ip) = service.proxy_ip {
-        meta.insert("proxy_ip".into(), proxy_ip.clone());
+    if let Some(ref proxy_on) = service.proxy_on {
+        meta.insert("proxy_on".into(), proxy_on.clone());
     }
 
     for (k, v) in &service.extra {
         meta.insert(k.clone(), v.clone());
     }
 
-    if let Some(ref fwd) = service.forwarding {
-        meta.insert("forwarding".into(), "true".into());
-        meta.insert("ext_ip".into(), fwd.ext_ip.clone());
-        meta.insert(
-            "ext_ports".into(),
-            fwd.ext_ports
-                .iter()
-                .map(|p| p.to_string())
-                .collect::<Vec<_>>()
-                .join(","),
-        );
-        if fwd.hairpin {
-            meta.insert("hairpin".into(), "true".into());
+    match &service.port_type {
+        crate::config::ResolvedPortType::RProxy {
+            template, proxy_ip, ..
+        } => {
+            if !template.is_empty() {
+                meta.insert("template".into(), template.clone());
+            }
+            if let Some(ref proxy_ip) = proxy_ip {
+                meta.insert("proxy_ip".into(), proxy_ip.clone());
+            }
+        }
+        crate::config::ResolvedPortType::ForwardingLocal { template, .. } => {
+            meta.insert("forwarding".into(), "true".into());
+            meta.insert("forwarding_type".into(), "local".into());
+            if !template.is_empty() {
+                meta.insert("template".into(), template.clone());
+            }
+        }
+        crate::config::ResolvedPortType::ForwardingRemote {
+            ext_ip,
+            ext_ports,
+            hairpin,
+            template,
+            ..
+        } => {
+            meta.insert("forwarding".into(), "true".into());
+            meta.insert("forwarding_type".into(), "remote".into());
+            meta.insert("ext_ip".into(), ext_ip.clone());
+            meta.insert(
+                "ext_ports".into(),
+                ext_ports
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+            if *hairpin {
+                meta.insert("hairpin".into(), "true".into());
+            }
+            if !template.is_empty() {
+                meta.insert("template".into(), template.clone());
+            }
         }
     }
 
     let check = if protocol == "udp" {
         json!({
-            "Name": format!("UDP check for {}", service.name),
+            "Name": format!("UDP check for {}", service.service_name),
             "Args": ["/usr/bin/nc", "-uz", bind_ip, &host_port.to_string()],
             "Interval": "30s",
             "Timeout": "10s",
@@ -456,7 +484,7 @@ pub fn build_consul_service(
 
     ConsulServiceRegistration {
         id: service_id,
-        name: service.name.clone(),
+        name: service.service_name.clone(),
         address: bind_ip.to_string(),
         port: host_port,
         meta,
@@ -481,6 +509,8 @@ fn urlencoding(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ResolvedPortType;
+    use crate::config::ServiceType;
 
     #[test]
     fn test_build_consul_service() {
@@ -488,20 +518,25 @@ mod tests {
         extra.insert("client_max_body_size".into(), "50M".into());
 
         let service = ResolvedService {
-            name: "example-drive".into(),
+            service_id_prefix: "example-drive".into(),
+            service_name: "example-drive".into(),
+            service_type: ServiceType::Docker,
+            match_cfg: None,
+            local_address: None,
             container_port: 80,
-            local_ip: None,
-            domains: vec!["drive.example.com".into()],
-            template: "example-drive.ctmpl".into(),
-            protocol: "tcp".into(),
-            forwarding: None,
-            proxy_ip: Some("203.0.113.43".into()),
+            proxy_on: None,
             bind_ip: None,
             bind_interface: None,
+            protocol: "tcp".into(),
             extra,
-            nginx_generator: "/usr/local/bin/auto-discover-gen-nginx".into(),
-            preprocess: String::new(),
-            postprocess: String::new(),
+            port_type: ResolvedPortType::RProxy {
+                template: "example-drive.ctmpl".into(),
+                domains: vec!["drive.example.com".into()],
+                proxy_ip: Some("203.0.113.43".into()),
+                nginx_generator: "/usr/local/bin/auto-discover-gen-nginx".into(),
+                preprocess: String::new(),
+                postprocess: String::new(),
+            },
         };
 
         let reg = build_consul_service(
@@ -530,20 +565,25 @@ mod tests {
     #[test]
     fn test_build_consul_service_udp_check() {
         let service = ResolvedService {
-            name: "dns".into(),
+            service_id_prefix: "dns".into(),
+            service_name: "dns".into(),
+            service_type: ServiceType::Docker,
+            match_cfg: None,
+            local_address: None,
             container_port: 53,
-            local_ip: None,
-            domains: vec!["dns.example.com".into()],
-            template: "dns.ctmpl".into(),
-            protocol: "udp".into(),
-            forwarding: None,
-            proxy_ip: None,
+            proxy_on: None,
             bind_ip: None,
             bind_interface: None,
+            protocol: "udp".into(),
             extra: HashMap::new(),
-            nginx_generator: "/usr/local/bin/auto-discover-gen-nginx".into(),
-            preprocess: String::new(),
-            postprocess: String::new(),
+            port_type: ResolvedPortType::RProxy {
+                template: "dns.ctmpl".into(),
+                domains: vec!["dns.example.com".into()],
+                proxy_ip: None,
+                nginx_generator: "/usr/local/bin/auto-discover-gen-nginx".into(),
+                preprocess: String::new(),
+                postprocess: String::new(),
+            },
         };
 
         let reg = build_consul_service(
@@ -574,30 +614,29 @@ mod tests {
 
     #[test]
     fn test_build_consul_service_with_forwarding() {
-        use crate::config::ForwardingConfig;
-
-        let forwarding = ForwardingConfig {
-            ext_ip: "203.0.113.43".into(),
-            ext_ports: vec![25565],
-            proto: Some("tcp".into()),
-            hairpin: true,
-        };
-
         let service = ResolvedService {
-            name: "example-mc".into(),
+            service_id_prefix: "example-mc".into(),
+            service_name: "example-mc".into(),
+            service_type: ServiceType::Docker,
+            match_cfg: None,
+            local_address: None,
             container_port: 25565,
-            local_ip: None,
-            domains: vec!["mc.example.com".into()],
-            template: "".into(),
-            protocol: "tcp".into(),
-            forwarding: Some(forwarding),
-            proxy_ip: None,
+            proxy_on: None,
             bind_ip: None,
             bind_interface: None,
+            protocol: "tcp".into(),
             extra: HashMap::new(),
-            nginx_generator: "/usr/local/bin/auto-discover-gen-nginx".into(),
-            preprocess: String::new(),
-            postprocess: String::new(),
+            port_type: ResolvedPortType::ForwardingRemote {
+                ext_ip: "203.0.113.43".into(),
+                ext_ports: vec![25565],
+                hairpin: true,
+                template: String::new(),
+                domains: Vec::new(),
+                proxy_ip: None,
+                nginx_generator: "/usr/local/bin/auto-discover-gen-nginx".into(),
+                preprocess: String::new(),
+                postprocess: String::new(),
+            },
         };
 
         let reg = build_consul_service(
@@ -610,6 +649,7 @@ mod tests {
         );
 
         assert_eq!(reg.meta.get("forwarding").unwrap(), "true");
+        assert_eq!(reg.meta.get("forwarding_type").unwrap(), "remote");
         assert_eq!(reg.meta.get("ext_ip").unwrap(), "203.0.113.43");
         assert_eq!(reg.meta.get("ext_ports").unwrap(), "25565");
         assert_eq!(reg.meta.get("hairpin").unwrap(), "true");

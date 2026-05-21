@@ -111,6 +111,7 @@ dependencies = [
  "get_if_addrs",
  "hex",
  "hostname",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

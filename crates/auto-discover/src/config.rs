@@ -1,10 +1,3 @@
-//! Discovery configuration types and YAML parsing.
-//!
-//! Parses `/etc/auto-discover/discovery.yaml` defining which Docker services
-//! to discover, their port settings, and how to register them with Consul.
-//! Fields cascade from defaults to per-network overrides through
-//! [`DiscoveryConfig::resolve`].
-
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -12,596 +5,471 @@ use color_eyre::Result;
 use serde::Deserialize;
 use serde::Serialize;
 
-/// Root configuration parsed from `/etc/auto-discover/discovery.yaml`.
-///
-/// Defines node identity (`name`), cascade defaults, and the list of
-/// Docker services to discover.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DiscoveryConfig {
-    /// Node identity. Used for Consul service ID prefix and stale-service
-    /// cleanup scoped to this server.
-    pub name: String,
-    /// Optional directory for additional config files.
+    pub node: NodeConfig,
     #[serde(default)]
     pub config_dir: Option<String>,
-    /// Cascade defaults applied to all [`NetworkConfig`] entries that don't
-    /// override them.
     #[serde(default)]
     pub defaults: Defaults,
-    /// Service definitions to discover and register.
-    pub networks: Vec<NetworkConfig>,
+    #[serde(default)]
+    pub services: HashMap<String, ServiceConfig>,
 }
 
-/// Default values that cascade to all network entries.
-///
-/// Per-network fields take precedence over these defaults.
-/// The resolution chain is: network-specific value → defaults → hard-coded fallback.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NodeConfig {
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Defaults {
-    /// Default proxy server IP for nginx `listen` directives.
+    #[serde(default)]
+    pub proxy_on: Option<String>,
     #[serde(default)]
     pub proxy_ip: Option<String>,
-    /// Default network interface for IP resolution.
     #[serde(default)]
     pub bind_interface: Option<String>,
-    /// Default IP for natmap bind and Consul service address.
     #[serde(default)]
     pub bind_ip: Option<String>,
-    /// Default transport protocol (`tcp` or `udp`).
-    #[serde(default)]
-    pub protocol: Option<String>,
-    /// Default path to the nginx config generator script.
     #[serde(default)]
     pub nginx_generator: Option<String>,
-    /// Default inline preprocess script (runs on service node before
-    /// storing in Consul KV).
     #[serde(default)]
     pub preprocess: Option<String>,
-    /// Default inline postprocess script (runs on proxy node during
-    /// nginx config assembly).
     #[serde(default)]
     pub postprocess: Option<String>,
 }
 
-/// Kernel-level NAT configuration that bypasses the nginx reverse proxy.
-///
-/// When set, traffic is forwarded via iptables DNAT from the proxy server
-/// directly to the service host, eliminating proxy latency.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ServiceType {
+    Docker,
+    Local,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ServiceConfig {
+    #[serde(rename = "type")]
+    pub service_type: ServiceType,
+
+    #[serde(rename = "match")]
+    #[serde(default)]
+    pub match_cfg: Option<MatchConfig>,
+
+    #[serde(default)]
+    pub address: Option<String>,
+
+    #[serde(default)]
+    pub bind_ip: Option<String>,
+
+    #[serde(default)]
+    pub bind_interface: Option<String>,
+
+    #[serde(default)]
+    pub rproxy: Vec<RProxyConfig>,
+
+    #[serde(default)]
+    pub forwarding: Vec<ForwardingConfig>,
+
+    #[serde(default)]
+    pub extra: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct MatchConfig {
+    pub project: Option<String>,
+    pub container: Option<String>,
+    pub container_regex: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RProxyConfig {
+    pub port: u16,
+    pub template: String,
+    #[serde(default)]
+    pub domains: Vec<String>,
+    #[serde(default)]
+    pub proxy_on: Option<String>,
+    #[serde(default)]
+    pub proxy_ip: Option<String>,
+    #[serde(default)]
+    pub nginx_generator: Option<String>,
+    #[serde(default)]
+    pub preprocess: Option<String>,
+    #[serde(default)]
+    pub postprocess: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ForwardingType {
+    Local,
+    Remote,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ForwardingConfig {
-    /// Public IP on the proxy server to forward FROM.
-    pub ext_ip: String,
-    /// Static port(s) on the public IP. The first port (`ext_ports[0]`) is
-    /// used as the natmap host port instead of an ephemeral allocation.
-    pub ext_ports: Vec<u16>,
-    /// Protocol for the iptables DNAT rule. Defaults to `tcp`.
+    #[serde(rename = "type")]
+    pub fwd_type: ForwardingType,
+    pub port: u16,
     #[serde(default)]
     pub proto: Option<String>,
-    /// Whether to create hairpin NAT rules so internal hosts can reach
-    /// themselves via the external IP. Defaults to `false`.
-    #[serde(default)]
-    pub hairpin: bool,
-}
-
-/// A single network/service definition from `discovery.yaml`.
-///
-/// Describes one Docker Compose project's port mapping, nginx routing,
-/// and optional kernel-level forwarding. For local (non-Docker) services,
-/// set `local_ip` instead of (or in addition to) `container_port`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct NetworkConfig {
-    /// Must match the `com.docker.compose.project` Docker label.
-    /// One project can have multiple entries (e.g. TCP + UDP ports).
-    pub name: String,
-    /// Port the service listens on (inside container for Docker, or on host
-    /// for local services). Required for Docker containers; for local services
-    /// use `local_port` instead if `container_port` is not set.
-    #[serde(default)]
-    pub container_port: Option<u16>,
-    /// IP address of a local (non-Docker) service. When set, the service is
-    /// treated as running directly on the host — no Docker inspection or
-    /// container matching is performed.
-    #[serde(default)]
-    pub local_ip: Option<String>,
-    /// Port for a local (non-Docker) service. Alternative to `container_port`
-    /// when `local_ip` is set. Mutually exclusive with `container_port`.
-    #[serde(default)]
-    pub local_port: Option<u16>,
-    /// Domain names for nginx `server_name`. First domain is the primary.
-    #[serde(default)]
-    pub domains: Vec<String>,
-    /// Nginx template type: `REVERSE_PROXY`, `REVERSE_PROXY_PRIVATE`,
-    /// `STREAM`, or `STREAM_PRIVATE`. Empty string when forwarding-only.
-    #[serde(default)]
-    pub template: String,
-    /// Transport protocol. Cascades from defaults. Defaults to `tcp`.
-    #[serde(default)]
-    pub protocol: Option<String>,
-    /// Kernel-level NAT config. When set, bypasses nginx/nginx-daemon
-    /// and uses a static port from `ext_ports[0]`.
-    #[serde(default)]
-    pub forwarding: Option<ForwardingConfig>,
-    /// Override for the proxy server IP.
-    #[serde(default)]
-    pub proxy_ip: Option<String>,
-    /// IP to bind the natmap host port on.
     #[serde(default)]
     pub bind_ip: Option<String>,
-    /// Interface name to resolve an IP from via `ip addr show`.
     #[serde(default)]
     pub bind_interface: Option<String>,
-    /// Arbitrary key-value pairs passed to the generator script as
-    /// `AUTO_DISCOVER_EXTRA_<key>` env vars.
     #[serde(default)]
-    pub extra: HashMap<String, String>,
-    /// Path to nginx config generator script. Cascades.
+    pub bind_port: Option<u16>,
     #[serde(default)]
-    pub nginx_generator: Option<String>,
-    /// Inline shell script run on the service node after the generator.
-    /// stdin = generator output, stdout = stored config.
+    pub ext_ip: Option<String>,
     #[serde(default)]
-    pub preprocess: Option<String>,
-    /// Inline shell script stored in Consul KV, run on the proxy.
-    /// stdin = config from KV, stdout = final nginx config.
-    /// Exit 1 = skip this service.
+    pub ext_ports: Option<Vec<u16>>,
     #[serde(default)]
-    pub postprocess: Option<String>,
+    pub hairpin: Option<bool>,
+    #[serde(default)]
+    pub proxy_on: Option<String>,
 }
 
-impl DiscoveryConfig {
-    /// Load and parse a `discovery.yaml` file from the given path.
-    pub fn load(path: &Path) -> Result<Self> {
-        let contents = std::fs::read_to_string(path)?;
-        let config: DiscoveryConfig = serde_yaml::from_str(&contents)?;
-        Ok(config)
-    }
-
-    /// Resolve a [`NetworkConfig`] into a [`ResolvedService`] by cascading
-    /// defaults and filling in fallback values.
-    ///
-    /// Resolution order (last wins):
-    /// 1. Hard-coded fallback
-    /// 2. `defaults.*`
-    /// 3. Per-network field
-    pub fn resolve(&self, service: &NetworkConfig) -> ResolvedService {
-        let protocol = service
-            .protocol
-            .clone()
-            .or_else(|| service.forwarding.as_ref().and_then(|f| f.proto.clone()))
-            .or_else(|| self.defaults.protocol.clone())
-            .unwrap_or_else(|| "tcp".to_string());
-
-        let proxy_ip = service
-            .proxy_ip
-            .clone()
-            .or_else(|| self.defaults.proxy_ip.clone());
-
-        let bind_ip = service
-            .bind_ip
-            .clone()
-            .or_else(|| self.defaults.bind_ip.clone());
-
-        let nginx_generator = service
-            .nginx_generator
-            .clone()
-            .or_else(|| self.defaults.nginx_generator.clone())
-            .unwrap_or_else(|| "/usr/local/bin/auto-discover-gen-nginx".to_string());
-
-        let preprocess = service
-            .preprocess
-            .clone()
-            .or_else(|| self.defaults.preprocess.clone())
-            .unwrap_or_default();
-
-        let postprocess = service
-            .postprocess
-            .clone()
-            .or_else(|| self.defaults.postprocess.clone())
-            .unwrap_or_default();
-
-        let is_local = service.local_ip.is_some() || service.local_port.is_some();
-        let local_ip = if is_local {
-            Some(
-                service
-                    .local_ip
-                    .clone()
-                    .unwrap_or_else(|| "127.0.0.1".to_string()),
-            )
-        } else {
-            None
-        };
-        let container_port = service
-            .local_port
-            .or(service.container_port)
-            .expect("either container_port or local_port must be set");
-
-        ResolvedService {
-            name: service.name.clone(),
-            container_port,
-            local_ip,
-            domains: service.domains.clone(),
-            template: service.template.clone(),
-            protocol,
-            forwarding: service.forwarding.clone(),
-            proxy_ip,
-            bind_ip,
-            bind_interface: service
-                .bind_interface
-                .clone()
-                .or_else(|| self.defaults.bind_interface.clone()),
-            extra: service.extra.clone(),
-            nginx_generator,
-            preprocess,
-            postprocess,
-        }
-    }
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResolvedPortType {
+    RProxy {
+        template: String,
+        domains: Vec<String>,
+        proxy_ip: Option<String>,
+        nginx_generator: String,
+        preprocess: String,
+        postprocess: String,
+    },
+    ForwardingLocal {
+        bind_port: Option<u16>,
+        template: String,
+        domains: Vec<String>,
+        proxy_ip: Option<String>,
+        nginx_generator: String,
+        preprocess: String,
+        postprocess: String,
+    },
+    ForwardingRemote {
+        ext_ip: String,
+        ext_ports: Vec<u16>,
+        hairpin: bool,
+        template: String,
+        domains: Vec<String>,
+        proxy_ip: Option<String>,
+        nginx_generator: String,
+        preprocess: String,
+        postprocess: String,
+    },
 }
 
-/// A fully resolved service definition with all defaults applied.
-///
-/// This is the type used throughout the daemon for Consul registration,
-/// natmap port mapping, and nginx config generation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedService {
-    /// Service name (from the `name` field in `discovery.yaml`).
-    pub name: String,
-    /// Port to forward traffic to (container port for Docker, or local port
-    /// for local services).
+    pub service_id_prefix: String,
+    pub service_name: String,
+    pub service_type: ServiceType,
+    pub match_cfg: Option<MatchConfig>,
+    pub local_address: Option<String>,
     pub container_port: u16,
-    /// Local IP for non-Docker services. `None` for Docker containers (IP
-    /// is resolved from `docker inspect` at runtime).
-    pub local_ip: Option<String>,
-    /// Domain names for nginx routing. The first domain is the primary.
-    pub domains: Vec<String>,
-    /// Nginx template identifier.
-    pub template: String,
-    /// Transport protocol (`tcp` or `udp`). Always set after resolution.
-    pub protocol: String,
-    /// Kernel-level forwarding configuration, if any.
-    pub forwarding: Option<ForwardingConfig>,
-    /// Proxy server IP for nginx `listen` directive.
-    pub proxy_ip: Option<String>,
-    /// IP to bind the natmap host port on.
+    pub proxy_on: Option<String>,
     pub bind_ip: Option<String>,
-    /// Network interface for IP resolution.
     pub bind_interface: Option<String>,
-    /// Extra metadata passed to the nginx generator script.
+    pub protocol: String,
+    pub port_type: ResolvedPortType,
     pub extra: HashMap<String, String>,
-    /// Path to the nginx config generator script.
-    pub nginx_generator: String,
-    /// Preprocess script content (runs on service node).
-    pub preprocess: String,
-    /// Postprocess script content (runs on proxy node).
-    pub postprocess: String,
 }
 
 impl ResolvedService {
-    /// Returns the first domain name, or an empty string if none configured.
-    ///
-    /// This is used as the nginx `server_name` and as a discriminator in
-    /// the Consul service ID to prevent collisions when multiple entries
-    /// share the same name and port.
+    /// Returns the primary domain for routing and ID generation.
     pub fn primary_domain(&self) -> &str {
-        self.domains.first().map(|s| s.as_str()).unwrap_or("")
+        match &self.port_type {
+            ResolvedPortType::RProxy { domains, .. } => {
+                domains.first().map(|s| s.as_str()).unwrap_or("_")
+            }
+            _ => "_",
+        }
+    }
+
+    /// Returns a slugified domain for ID generation.
+    pub fn domain_slug(&self) -> String {
+        self.primary_domain().replace('.', "-")
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+impl DiscoveryConfig {
+    pub fn load(path: &Path) -> Result<Self> {
+        let contents = std::fs::read_to_string(path)?;
 
-    #[test]
-    fn parse_minimal_config() {
-        let yaml = r#"
-name: service-node-1
-networks:
-  - name: example-drive
-    container_port: 80
-    template: example-drive.ctmpl
-"#;
-        let config: DiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.name, "service-node-1");
-        assert_eq!(config.networks.len(), 1);
-        assert_eq!(config.networks[0].name, "example-drive");
-        assert_eq!(config.networks[0].container_port, Some(80));
-        assert!(config.networks[0].domains.is_empty());
+        // Try new format first, fall back to legacy format
+        if let Ok(config) = serde_yaml::from_str::<DiscoveryConfig>(&contents) {
+            return Ok(config);
+        }
+
+        // Legacy format (old `name` + `networks` top-level keys)
+        #[derive(Deserialize)]
+        struct LegacyForwardingConfig {
+            ext_ip: String,
+            ext_ports: Vec<u16>,
+            #[serde(default)]
+            proto: Option<String>,
+            #[serde(default)]
+            hairpin: bool,
+        }
+
+        #[derive(Deserialize)]
+        struct LegacyNetworkConfig {
+            name: String,
+            container_port: Option<u16>,
+            local_ip: Option<String>,
+            local_port: Option<u16>,
+            #[serde(default)]
+            domains: Vec<String>,
+            #[serde(default)]
+            template: String,
+            #[serde(default)]
+            protocol: Option<String>,
+            forwarding: Option<LegacyForwardingConfig>,
+            #[serde(default)]
+            proxy_ip: Option<String>,
+            #[serde(default)]
+            bind_ip: Option<String>,
+            #[serde(default)]
+            bind_interface: Option<String>,
+            #[serde(default)]
+            extra: HashMap<String, String>,
+            #[serde(default)]
+            nginx_generator: Option<String>,
+            #[serde(default)]
+            preprocess: Option<String>,
+            #[serde(default)]
+            postprocess: Option<String>,
+        }
+
+        #[derive(Deserialize)]
+        struct LegacyConfig {
+            name: String,
+            #[serde(default)]
+            config_dir: Option<String>,
+            #[serde(default)]
+            defaults: Defaults,
+            networks: Vec<LegacyNetworkConfig>,
+        }
+
+        let legacy: LegacyConfig = serde_yaml::from_str(&contents)?;
+        let mut services = HashMap::new();
+
+        for net in legacy.networks {
+            let is_local = net.local_ip.is_some() || net.local_port.is_some();
+            let port = net.local_port.or(net.container_port);
+            let _proto = net.protocol.unwrap_or_else(|| "tcp".to_string());
+
+            let entry = services
+                .entry(net.name.clone())
+                .or_insert_with(|| ServiceConfig {
+                    service_type: if is_local {
+                        ServiceType::Local
+                    } else {
+                        ServiceType::Docker
+                    },
+                    match_cfg: Some(MatchConfig {
+                        project: Some(net.name.clone()),
+                        container: None,
+                        container_regex: None,
+                    }),
+                    address: net.local_ip.clone(),
+                    bind_ip: net.bind_ip.clone(),
+                    bind_interface: net.bind_interface.clone(),
+                    rproxy: Vec::new(),
+                    forwarding: Vec::new(),
+                    extra: HashMap::new(),
+                });
+
+            // Legacy forwarding uses ext_ports[0] as the host port directly
+            if let Some(f) = net.forwarding {
+                if let Some(p) = port {
+                    entry.forwarding.push(ForwardingConfig {
+                        fwd_type: ForwardingType::Remote,
+                        port: p,
+                        proto: f.proto,
+                        bind_ip: None,
+                        bind_interface: None,
+                        bind_port: None,
+                        ext_ip: Some(f.ext_ip),
+                        ext_ports: Some(f.ext_ports),
+                        hairpin: Some(f.hairpin),
+                        proxy_on: None,
+                    });
+                }
+            }
+
+            // RProxy entries: only create when no forwarding OR when template is non-empty
+            let has_forwarding_in_entry = !entry.forwarding.is_empty();
+            if !has_forwarding_in_entry || (!net.template.is_empty() && !net.template.is_empty()) {
+                if let Some(p) = port {
+                    entry.rproxy.push(RProxyConfig {
+                        port: p,
+                        template: net.template.clone(),
+                        domains: net.domains.clone(),
+                        proxy_on: None,
+                        proxy_ip: net.proxy_ip.clone(),
+                        nginx_generator: net.nginx_generator.clone(),
+                        preprocess: net.preprocess.clone(),
+                        postprocess: net.postprocess.clone(),
+                    });
+                }
+            }
+
+            entry.extra.extend(net.extra);
+        }
+
+        Ok(DiscoveryConfig {
+            node: NodeConfig { name: legacy.name },
+            config_dir: legacy.config_dir,
+            defaults: legacy.defaults,
+            services,
+        })
     }
 
-    #[test]
-    fn parse_full_config() {
-        let yaml = r#"
-name: service-node-1
-defaults:
-  proxy_ip: 203.0.113.43
-  protocol: tcp
+    pub fn resolve_all(&self) -> Vec<ResolvedService> {
+        let mut resolved = Vec::new();
 
-networks:
-  - name: example-drive
-    container_port: 80
-    domains:
-      - drive.example.com
-    template: example-drive.ctmpl
-    protocol: tcp
-    proxy_ip: 203.0.113.43
-    extra:
-      client_max_body_size: "50M"
+        for (service_id_prefix, service) in &self.services {
+            let svc_bind_ip = service
+                .bind_ip
+                .clone()
+                .or_else(|| self.defaults.bind_ip.clone());
+            let svc_bind_interface = service
+                .bind_interface
+                .clone()
+                .or_else(|| self.defaults.bind_interface.clone());
 
-  - name: example-mail
-    container_port: 443
-    domains:
-      - mail.example.com
-    template: example-mail.ctmpl
-    bind_ip: 10.0.0.101
-"#;
-        let config: DiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.networks.len(), 2);
-        assert_eq!(config.defaults.proxy_ip.as_deref(), Some("203.0.113.43"));
+            for proxy in &service.rproxy {
+                // Skip rproxy entries that have a matching forwarding entry (merged above)
+                if service.forwarding.iter().any(|f| f.port == proxy.port) {
+                    continue;
+                }
+                resolved.push(ResolvedService {
+                    service_id_prefix: service_id_prefix.clone(),
+                    service_name: service_id_prefix.clone(),
+                    service_type: service.service_type.clone(),
+                    match_cfg: service.match_cfg.clone(),
+                    local_address: service.address.clone(),
+                    container_port: proxy.port,
+                    proxy_on: proxy
+                        .proxy_on
+                        .clone()
+                        .or_else(|| self.defaults.proxy_on.clone()),
+                    bind_ip: svc_bind_ip.clone(),
+                    bind_interface: svc_bind_interface.clone(),
+                    protocol: "tcp".to_string(), // rproxy is always tcp implicitly
+                    extra: service.extra.clone(),
+                    port_type: ResolvedPortType::RProxy {
+                        template: proxy.template.clone(),
+                        domains: proxy.domains.clone(),
+                        proxy_ip: proxy
+                            .proxy_ip
+                            .clone()
+                            .or_else(|| self.defaults.proxy_ip.clone()),
+                        nginx_generator: proxy
+                            .nginx_generator
+                            .clone()
+                            .or_else(|| self.defaults.nginx_generator.clone())
+                            .unwrap_or_else(|| {
+                                "/usr/local/bin/auto-discover-gen-nginx".to_string()
+                            }),
+                        preprocess: proxy
+                            .preprocess
+                            .clone()
+                            .or_else(|| self.defaults.preprocess.clone())
+                            .unwrap_or_default(),
+                        postprocess: proxy
+                            .postprocess
+                            .clone()
+                            .or_else(|| self.defaults.postprocess.clone())
+                            .unwrap_or_default(),
+                    },
+                });
+            }
 
-        let svc = &config.networks[0];
-        assert_eq!(svc.extra.get("client_max_body_size").unwrap(), "50M");
+            for fwd in &service.forwarding {
+                let matching_rproxy = service.rproxy.iter().find(|r| r.port == fwd.port);
+                let port_type = match fwd.fwd_type {
+                    ForwardingType::Local => ResolvedPortType::ForwardingLocal {
+                        bind_port: fwd.bind_port,
+                        template: matching_rproxy
+                            .map(|r| r.template.clone())
+                            .unwrap_or_default(),
+                        domains: matching_rproxy
+                            .map(|r| r.domains.clone())
+                            .unwrap_or_default(),
+                        proxy_ip: matching_rproxy
+                            .and_then(|r| r.proxy_ip.clone())
+                            .or_else(|| self.defaults.proxy_ip.clone()),
+                        nginx_generator: matching_rproxy
+                            .and_then(|r| r.nginx_generator.clone())
+                            .or_else(|| self.defaults.nginx_generator.clone())
+                            .unwrap_or_else(|| {
+                                "/usr/local/bin/auto-discover-gen-nginx".to_string()
+                            }),
+                        preprocess: matching_rproxy
+                            .and_then(|r| r.preprocess.clone())
+                            .or_else(|| self.defaults.preprocess.clone())
+                            .unwrap_or_default(),
+                        postprocess: matching_rproxy
+                            .and_then(|r| r.postprocess.clone())
+                            .or_else(|| self.defaults.postprocess.clone())
+                            .unwrap_or_default(),
+                    },
+                    ForwardingType::Remote => ResolvedPortType::ForwardingRemote {
+                        ext_ip: fwd.ext_ip.clone().unwrap_or_default(),
+                        ext_ports: fwd.ext_ports.clone().unwrap_or_default(),
+                        hairpin: fwd.hairpin.unwrap_or(false),
+                        template: matching_rproxy
+                            .map(|r| r.template.clone())
+                            .unwrap_or_default(),
+                        domains: matching_rproxy
+                            .map(|r| r.domains.clone())
+                            .unwrap_or_default(),
+                        proxy_ip: matching_rproxy
+                            .and_then(|r| r.proxy_ip.clone())
+                            .or_else(|| self.defaults.proxy_ip.clone()),
+                        nginx_generator: matching_rproxy
+                            .and_then(|r| r.nginx_generator.clone())
+                            .or_else(|| self.defaults.nginx_generator.clone())
+                            .unwrap_or_else(|| {
+                                "/usr/local/bin/auto-discover-gen-nginx".to_string()
+                            }),
+                        preprocess: matching_rproxy
+                            .and_then(|r| r.preprocess.clone())
+                            .or_else(|| self.defaults.preprocess.clone())
+                            .unwrap_or_default(),
+                        postprocess: matching_rproxy
+                            .and_then(|r| r.postprocess.clone())
+                            .or_else(|| self.defaults.postprocess.clone())
+                            .unwrap_or_default(),
+                    },
+                };
 
-        let svc2 = &config.networks[1];
-        assert_eq!(svc2.bind_ip.as_deref(), Some("10.0.0.101"));
-    }
+                resolved.push(ResolvedService {
+                    service_id_prefix: service_id_prefix.clone(),
+                    service_name: service_id_prefix.clone(),
+                    service_type: service.service_type.clone(),
+                    match_cfg: service.match_cfg.clone(),
+                    local_address: service.address.clone(),
+                    container_port: fwd.port,
+                    proxy_on: fwd
+                        .proxy_on
+                        .clone()
+                        .or_else(|| self.defaults.proxy_on.clone()),
+                    bind_ip: fwd.bind_ip.clone().or(svc_bind_ip.clone()),
+                    bind_interface: fwd.bind_interface.clone().or(svc_bind_interface.clone()),
+                    protocol: fwd.proto.clone().unwrap_or_else(|| "tcp".to_string()),
+                    extra: service.extra.clone(),
+                    port_type,
+                });
+            }
+        }
 
-    #[test]
-    fn resolve_uses_defaults() {
-        let yaml = r#"
-name: service-node-1
-defaults:
-  proxy_ip: 203.0.113.43
-  protocol: tcp
-
-networks:
-  - name: example-drive
-    container_port: 80
-    template: example-drive.ctmpl
-"#;
-        let config: DiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
-        let resolved = config.resolve(&config.networks[0]);
-        assert_eq!(resolved.protocol, "tcp");
-        assert_eq!(resolved.proxy_ip.as_deref(), Some("203.0.113.43"));
-    }
-
-    #[test]
-    fn resolve_service_overrides_default() {
-        let yaml = r#"
-name: service-node-1
-defaults:
-  proxy_ip: 10.0.0.1
-  protocol: tcp
-
-networks:
-  - name: example-drive
-    container_port: 80
-    template: example-drive.ctmpl
-    protocol: udp
-    proxy_ip: 203.0.113.43
-"#;
-        let config: DiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
-        let resolved = config.resolve(&config.networks[0]);
-        assert_eq!(resolved.protocol, "udp");
-        assert_eq!(resolved.proxy_ip.as_deref(), Some("203.0.113.43"));
-    }
-
-    #[test]
-    fn primary_domain() {
-        let resolved = ResolvedService {
-            name: "test".into(),
-            container_port: 80,
-            local_ip: None,
-            domains: vec!["drive.example.com".into(), "www.example.com".into()],
-            template: "t.ctmpl".into(),
-            protocol: "tcp".into(),
-            forwarding: None,
-            proxy_ip: None,
-            bind_ip: None,
-            bind_interface: None,
-            extra: HashMap::new(),
-            nginx_generator: "/usr/local/bin/auto-discover-gen-nginx".into(),
-            preprocess: String::new(),
-            postprocess: String::new(),
-        };
-        assert_eq!(resolved.primary_domain(), "drive.example.com");
-    }
-
-    #[test]
-    fn resolve_nginx_generator_default() {
-        let yaml = r#"
-name: service-node-1
-networks:
-  - name: test
-    container_port: 80
-    template: REVERSE_PROXY
-"#;
-        let config: DiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
-        let resolved = config.resolve(&config.networks[0]);
-        assert_eq!(
-            resolved.nginx_generator,
-            "/usr/local/bin/auto-discover-gen-nginx"
-        );
-    }
-
-    #[test]
-    fn resolve_nginx_generator_override() {
-        let yaml = r#"
-name: service-node-1
-defaults:
-  nginx_generator: /usr/local/bin/custom-gen
-networks:
-  - name: test
-    container_port: 80
-    template: REVERSE_PROXY
-    nginx_generator: /usr/local/bin/per-service-gen
-"#;
-        let config: DiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
-        let resolved = config.resolve(&config.networks[0]);
-        assert_eq!(resolved.nginx_generator, "/usr/local/bin/per-service-gen");
-    }
-
-    #[test]
-    fn resolve_preprocess_postprocess_defaults() {
-        let yaml = r#"
-name: service-node-1
-defaults:
-  preprocess: "sed s/a/b/"
-  postprocess: "sed s/c/d/"
-networks:
-  - name: test
-    container_port: 80
-    template: REVERSE_PROXY
-"#;
-        let config: DiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
-        let resolved = config.resolve(&config.networks[0]);
-        assert_eq!(resolved.preprocess, "sed s/a/b/");
-        assert_eq!(resolved.postprocess, "sed s/c/d/");
-    }
-
-    #[test]
-    fn resolve_preprocess_postprocess_override() {
-        let yaml = r#"
-name: service-node-1
-networks:
-  - name: test
-    container_port: 80
-    template: REVERSE_PROXY
-    preprocess: "per-service-pre"
-    postprocess: "per-service-post"
-"#;
-        let config: DiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
-        let resolved = config.resolve(&config.networks[0]);
-        assert_eq!(resolved.preprocess, "per-service-pre");
-        assert_eq!(resolved.postprocess, "per-service-post");
-    }
-
-    #[test]
-    fn parse_bind_interface() {
-        let yaml = r#"
-name: service-node-1
-networks:
-  - name: test-iface
-    container_port: 80
-    bind_interface: dummy0
-    template: t.ctmpl
-"#;
-        let config: DiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.networks[0].bind_interface.as_deref(), Some("dummy0"));
-    }
-
-    #[test]
-    fn resolve_bind_ip_from_defaults() {
-        let yaml = r#"
-name: service-node-2
-defaults:
-  bind_ip: 10.0.0.102
-  proxy_ip: 203.0.113.43
-
-networks:
-  - name: example-mc
-    container_port: 25565
-    template: t.ctmpl
-"#;
-        let config: DiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
-        let resolved = config.resolve(&config.networks[0]);
-        assert_eq!(resolved.bind_ip.as_deref(), Some("10.0.0.102"));
-        assert_eq!(resolved.proxy_ip.as_deref(), Some("203.0.113.43"));
-    }
-
-    #[test]
-    fn resolve_bind_ip_override() {
-        let yaml = r#"
-name: service-node-2
-defaults:
-  bind_ip: 10.0.0.102
-
-networks:
-  - name: public-service
-    container_port: 80
-    template: t.ctmpl
-    bind_ip: 0.0.0.0
-"#;
-        let config: DiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
-        let resolved = config.resolve(&config.networks[0]);
-        assert_eq!(resolved.bind_ip.as_deref(), Some("0.0.0.0"));
-    }
-
-    #[test]
-    fn primary_domain_empty() {
-        let resolved = ResolvedService {
-            name: "test".into(),
-            container_port: 80,
-            local_ip: None,
-            domains: vec![],
-            template: "t.ctmpl".into(),
-            protocol: "tcp".into(),
-            forwarding: None,
-            proxy_ip: None,
-            bind_ip: None,
-            bind_interface: None,
-            extra: HashMap::new(),
-            nginx_generator: "/usr/local/bin/auto-discover-gen-nginx".into(),
-            preprocess: String::new(),
-            postprocess: String::new(),
-        };
-        assert_eq!(resolved.primary_domain(), "");
-    }
-
-    #[test]
-    fn parse_forwarding_config() {
-        let yaml = r#"
-name: service-node-2
-networks:
-  - name: example-mc
-    container_port: 25565
-    forwarding:
-      ext_ip: 203.0.113.43
-      ext_ports: [25565]
-      proto: tcp
-      hairpin: true
-    template: ""
-"#;
-        let config: DiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
-        let fwd = config.networks[0].forwarding.as_ref().unwrap();
-        assert_eq!(fwd.ext_ip, "203.0.113.43");
-        assert_eq!(fwd.ext_ports, vec![25565]);
-        assert_eq!(fwd.proto.as_deref(), Some("tcp"));
-        assert!(fwd.hairpin);
-    }
-
-    #[test]
-    fn resolve_passes_forwarding_through() {
-        let yaml = r#"
-name: service-node-2
-networks:
-  - name: example-mc
-    container_port: 25565
-    forwarding:
-      ext_ip: 203.0.113.43
-      ext_ports: [25565]
-      proto: tcp
-    template: ""
-"#;
-        let config: DiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
-        let resolved = config.resolve(&config.networks[0]);
-        let fwd = resolved.forwarding.unwrap();
-        assert_eq!(fwd.ext_ip, "203.0.113.43");
-        assert_eq!(fwd.ext_ports, vec![25565]);
-    }
-
-    #[test]
-    fn forwarding_hairpin_default_false() {
-        let yaml = r#"
-name: service-node-2
-networks:
-  - name: test
-    container_port: 80
-    forwarding:
-      ext_ip: 203.0.113.43
-      ext_ports: [80]
-    template: ""
-"#;
-        let config: DiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
-        let fwd = config.networks[0].forwarding.as_ref().unwrap();
-        assert!(!fwd.hairpin);
+        // Sort resolved services for deterministic output
+        resolved.sort_by_key(|r| format!("{}-{}", r.service_id_prefix, r.container_port));
+        resolved
     }
 }
