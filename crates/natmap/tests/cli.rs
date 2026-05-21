@@ -11,9 +11,10 @@ fn parse_mapping(mapping: &str) -> Result<DockerAddMapRequest, String> {
     let parts: Vec<&str> = mapping_part.split(':').collect();
 
     let mut host_ip = "0.0.0.0".to_string();
-    let mut host_port = 0u16;
     let mut target_ip = None;
-    let mut container_port = 0u16;
+
+    let host_port;
+    let container_port;
 
     match parts.len() {
         1 => {
@@ -70,19 +71,14 @@ fn parse_mapping(mapping: &str) -> Result<DockerAddMapRequest, String> {
         _ => return Err("Invalid mapping format".into()),
     }
 
-    let proto_enum = match proto.as_str() {
-        "tcp" => TransportProtocol::Tcp,
-        "udp" => TransportProtocol::Udp,
-        _ => return Err("Invalid protocol".into()),
-    };
+    let proto = proto.try_into().unwrap();
 
     Ok(DockerAddMapRequest {
         host_ip,
         host_port,
         container_port,
         target_ip,
-        proto: proto_enum,
-        ..Default::default()
+        proto,
     })
 }
 

@@ -2082,7 +2082,7 @@ echo "PASS: local service registered at $ADDR:$PORT, reachable via DNAT, nginx c
 kill %4 %3 %2 %1 2>/dev/null || true
 sleep 1
 "#,
-            setup = test_setup_ext(&yaml, "", "--no-forwarding"),
+            setup = test_setup_ext(yaml, "", "--no-forwarding"),
         );
         let out = run(&script);
         assert_pass(&out, "Local service — auto-discover");
