@@ -282,29 +282,77 @@ pub async fn remap(
     Ok(())
 }
 
-/// Adds a new port mapping to a running container via the daemon API.
+/// Adds a new port mapping via the daemon API.
 pub async fn add(
     container_id: String,
-    mapping: String,
+    mapping_opt: Option<String>,
+    name: Option<String>,
     socket: impl AsRef<Path>,
     json: bool,
 ) -> Result<()> {
+    let (container_id, mapping) = match (name, mapping_opt) {
+        (Some(n), Some(m)) => (n, m),
+        (Some(n), None) => (n, container_id),
+        (None, Some(m)) => (container_id, m),
+        (None, None) => bail!(
+            "Missing mapping. Usage: docker add <CONTAINER_ID> <MAPPING> or docker add <MAPPING> --name <NAME>"
+        ),
+    };
+
     let (mapping_part, proto) = match mapping.split_once('/') {
         Some((m, p)) => (m, p.to_string()),
         None => (mapping.as_str(), "tcp".to_string()),
     };
 
     let parts: Vec<&str> = mapping_part.split(':').collect();
-    let (host_ip, host_port, container_port) = match parts.len() {
-        3 => (parts[0].to_string(), parts[1].parse()?, parts[2].parse()?),
-        2 => ("0.0.0.0".to_string(), parts[0].parse()?, parts[1].parse()?),
-        _ => bail!("Invalid mapping format. Use [HOST_IP:]HOST_PORT:CONTAINER_PORT[/PROTO]"),
-    };
+
+    let mut host_ip = "0.0.0.0".to_string();
+    let host_port: u16;
+    let mut target_ip = None;
+    let container_port: u16;
+
+    match parts.len() {
+        1 => {
+            host_port = parts[0].parse()?;
+            container_port = host_port;
+        }
+        2 => {
+            if let Ok(ip) = parts[0].parse::<std::net::IpAddr>() {
+                host_ip = ip.to_string();
+                host_port = parts[1].parse()?;
+                container_port = host_port;
+            } else {
+                host_port = parts[0].parse()?;
+                container_port = parts[1].parse()?;
+            }
+        }
+        3 => {
+            if let Ok(ip) = parts[0].parse::<std::net::IpAddr>() {
+                host_ip = ip.to_string();
+                host_port = parts[1].parse()?;
+                container_port = parts[2].parse()?;
+            } else {
+                host_port = parts[0].parse()?;
+                target_ip = Some(parts[1].to_string());
+                container_port = parts[2].parse()?;
+            }
+        }
+        4 => {
+            host_ip = parts[0].to_string();
+            host_port = parts[1].parse()?;
+            target_ip = Some(parts[2].to_string());
+            container_port = parts[3].parse()?;
+        }
+        _ => bail!(
+            "Invalid mapping format. Use [HOST_IP:]HOST_PORT[:[TARGET_IP:]TARGET_PORT][/PROTO]"
+        ),
+    }
 
     let req = DockerAddMapRequest {
         host_ip,
         host_port,
         container_port,
+        target_ip,
         proto: proto.try_into()?,
     };
     let uri = format!("/mapping/{container_id}");
@@ -323,6 +371,7 @@ pub async fn remove(
     port: Option<String>,
     all: bool,
     id: Option<u64>,
+    name: Option<String>,
     socket: impl AsRef<Path>,
     json: bool,
 ) -> Result<()> {
@@ -334,15 +383,17 @@ pub async fn remove(
         }
     } else if all {
         bail!("--all not implemented yet");
-    } else if let (Some(cid), Some(p)) = (container_id, port) {
+    } else {
+        let cid = name
+            .or(container_id)
+            .ok_or_else(|| color_eyre::eyre::eyre!("Missing container ID or --name"))?;
+        let p = port.ok_or_else(|| color_eyre::eyre::eyre!("Missing port to remove"))?;
         let port_num: u16 = p.split('/').next().unwrap().parse()?;
         let uri = format!("/mapping/{cid}/{port_num}");
         let _res: () = request_json(socket, Method::DELETE, &uri, None::<()>).await?;
         if !json {
             println!("Successfully removed mapping.");
         }
-    } else {
-        bail!("Specify either --id <ID>, or <CONTAINER_ID> <PORT>, or --all");
     }
     Ok(())
 }
