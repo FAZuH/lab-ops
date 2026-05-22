@@ -9,6 +9,7 @@ docker-tests = []
 
 [dependencies]
 lab-lib = { path = "../lab-lib" }
+natmap = { path = "../natmap" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"

@@ -177,6 +177,7 @@ impl DiscoveryDaemon {
                     resolved.protocol,
                     None,
                 )
+                .await
                 .wrap_err("natmap command failed")?;
         }
 
@@ -247,6 +248,7 @@ impl DiscoveryDaemon {
                     resolved.protocol,
                     Some(local_ip),
                 )
+                .await
                 .wrap_err("natmap command failed")?;
         }
 

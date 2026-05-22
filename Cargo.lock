@@ -112,6 +112,7 @@ dependencies = [
  "hex",
  "hostname",
  "lab-lib",
+ "natmap",
  "regex",
  "reqwest",
  "serde",

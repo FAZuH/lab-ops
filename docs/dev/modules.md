@@ -93,7 +93,7 @@ pub enum DockerCommand {
 }
 ```
 
-Also defines the top-level `Cli` struct with global `--socket` and `--json` flags. The `run_cli_with_args()` function dispatches each variant to the appropriate handler in `command.rs`.
+Also defines the top-level `Cli` struct with global `--socket` and `--json` flags. The `run_cli()` function dispatches each variant to the appropriate handler in `command.rs`.
 
 ### `command.rs` — Handler Functions
 
@@ -235,7 +235,7 @@ Wraps bollard:
 ### `forwarding.rs` — Forwarding Rule Sync
 
 Proxy-side DNAT management:
-- `sync_forwarding_rules()` — Query Consul for forwarding services, apply DNAT rules via `lab-ops natmap dnat`
+- `sync_forwarding_rules()` — Query Consul for forwarding services, apply DNAT rules via [`IptablesManager`]
 
 ### `natmap.rs` — Natmap Client
 

@@ -143,7 +143,7 @@ Replace custom error enums (`ConfigError`, `DaemonError`, `ConsulError`, etc.) i
 
 ### 4.4. `run_cli` Function Signature
 
-All `run_cli` / `run_cli_with_args` functions must:
+All `run_cli` functions must:
 
 - Return `color_eyre::Result<()>`
 - NOT call `process::exit()` internally
@@ -283,7 +283,7 @@ Every non-trivial public function must have at least one test. "Happy path" cove
 ### 8.1. Tokio Runtime
 
 - The root `main.rs` creates the tokio runtime. Subcommands are called via `rt.block_on()`.
-- Workspace crate CLI entry functions (`run_cli`, `run_cli_with_args`) are `async fn` and must NOT create their own runtime.
+- Workspace crate CLI entry functions (`run_cli`) are `async fn` and must NOT create their own runtime.
 - Long-lived daemon loops (Docker events, Consul blocking queries) run on a multi-thread runtime: `Builder::new_multi_thread()`.
 
 ### 8.2. Runtime Builder Pattern

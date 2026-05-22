@@ -1,7 +1,7 @@
-//! CLI client for the natmap daemon.
+//! Client for the natmap daemon over its Unix socket API.
 //!
-//! Communicates with the natmap daemon via `lab-ops natmap` CLI invocations
-//! to manage Docker port mappings and query container IPs.
+//! Communicates with the natmap daemon via [`natmap::cli::run_cli`] to manage
+//! port mappings, DNAT rules, and hairpin NAT rules.
 
 use std::net::IpAddr;
 use std::process::Command;
@@ -10,8 +10,11 @@ use color_eyre::Result;
 use color_eyre::eyre::WrapErr;
 use color_eyre::eyre::bail;
 use lab_lib::TransportProtocol;
+use natmap::cli::Cli;
+use natmap::cli::DockerCommand;
+use natmap::cli::NatMapCommand;
 
-/// Client that invokes `lab-ops natmap` to add/remove Docker port mappings.
+/// Client for the natmap daemon over its Unix socket.
 #[derive(Debug)]
 pub struct NatmapClient {
     socket: String,
@@ -32,6 +35,53 @@ impl NatmapClient {
         NatmapClient { socket }
     }
 
+    /// Install or delete a DNAT rule.
+    pub async fn dnat(
+        &self,
+        ext_ip: &str,
+        int_ip: &str,
+        ports: &str,
+        proto: &str,
+        delete: bool,
+    ) -> Result<()> {
+        natmap::cli::run_cli(Cli {
+            socket: self.socket.clone().into(),
+            json: false,
+            command: NatMapCommand::Dnat {
+                ext_ip: ext_ip.to_string(),
+                int_ip: int_ip.to_string(),
+                proto: proto.to_string(),
+                ports: ports.to_string(),
+                ext_if: None,
+                delete,
+            },
+        })
+        .await
+    }
+
+    /// Install or delete a hairpin NAT rule.
+    pub async fn hairpin(
+        &self,
+        ext_ip: &str,
+        int_ip: &str,
+        ports: &str,
+        proto: &str,
+        delete: bool,
+    ) -> Result<()> {
+        natmap::cli::run_cli(Cli {
+            socket: self.socket.clone().into(),
+            json: false,
+            command: NatMapCommand::Hairpin {
+                ext_ip: ext_ip.to_string(),
+                int_ip: int_ip.to_string(),
+                proto: proto.to_string(),
+                ports: ports.to_string(),
+                delete,
+            },
+        })
+        .await
+    }
+
     /// Add a Docker port mapping via `lab-ops natmap docker add`.
     ///
     /// If `target_ip` is set, the daemon skips Docker inspect and uses the
@@ -39,7 +89,7 @@ impl NatmapClient {
     ///
     /// Handles the 409 Conflict response (mapping already exists) as a
     /// non-fatal warning rather than an error.
-    pub fn add_docker_mapping(
+    pub async fn add_docker_mapping(
         &self,
         container_id: &str,
         bind_ip: Option<&str>,
@@ -52,49 +102,51 @@ impl NatmapClient {
             (Some(ip), Some(tip)) => {
                 format!("{ip}:{host_port}:{tip}:{container_port}/{protocol}")
             }
-            (Some(ip), None) => {
-                format!("{ip}:{host_port}:{container_port}/{protocol}")
-            }
-            (None, Some(tip)) => {
-                format!("{host_port}:{tip}:{container_port}/{protocol}")
-            }
+            (Some(ip), None) => format!("{ip}:{host_port}:{container_port}/{protocol}"),
+            (None, Some(tip)) => format!("{host_port}:{tip}:{container_port}/{protocol}"),
             (None, None) => format!("{host_port}:{container_port}/{protocol}"),
         };
-        self.run_docker_cmd("add", container_id, &spec)
+        let cli = Cli {
+            socket: self.socket.clone().into(),
+            json: false,
+            command: NatMapCommand::Docker {
+                cmd: DockerCommand::Add {
+                    container_id: container_id.to_string(),
+                    mapping: Some(spec),
+                    name: None,
+                },
+            },
+        };
+
+        natmap::cli::run_cli(cli).await.or_else(|e| {
+            let msg = e.to_string();
+            if msg.contains("409") {
+                tracing::warn!("natmap mapping already exists (409), continuing: {msg}");
+                Ok(())
+            } else {
+                Err(e).wrap_err("natmap command failed")
+            }
+        })
     }
 
     /// Remove a Docker port mapping by host port.
     #[allow(dead_code)]
-    pub fn remove_docker_mapping(&self, container_id: &str, host_port: u16) -> Result<()> {
-        self.run_docker_cmd("rm", container_id, &host_port.to_string())
-    }
-
-    fn run_docker_cmd(&self, cmd: &str, container_id: &str, arg: &str) -> Result<()> {
-        let output = Command::new("lab-ops")
-            .args([
-                "natmap",
-                "--socket",
-                &self.socket,
-                "docker",
-                cmd,
-                container_id,
-                arg,
-            ])
-            .output()
-            .wrap_err("failed to run lab-ops natmap docker")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if cmd == "add" && stderr.contains("409") {
-                tracing::warn!(
-                    "natmap mapping already exists (409), continuing: {}",
-                    stderr.trim()
-                );
-                return Ok(());
-            }
-            bail!("lab-ops natmap docker failed: {}", stderr.trim());
-        }
-        Ok(())
+    pub async fn remove_docker_mapping(&self, container_id: &str, host_port: u16) -> Result<()> {
+        natmap::cli::run_cli(Cli {
+            socket: self.socket.clone().into(),
+            json: false,
+            command: NatMapCommand::Docker {
+                cmd: DockerCommand::Remove {
+                    container_id: Some(container_id.to_string()),
+                    port: Some(host_port.to_string()),
+                    all: false,
+                    id: None,
+                    name: None,
+                },
+            },
+        })
+        .await
+        .wrap_err("natmap command failed")
     }
 
     /// Query the Docker daemon (`docker inspect`) for a container's first

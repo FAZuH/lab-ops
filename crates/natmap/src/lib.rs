@@ -11,7 +11,7 @@
 //! - **Port conflict prevention** via a TCP pre-bind allocator
 //!
 //! The daemon exposes an HTTP API over a Unix socket. CLI commands in the
-//! parent crate communicate with it through [`cli::run_cli_with_args`].
+//! parent crate communicate with it through [`cli::run_cli`].
 
 pub mod api;
 pub mod cli;

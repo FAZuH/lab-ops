@@ -297,8 +297,8 @@ services:
    - Queries Consul **catalog** API (`GET /v1/catalog/services` → `GET /v1/health/service/:name?passing=true`) across all agents — NOT the local agent API. Forwarding services are registered on service VMs' agents, not the proxy's agent
    - Filters services with `Meta.forwarding=="true"`
    - Groups by `(ext_ip, address, protocol)`
-   - Calls `lab-ops natmap dnat --ext-ip X --int-ip Y --ports Z --proto P`
-   - Optionally calls `lab-ops natmap hairpin` for hairpin-enabled groups
+   - Applies DNAT rules via `IptablesManager`
+   - Optionally applies hairpin rules for hairpin-enabled groups
    - Handles deregistration of stale DNAT rules
 
 **How it works (ForwardingLocal):**
