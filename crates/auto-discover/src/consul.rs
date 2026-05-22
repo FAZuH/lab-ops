@@ -3,9 +3,10 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-use color_eyre::eyre::bail;
-use color_eyre::eyre::WrapErr;
 use color_eyre::Result;
+use color_eyre::eyre::WrapErr;
+use color_eyre::eyre::bail;
+use lab_lib::TransportProtocol;
 use serde_json::json;
 
 use crate::config::ResolvedService;
@@ -14,14 +15,11 @@ use crate::config::ResolvedService;
 ///
 /// Values are automatically base64-decoded by the client.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct KvEntry {
     /// Full key path (e.g. `nginx-configs/sites/svc-123.conf`).
     pub key: String,
     /// Decoded plain-text value.
     pub value: String,
-    /// Consul `ModifyIndex` for blocking-queries and consistency tracking.
-    pub modify_index: u64,
 }
 
 #[derive(serde::Deserialize)]
@@ -29,8 +27,6 @@ pub struct KvEntry {
 struct KvRawEntry {
     Key: String,
     Value: String,
-    #[serde(rename = "ModifyIndex")]
-    ModifyIndex: u64,
 }
 
 fn base64_decode(s: &str) -> Option<String> {
@@ -231,17 +227,14 @@ impl ConsulClient {
                 resp.json().await.wrap_err("Consul HTTP request failed")?;
 
             for instance in instances {
-                let svc = match instance.get("Service") {
-                    Some(s) => s,
-                    None => continue,
+                let Some(svc) = instance.get("Service") else {
+                    continue;
                 };
-                let meta = match svc.get("Meta") {
-                    Some(m) => m,
-                    None => continue,
+                let Some(meta) = svc.get("Meta") else {
+                    continue;
                 };
-                let val = match meta.get(meta_key).and_then(|v| v.as_str()) {
-                    Some(v) => v,
-                    None => continue,
+                let Some(val) = meta.get(meta_key).and_then(|v| v.as_str()) else {
+                    continue;
                 };
                 if val == meta_value {
                     results.push(svc.clone());
@@ -269,23 +262,6 @@ impl ConsulClient {
         Ok(())
     }
 
-    /// Read the raw value of a single KV key.
-    #[allow(dead_code)]
-    pub async fn get_kv_raw(&self, key: &str) -> Result<String> {
-        let url = format!("{}/v1/kv/{}?raw=true", self.http_addr, key);
-        let resp = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .wrap_err("Consul HTTP request failed")?;
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            bail!("Consul API error: key not found");
-        }
-        let body = resp.text().await.wrap_err("Consul HTTP request failed")?;
-        Ok(body)
-    }
-
     /// List all KV entries under a prefix. Returns an empty vec if the
     /// prefix does not exist.
     pub async fn list_kv_prefix(&self, prefix: &str) -> Result<Vec<KvEntry>> {
@@ -305,7 +281,6 @@ impl ConsulClient {
             .map(|e| KvEntry {
                 key: e.Key,
                 value: base64_decode(&e.Value).unwrap_or_default(),
-                modify_index: e.ModifyIndex,
             })
             .collect())
     }
@@ -345,7 +320,6 @@ impl ConsulClient {
                 .map(|e| KvEntry {
                     key: e.Key,
                     value: base64_decode(&e.Value).unwrap_or_default(),
-                    modify_index: e.ModifyIndex,
                 })
                 .collect(),
             new_index,
@@ -431,113 +405,119 @@ impl ConsulClient {
     }
 }
 
-/// Build a [`ConsulServiceRegistration`] from a resolved service definition.
-///
-/// Constructs the service ID from `server_name`, the primary domain slug,
-/// and the host port. Creates TCP or UDP health checks based on the
-/// protocol. Populates metadata including domain, template, proxy_ip,
-/// and optional forwarding info.
-pub fn build_consul_service(
-    service: &ResolvedService,
-    host_port: u16,
-    server_name: &str,
-    generation_id: &str,
-    container_id: &str,
-    bind_ip: &str,
-) -> ConsulServiceRegistration {
-    let domain = service.primary_domain().to_string();
-    let domain_slug = service.domain_slug();
-    let service_id = if domain_slug == "_" || domain_slug.is_empty() {
-        format!("{}-{}-{}", server_name, service.service_name, host_port)
-    } else {
-        format!("{server_name}-{domain_slug}-{host_port}")
-    };
-    let protocol = service.protocol.clone();
+impl ConsulServiceRegistration {
+    /// Create a new [`ConsulServiceRegistration`] from a resolved service definition.
+    ///
+    /// Constructs the service ID from `server_name`, the primary domain slug,
+    /// and the host port. Creates TCP or UDP health checks based on the
+    /// protocol. Populates metadata including domain, template, proxy_ip,
+    /// and optional forwarding info.
+    pub fn new(
+        service: &ResolvedService,
+        host_port: u16,
+        server_name: &str,
+        generation_id: &str,
+        container_id: &str,
+        bind_ip: &str,
+    ) -> Self {
+        let domain = service.primary_domain().to_string();
+        let domain_slug = service.domain_slug();
+        let service_id = if domain_slug == "_" || domain_slug.is_empty() {
+            format!("{}-{}-{}", server_name, service.service_name, host_port)
+        } else {
+            format!("{server_name}-{domain_slug}-{host_port}")
+        };
+        let protocol = service.protocol;
 
-    let mut meta = HashMap::new();
-    meta.insert("domain".into(), domain);
-    meta.insert("protocol".into(), protocol.clone());
-    meta.insert("server_name".into(), server_name.to_string());
-    meta.insert("generation_id".into(), generation_id.to_string());
-    meta.insert("container_id".into(), container_id.to_string());
+        let mut meta = HashMap::new();
+        meta.insert("domain".into(), domain);
+        meta.insert("protocol".into(), protocol.to_string());
+        meta.insert("server_name".into(), server_name.to_string());
+        meta.insert("generation_id".into(), generation_id.to_string());
+        meta.insert("container_id".into(), container_id.to_string());
 
-    if let Some(ref proxy_on) = service.proxy_on {
-        meta.insert("proxy_on".into(), proxy_on.clone());
-    }
+        if let Some(ref proxy_on) = service.proxy_on {
+            meta.insert("proxy_on".into(), proxy_on.clone());
+        }
 
-    for (k, v) in &service.extra {
-        meta.insert(k.clone(), v.clone());
-    }
+        for (k, v) in &service.extra {
+            meta.insert(k.clone(), v.clone());
+        }
 
-    match &service.port_type {
-        crate::config::ResolvedPortType::RProxy {
-            template, proxy_ip, ..
-        } => {
-            if !template.is_empty() {
-                meta.insert("template".into(), template.clone());
+        use crate::config::ResolvedPortType::*;
+        match &service.port_type {
+            RProxy {
+                template, proxy_ip, ..
+            } => {
+                if !template.is_empty() {
+                    meta.insert("template".into(), template.clone());
+                }
+                if let Some(proxy_ip) = proxy_ip {
+                    meta.insert("proxy_ip".into(), proxy_ip.clone());
+                }
             }
-            if let Some(ref proxy_ip) = proxy_ip {
-                meta.insert("proxy_ip".into(), proxy_ip.clone());
+            ForwardingLocal { template, .. } => {
+                meta.insert("forwarding".into(), "true".into());
+                meta.insert("forwarding_type".into(), "local".into());
+                if !template.is_empty() {
+                    meta.insert("template".into(), template.clone());
+                }
+            }
+            ForwardingRemote {
+                ext_ip,
+                ext_ports,
+                hairpin,
+                template,
+                ..
+            } => {
+                meta.insert("forwarding".into(), "true".into());
+                meta.insert("forwarding_type".into(), "remote".into());
+                meta.insert("ext_ip".into(), ext_ip.clone());
+                meta.insert(
+                    "ext_ports".into(),
+                    ext_ports
+                        .iter()
+                        .map(|p| p.to_string())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                );
+                if *hairpin {
+                    meta.insert("hairpin".into(), "true".into());
+                }
+                if !template.is_empty() {
+                    meta.insert("template".into(), template.clone());
+                }
             }
         }
-        crate::config::ResolvedPortType::ForwardingLocal { template, .. } => {
-            meta.insert("forwarding".into(), "true".into());
-            meta.insert("forwarding_type".into(), "local".into());
-            if !template.is_empty() {
-                meta.insert("template".into(), template.clone());
-            }
-        }
-        crate::config::ResolvedPortType::ForwardingRemote {
-            ext_ip,
-            ext_ports,
-            hairpin,
-            template,
-            ..
-        } => {
-            meta.insert("forwarding".into(), "true".into());
-            meta.insert("forwarding_type".into(), "remote".into());
-            meta.insert("ext_ip".into(), ext_ip.clone());
-            meta.insert(
-                "ext_ports".into(),
-                ext_ports
-                    .iter()
-                    .map(|p| p.to_string())
-                    .collect::<Vec<_>>()
-                    .join(","),
-            );
-            if *hairpin {
-                meta.insert("hairpin".into(), "true".into());
-            }
-            if !template.is_empty() {
-                meta.insert("template".into(), template.clone());
-            }
-        }
-    }
 
-    let check = if protocol == "udp" {
-        json!({
-            "Name": format!("UDP check for {}", service.service_name),
-            "Args": ["/usr/bin/nc", "-uz", bind_ip, &host_port.to_string()],
-            "Interval": "30s",
-            "Timeout": "10s",
-            "DeregisterCriticalServiceAfter": "5m"
-        })
-    } else {
-        json!({
-            "TCP": format!("{}:{}", bind_ip, host_port),
-            "Interval": "30s",
-            "Timeout": "10s",
-            "DeregisterCriticalServiceAfter": "5m"
-        })
-    };
+        let check = match protocol {
+            TransportProtocol::Tcp => {
+                json!({
+                    "TCP": format!("{}:{}", bind_ip, host_port),
+                    "Interval": "30s",
+                    "Timeout": "10s",
+                    "DeregisterCriticalServiceAfter": "5m"
+                })
+            }
+            TransportProtocol::Udp => {
+                json!({
+                    "Name": format!("UDP check for {}", service.service_name),
+                    "Args": ["/usr/bin/nc", "-uz", bind_ip, &host_port.to_string()],
+                    "Interval": "30s",
+                    "Timeout": "10s",
+                    "DeregisterCriticalServiceAfter": "5m"
+                })
+            }
+        };
 
-    ConsulServiceRegistration {
-        id: service_id,
-        name: service.service_name.clone(),
-        address: bind_ip.to_string(),
-        port: host_port,
-        meta,
-        check,
+        Self {
+            id: service_id,
+            name: service.service_name.clone(),
+            address: bind_ip.to_string(),
+            port: host_port,
+            meta,
+            check,
+        }
     }
 }
 
@@ -576,7 +556,7 @@ mod tests {
             proxy_on: None,
             bind_ip: None,
             bind_interface: None,
-            protocol: "tcp".into(),
+            protocol: TransportProtocol::Tcp,
             extra,
             port_type: ResolvedPortType::RProxy {
                 template: "example-drive.ctmpl".into(),
@@ -588,7 +568,7 @@ mod tests {
             },
         };
 
-        let reg = build_consul_service(
+        let reg = ConsulServiceRegistration::new(
             &service,
             32000,
             "service-node-1",
@@ -623,7 +603,7 @@ mod tests {
             proxy_on: None,
             bind_ip: None,
             bind_interface: None,
-            protocol: "udp".into(),
+            protocol: TransportProtocol::Udp,
             extra: HashMap::new(),
             port_type: ResolvedPortType::RProxy {
                 template: "dns.ctmpl".into(),
@@ -635,7 +615,7 @@ mod tests {
             },
         };
 
-        let reg = build_consul_service(
+        let reg = ConsulServiceRegistration::new(
             &service,
             53530,
             "service-node-1",
@@ -673,7 +653,7 @@ mod tests {
             proxy_on: None,
             bind_ip: None,
             bind_interface: None,
-            protocol: "tcp".into(),
+            protocol: TransportProtocol::Tcp,
             extra: HashMap::new(),
             port_type: ResolvedPortType::ForwardingRemote {
                 ext_ip: "203.0.113.43".into(),
@@ -688,7 +668,7 @@ mod tests {
             },
         };
 
-        let reg = build_consul_service(
+        let reg = ConsulServiceRegistration::new(
             &service,
             25565,
             "service-node-2",

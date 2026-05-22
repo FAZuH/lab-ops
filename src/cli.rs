@@ -14,6 +14,7 @@ pub const CMD_AUTO_DISCOVER: &str = "auto-discover";
 
 /// Top-level CLI argument parser for `lab-ops`.
 #[derive(Parser)]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(name = "lab-ops", about = "Lab operations toolkit")]
 pub struct Cli {
     #[command(subcommand)]

@@ -1,5 +1,55 @@
 # Module Reference
 
+## `crates/lab-lib/src/`
+
+Shared utilities and types consumed by both `natmap` and `auto-discover`.
+
+### `lib.rs` — Library Root
+
+```rust
+pub mod consts;
+pub mod docker;
+pub mod port;
+pub mod protocol;
+```
+
+### `protocol.rs` — TransportProtocol
+
+The canonical `TransportProtocol` enum (`Tcp` / `Udp`) with serde, `Display`, and `TryFrom<String>`. Originally defined in natmap; extracted here so auto-discover can use it without depending on natmap.
+
+### `consts.rs` — Shared Constants
+
+| Constant | Value | Used By |
+|---|---|---|
+| `NATMAP_SOCKET` | `/run/natmap.sock` | natmap, auto-discover |
+| `LAB_OPS_BIN` | `/usr/local/bin/lab-ops` | auto-discover |
+| `LAB_OPS_CMD` | `lab-ops` | auto-discover |
+
+### `docker.rs` — Docker Helpers
+
+- `connect()` — Connects to the local Docker daemon via `Docker::connect_with_local_defaults()`
+- `trim_container_name(name) -> &str` — Strips the leading `/` from Docker container names
+
+### `port.rs` — Port Utilities & Management
+
+Consolidated from the old `natmap/src/port.rs` and `auto-discover/src/port.rs`. Three layers:
+
+**Low-level socket utilities:**
+- `create_freebind_socket(addr) -> io::Result<Socket>` — Creates a `socket2::Socket` with `SO_REUSEADDR` and `IP_FREEBIND`.
+- `is_port_free(addr: A) -> bool` where `A: ToSocketAddrs` — Checks if a TCP port is free using the robust freebind socket. Generic over any type that can resolve to a socket address.
+
+**`PortAllocator`** — Runtime TCP pre-bind reservation (used by `natmap` daemon):
+- `allocate(addr)` — Bind `addr` via TcpListener with `SO_REUSEADDR` + `IP_FREEBIND`, store listener
+- `deallocate(addr)` — Remove from map, drop Listener (releases port)
+- `is_allocated(addr)` — Check if `addr` has an active reservation; falls back to probing the port
+- `deallocate_all()` — Clear all reservations
+
+**`PortAssignments`** — Persistent ephemeral port allocation (used by `auto-discover`):
+- `get(key) / set(key, port) / remove(key)` — CRUD for port assignments
+- `load(path) / save(path)` — Persist assignments to JSON (for crash recovery)
+- `get_or_allocate(key)` — Look up existing assignment or allocate from ephemeral range
+- `allocate_port(assignments)` — Find first free port in range 32768-61000 using `is_port_free`
+
 ## `crates/natmap/src/`
 
 ### `lib.rs` — Library Root
@@ -7,8 +57,8 @@
 Declares all modules with `pub` visibility:
 
 ```rust
-pub mod cli;
 pub mod api;
+pub mod cli;
 pub mod command;
 pub mod consts;
 pub mod daemon;
@@ -16,7 +66,6 @@ pub mod docker;
 pub mod install;
 pub mod iptables;
 pub mod models;
-pub mod port_allocator;
 pub mod utils;
 ```
 
@@ -44,7 +93,7 @@ pub enum DockerCommand {
 }
 ```
 
-Also defines the top-level `Cli` struct with global `--socket` and `--json` flags. The `run_cli_with_args()` function dispatches each variant to the appropriate handler in `command.rs`.
+Also defines the top-level `Cli` struct with global `--socket` and `--json` flags. The `run_cli()` function dispatches each variant to the appropriate handler in `command.rs`.
 
 ### `command.rs` — Handler Functions
 
@@ -75,9 +124,11 @@ Key types:
 | `DnatRequest` / `SnatRequest` / `HairpinRequest` | API request bodies |
 | `DaemonState` | Top-level persisted state (docker, dnats, snats, hairpins) |
 | `ListResponse` | API response for `GET /mappings` |
-| `ActivePortMapping` | Running Docker mapping (id, request, container info, comment) |
-| `PortMappingRequest` | Docker mapping config (host_addr, container_addr, proto) |
-| `AddMappingRequest` / `RemapRequest` | Docker API request bodies |
+| `DockerPortMap` | Running Docker mapping (id, request, container info, comment) |
+| `DockerPortMapRequest` | Docker mapping config (host_addr, container_addr, proto) |
+| `DockerAddMapRequest` / `DockerRemapRequest` | Docker API request bodies |
+
+The `TransportProtocol` enum is re-exported from `lab_lib::TransportProtocol`.
 
 ### `iptables.rs` — IptablesManager
 
@@ -94,29 +145,12 @@ Stateless manager for iptables operations. Key methods:
 | `install_hairpin()` / `remove_hairpin()` | Static hairpin rules |
 | `flush_container_rules()` | Remove all rules for a container |
 
-### `port_allocator.rs` — PortAllocator
-
-Manages socket-based port reservation:
-
-```rust
-pub struct PortAllocator {
-    sockets: RwLock<HashMap<String, TcpListener>>,
-}
-```
-
-| Method | Purpose |
-|--------|---------|
-| `allocate(key, addr)` | Bind `0.0.0.0:port` via TcpListener, store by key |
-| `deallocate(key)` | Remove from map, drop Listener (releases port) |
-| `is_allocated(key)` | Check if a key has an active reservation |
-| `deallocate_all()` | Clear all reservations |
-
-Port keys follow the format `"{ip}:{port}"` (e.g., `"203.0.113.43:8080"`).
+<!-- PortAllocator moved to lab_lib::port; see port.rs section in lab-lib crate above -->
 
 ### `docker.rs` — Docker Client
 
 Wraps the `bollard` Docker API crate:
-- `connect()` — Creates a bollard Docker client (reads `DOCKER_HOST` env var)
+- `connect()` — Creates a bollard Docker client (delegates to [`lab_lib::docker::connect()`])
 - `get_port_mappings()` — Inspects a container and extracts its port bindings
 
 ### `install.rs` — Systemd Installer
@@ -146,9 +180,9 @@ mod consul;
 mod daemon;
 mod docker;
 mod forwarding;
+mod model;
 mod natmap;
 mod nginx_daemon;
-mod ports;
 ```
 
 ### `cli.rs` — CLI Definitions
@@ -201,12 +235,13 @@ Wraps bollard:
 ### `forwarding.rs` — Forwarding Rule Sync
 
 Proxy-side DNAT management:
-- `sync_forwarding_rules()` — Query Consul for forwarding services, apply DNAT rules via `lab-ops natmap dnat`
+- `sync_forwarding_rules()` — Query Consul for forwarding services, apply DNAT rules via [`IptablesManager`]
 
-### `natmap.rs` — Natmap CLI Client
+### `natmap.rs` — Natmap Client
 
-Calls `lab-ops natmap docker add/rm` as an external command via `std::process::Command`:
-- `add_mapping()`, `remove_mapping()` — Manage Docker port mappings through natmap daemon
+Communicates with the natmap daemon via `lab-ops natmap` CLI subprocess or via the daemon's Unix socket HTTP API:
+- `add_docker_mapping()` / `remove_docker_mapping()` — Manage Docker port mappings through natmap
+- `get_container_ip()` — Get container IP via `docker inspect`
 
 ### `nginx_daemon.rs` — NginxDaemon
 
@@ -215,12 +250,7 @@ Proxy-side nginx config management:
 - `run_loop()` — Blocking-query watch loop
 - `gc_orphaned_kv_entries()` — GC sweep that finds and deletes KV entries whose service IDs no longer exist in the Consul catalog
 
-### `ports.rs` — PortState
-
-Manages ephemeral port allocation (32768-60999) with JSON persistence:
-- `allocate()` — Assign unique port from pool
-- `remove()` — Free a port
-- `port_is_free()` — Check if a port is bound by any process
+<!-- PortAssignments moved to lab_lib::port; see port.rs section in lab-lib crate above -->
 
 ## `src/` (Root Crate)
 

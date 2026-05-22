@@ -110,7 +110,7 @@ build_consul_service_with_forwarding
 build_consul_service_udp_check
 ```
 
-This replaces the legacy `test_<function>_<scenario>` pattern. When refactoring existing tests to this format, update only as part of meaningful work.
+
 
 
 ## 4. Error Handling
@@ -143,7 +143,7 @@ Replace custom error enums (`ConfigError`, `DaemonError`, `ConsulError`, etc.) i
 
 ### 4.4. `run_cli` Function Signature
 
-All `run_cli` / `run_cli_with_args` functions must:
+All `run_cli` functions must:
 
 - Return `color_eyre::Result<()>`
 - NOT call `process::exit()` internally
@@ -283,7 +283,7 @@ Every non-trivial public function must have at least one test. "Happy path" cove
 ### 8.1. Tokio Runtime
 
 - The root `main.rs` creates the tokio runtime. Subcommands are called via `rt.block_on()`.
-- Workspace crate CLI entry functions (`run_cli`, `run_cli_with_args`) are `async fn` and must NOT create their own runtime.
+- Workspace crate CLI entry functions (`run_cli`) are `async fn` and must NOT create their own runtime.
 - Long-lived daemon loops (Docker events, Consul blocking queries) run on a multi-thread runtime: `Builder::new_multi_thread()`.
 
 ### 8.2. Runtime Builder Pattern
@@ -400,7 +400,6 @@ These inconsistencies exist in the codebase and should be addressed in future re
 
 | Item | Priority | Effort |
 |---|---|---|
-| Upgrade `auto-discover` to edition 2024 | Medium | Small |
 | Rename `NatMapCommand` → `Command`, `Commands` → `Command` | Low | Medium |
 | Add `// --- Section ---` delimiters to `natmap/src/api.rs` | Low | Small |
 | Add `#[cfg(test)] mod tests` to every untested module | Medium | Large |

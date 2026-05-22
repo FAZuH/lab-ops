@@ -13,6 +13,13 @@ lab-ops/
 │       ├── cf2ansible.rs         # DNS zone → Ansible converter
 │       └── dockernet.rs          # Docker network inspector
 ├── crates/
+│   ├── lab-lib/                   # Shared utilities and types
+│   │   └── src/
+│   │       ├── lib.rs             # Module declarations
+│   │       ├── consts.rs          # Shared constants (NATMAP_SOCKET, etc.)
+│   │       ├── docker.rs          # Docker connect + name trimming helpers
+│   │       ├── port.rs            # Port availability checking (SO_REUSEADDR, IP_FREEBIND)
+│   │       └── protocol.rs        # TransportProtocol enum (TCP/UDP)
 │   ├── natmap/                   # NAT management crate
 │   │   └── src/
 │   │       ├── lib.rs            # Module declarations
@@ -21,7 +28,7 @@ lab-ops/
 │   │       ├── daemon.rs         # Axum API server, state management
 │   │       ├── models.rs         # Data types (configs, requests, state)
 │   │       ├── iptables.rs       # IptablesManager (rule CRUD)
-│   │       ├── port_allocator.rs # PortAllocator (socket reservation)
+│   │       ├── port.rs           # PortAllocator (socket reservation)
 │   │       ├── docker.rs         # Docker API client (bollard)
 │   │       ├── install.rs        # Systemd service installation
 │   │       └── utils.rs          # HTTP client for daemon communication
@@ -34,9 +41,10 @@ lab-ops/
 │           ├── daemon.rs         # Core discovery daemon
 │           ├── docker.rs         # Docker API client
 │           ├── forwarding.rs     # Proxy-side DNAT rule sync
-│           ├── natmap.rs         # Natmap CLI client
+│           ├── model.rs          # ContainerInfo data type
+│           ├── natmap.rs         # Natmap client (CLI subprocess + HTTP)
 │           ├── nginx_daemon.rs   # Nginx config generation watcher
-│           └── ports.rs          # Port state management
+│           └── port.rs           # Port assignment persistence + allocation
 ├── tests/                        # Integration tests
 │   ├── integration.rs            # cf2ansible integration tests
 │   └── natmap_docker.rs          # Docker-based NAT integration tests

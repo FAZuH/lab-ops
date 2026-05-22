@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/natmap", "crates/auto-discover"]
+members = ["crates/natmap", "crates/auto-discover", "crates/lab-lib"]
 
 [package]
 name = "lab-ops"
@@ -17,6 +17,7 @@ color-eyre = "0.6.5"
 comfy-table = "7.2.2"
 tokio = { version = "1.52.2", features = ["rt"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+lab-lib = { path = "./crates/lab-lib" }
 natmap = { path = "./crates/natmap" }
 auto-discover = { path = "./crates/auto-discover" }
 

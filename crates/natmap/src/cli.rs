@@ -199,7 +199,7 @@ pub enum DockerCommand {
 }
 
 /// Dispatches a parsed [`Cli`] to the appropriate daemon API call.
-pub async fn run_cli_with_args(cli: Cli) -> Result<()> {
+pub async fn run_cli(cli: Cli) -> Result<()> {
     let socket = cli.socket;
     let json = cli.json;
 

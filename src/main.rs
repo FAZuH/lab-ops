@@ -35,7 +35,7 @@ fn main() -> Result<()> {
         Command::NatMap { args } => {
             use tokio::runtime::Builder;
             let rt = Builder::new_current_thread().enable_all().build()?;
-            rt.block_on(natmap::cli::run_cli_with_args(args))?;
+            rt.block_on(natmap::cli::run_cli(args))?;
         }
         Command::AutoDiscover { args } => {
             use tokio::runtime::Builder;
