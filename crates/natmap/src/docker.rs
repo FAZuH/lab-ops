@@ -66,7 +66,7 @@ pub async fn get_port_mappings(docker: &Docker, c_id: &str) -> Result<Vec<Docker
             continue;
         };
 
-        let Ok(proto) = parts[1].to_lowercase().try_into() else {
+        let Ok(proto) = parts[1].to_lowercase().parse() else {
             continue;
         };
 

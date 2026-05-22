@@ -2,8 +2,11 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use color_eyre::Result;
+use lab_lib::TransportProtocol;
 use serde::Deserialize;
 use serde::Serialize;
+
+use crate::consts::AD_NGINX_GEN;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DiscoveryConfig {
@@ -112,7 +115,7 @@ pub struct ForwardingConfig {
     pub fwd_type: ForwardingType,
     pub port: u16,
     #[serde(default)]
-    pub proto: Option<String>,
+    pub proto: Option<TransportProtocol>,
     #[serde(default)]
     pub bind_ip: Option<String>,
     #[serde(default)]
@@ -172,7 +175,7 @@ pub struct ResolvedService {
     pub proxy_on: Option<String>,
     pub bind_ip: Option<String>,
     pub bind_interface: Option<String>,
-    pub protocol: String,
+    pub protocol: TransportProtocol,
     pub port_type: ResolvedPortType,
     pub extra: HashMap<String, String>,
 }
@@ -197,7 +200,7 @@ impl ResolvedService {
 impl DiscoveryConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let contents = std::fs::read_to_string(path)?;
-        let config: DiscoveryConfig = serde_yaml::from_str(&contents)?;
+        let config = serde_yaml::from_str(&contents)?;
         Ok(config)
     }
 
@@ -215,7 +218,6 @@ impl DiscoveryConfig {
                 .or_else(|| self.defaults.bind_interface.clone());
 
             for proxy in &service.rproxy {
-                // Skip rproxy entries that have a matching forwarding entry (merged above)
                 if service.forwarding.iter().any(|f| f.port == proxy.port) {
                     continue;
                 }
@@ -232,7 +234,7 @@ impl DiscoveryConfig {
                         .or_else(|| self.defaults.proxy_on.clone()),
                     bind_ip: svc_bind_ip.clone(),
                     bind_interface: svc_bind_interface.clone(),
-                    protocol: "tcp".to_string(), // rproxy is always tcp implicitly
+                    protocol: TransportProtocol::default(),
                     extra: service.extra.clone(),
                     port_type: ResolvedPortType::RProxy {
                         template: proxy.template.clone(),
@@ -241,83 +243,45 @@ impl DiscoveryConfig {
                             .proxy_ip
                             .clone()
                             .or_else(|| self.defaults.proxy_ip.clone()),
-                        nginx_generator: proxy
-                            .nginx_generator
-                            .clone()
-                            .or_else(|| self.defaults.nginx_generator.clone())
-                            .unwrap_or_else(|| {
-                                "/usr/local/bin/auto-discover-gen-nginx".to_string()
-                            }),
-                        preprocess: proxy
-                            .preprocess
-                            .clone()
-                            .or_else(|| self.defaults.preprocess.clone())
-                            .unwrap_or_default(),
-                        postprocess: proxy
-                            .postprocess
-                            .clone()
-                            .or_else(|| self.defaults.postprocess.clone())
-                            .unwrap_or_default(),
+                        nginx_generator: self
+                            .resolve_nginx_generator(proxy.nginx_generator.as_deref()),
+                        preprocess: self.resolve_preprocess(proxy.preprocess.as_deref()),
+                        postprocess: self.resolve_postprocess(proxy.postprocess.as_deref()),
                     },
                 });
             }
 
             for fwd in &service.forwarding {
-                let matching_rproxy = service.rproxy.iter().find(|r| r.port == fwd.port);
+                let rproxy = service.rproxy.iter().find(|r| r.port == fwd.port);
+
                 let port_type = match fwd.fwd_type {
                     ForwardingType::Local => ResolvedPortType::ForwardingLocal {
                         bind_port: fwd.bind_port,
-                        template: matching_rproxy
-                            .map(|r| r.template.clone())
-                            .unwrap_or_default(),
-                        domains: matching_rproxy
-                            .map(|r| r.domains.clone())
-                            .unwrap_or_default(),
-                        proxy_ip: matching_rproxy
-                            .and_then(|r| r.proxy_ip.clone())
-                            .or_else(|| self.defaults.proxy_ip.clone()),
-                        nginx_generator: matching_rproxy
-                            .and_then(|r| r.nginx_generator.clone())
-                            .or_else(|| self.defaults.nginx_generator.clone())
-                            .unwrap_or_else(|| {
-                                "/usr/local/bin/auto-discover-gen-nginx".to_string()
-                            }),
-                        preprocess: matching_rproxy
-                            .and_then(|r| r.preprocess.clone())
-                            .or_else(|| self.defaults.preprocess.clone())
-                            .unwrap_or_default(),
-                        postprocess: matching_rproxy
-                            .and_then(|r| r.postprocess.clone())
-                            .or_else(|| self.defaults.postprocess.clone())
-                            .unwrap_or_default(),
+                        template: rproxy.map(|r| r.template.clone()).unwrap_or_default(),
+                        domains: rproxy.map(|r| r.domains.clone()).unwrap_or_default(),
+                        proxy_ip: self.resolve_proxy_ip(rproxy.and_then(|r| r.proxy_ip.as_deref())),
+                        nginx_generator: self.resolve_nginx_generator(
+                            rproxy.and_then(|r| r.nginx_generator.as_deref()),
+                        ),
+                        preprocess: self
+                            .resolve_preprocess(rproxy.and_then(|r| r.preprocess.as_deref())),
+                        postprocess: self
+                            .resolve_postprocess(rproxy.and_then(|r| r.postprocess.as_deref())),
                     },
                     ForwardingType::Remote => ResolvedPortType::ForwardingRemote {
                         ext_ip: fwd.ext_ip.clone().unwrap_or_default(),
                         ext_ports: fwd.ext_ports.clone().unwrap_or_default(),
                         hairpin: fwd.hairpin.unwrap_or(false),
-                        template: matching_rproxy
-                            .map(|r| r.template.clone())
-                            .unwrap_or_default(),
-                        domains: matching_rproxy
-                            .map(|r| r.domains.clone())
-                            .unwrap_or_default(),
-                        proxy_ip: matching_rproxy
-                            .and_then(|r| r.proxy_ip.clone())
-                            .or_else(|| self.defaults.proxy_ip.clone()),
-                        nginx_generator: matching_rproxy
-                            .and_then(|r| r.nginx_generator.clone())
-                            .or_else(|| self.defaults.nginx_generator.clone())
-                            .unwrap_or_else(|| {
-                                "/usr/local/bin/auto-discover-gen-nginx".to_string()
-                            }),
-                        preprocess: matching_rproxy
-                            .and_then(|r| r.preprocess.clone())
-                            .or_else(|| self.defaults.preprocess.clone())
-                            .unwrap_or_default(),
-                        postprocess: matching_rproxy
-                            .and_then(|r| r.postprocess.clone())
-                            .or_else(|| self.defaults.postprocess.clone())
-                            .unwrap_or_default(),
+                        template: rproxy.map(|r| r.template.clone()).unwrap_or_default(),
+                        domains: rproxy.map(|r| r.domains.clone()).unwrap_or_default(),
+                        proxy_ip: self.resolve_proxy_ip(rproxy.and_then(|r| r.proxy_ip.as_deref())),
+                        nginx_generator: self.resolve_nginx_generator(
+                            rproxy.and_then(|r| r.nginx_generator.as_deref()),
+                        ),
+                        preprocess: self
+                            .resolve_preprocess(rproxy.and_then(|r| r.preprocess.as_deref())),
+                        postprocess: self
+                            .resolve_postprocess(rproxy.and_then(|r| r.postprocess.as_deref())),
                     },
                 };
 
@@ -332,17 +296,47 @@ impl DiscoveryConfig {
                         .proxy_on
                         .clone()
                         .or_else(|| self.defaults.proxy_on.clone()),
-                    bind_ip: fwd.bind_ip.clone().or(svc_bind_ip.clone()),
-                    bind_interface: fwd.bind_interface.clone().or(svc_bind_interface.clone()),
-                    protocol: fwd.proto.clone().unwrap_or_else(|| "tcp".to_string()),
+                    bind_ip: fwd.bind_ip.clone().or_else(|| svc_bind_ip.clone()),
+                    bind_interface: fwd
+                        .bind_interface
+                        .clone()
+                        .or_else(|| svc_bind_interface.clone()),
+                    // protocol: fwd.proto.clone().unwrap_or_else(|| "tcp".to_string()),
+                    protocol: fwd.proto.unwrap_or_default(),
                     extra: service.extra.clone(),
                     port_type,
                 });
             }
         }
 
-        // Sort resolved services for deterministic output
         resolved.sort_by_key(|r| format!("{}-{}", r.service_id_prefix, r.container_port));
         resolved
+    }
+
+    fn resolve_proxy_ip(&self, override_val: Option<&str>) -> Option<String> {
+        override_val
+            .map(str::to_owned)
+            .or_else(|| self.defaults.proxy_ip.clone())
+    }
+
+    fn resolve_nginx_generator(&self, override_val: Option<&str>) -> String {
+        override_val
+            .map(str::to_owned)
+            .or_else(|| self.defaults.nginx_generator.clone())
+            .unwrap_or_else(|| AD_NGINX_GEN.to_string())
+    }
+
+    fn resolve_preprocess(&self, override_val: Option<&str>) -> String {
+        override_val
+            .map(str::to_owned)
+            .or_else(|| self.defaults.preprocess.clone())
+            .unwrap_or_default()
+    }
+
+    fn resolve_postprocess(&self, override_val: Option<&str>) -> String {
+        override_val
+            .map(str::to_owned)
+            .or_else(|| self.defaults.postprocess.clone())
+            .unwrap_or_default()
     }
 }

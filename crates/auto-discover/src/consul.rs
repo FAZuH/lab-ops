@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use color_eyre::Result;
 use color_eyre::eyre::WrapErr;
 use color_eyre::eyre::bail;
+use lab_lib::TransportProtocol;
 use serde_json::json;
 
 use crate::config::ResolvedService;
@@ -445,11 +446,11 @@ pub fn build_consul_service(
     } else {
         format!("{server_name}-{domain_slug}-{host_port}")
     };
-    let protocol = service.protocol.clone();
+    let protocol = service.protocol;
 
     let mut meta = HashMap::new();
     meta.insert("domain".into(), domain);
-    meta.insert("protocol".into(), protocol.clone());
+    meta.insert("protocol".into(), protocol.to_string());
     meta.insert("server_name".into(), server_name.to_string());
     meta.insert("generation_id".into(), generation_id.to_string());
     meta.insert("container_id".into(), container_id.to_string());
@@ -507,21 +508,24 @@ pub fn build_consul_service(
         }
     }
 
-    let check = if protocol == "udp" {
-        json!({
-            "Name": format!("UDP check for {}", service.service_name),
-            "Args": ["/usr/bin/nc", "-uz", bind_ip, &host_port.to_string()],
-            "Interval": "30s",
-            "Timeout": "10s",
-            "DeregisterCriticalServiceAfter": "5m"
-        })
-    } else {
-        json!({
-            "TCP": format!("{}:{}", bind_ip, host_port),
-            "Interval": "30s",
-            "Timeout": "10s",
-            "DeregisterCriticalServiceAfter": "5m"
-        })
+    let check = match protocol {
+        TransportProtocol::Tcp => {
+            json!({
+                "TCP": format!("{}:{}", bind_ip, host_port),
+                "Interval": "30s",
+                "Timeout": "10s",
+                "DeregisterCriticalServiceAfter": "5m"
+            })
+        }
+        TransportProtocol::Udp => {
+            json!({
+                "Name": format!("UDP check for {}", service.service_name),
+                "Args": ["/usr/bin/nc", "-uz", bind_ip, &host_port.to_string()],
+                "Interval": "30s",
+                "Timeout": "10s",
+                "DeregisterCriticalServiceAfter": "5m"
+            })
+        }
     };
 
     ConsulServiceRegistration {
@@ -569,7 +573,7 @@ mod tests {
             proxy_on: None,
             bind_ip: None,
             bind_interface: None,
-            protocol: "tcp".into(),
+            protocol: TransportProtocol::Tcp,
             extra,
             port_type: ResolvedPortType::RProxy {
                 template: "example-drive.ctmpl".into(),
@@ -616,7 +620,7 @@ mod tests {
             proxy_on: None,
             bind_ip: None,
             bind_interface: None,
-            protocol: "udp".into(),
+            protocol: TransportProtocol::Udp,
             extra: HashMap::new(),
             port_type: ResolvedPortType::RProxy {
                 template: "dns.ctmpl".into(),
@@ -666,7 +670,7 @@ mod tests {
             proxy_on: None,
             bind_ip: None,
             bind_interface: None,
-            protocol: "tcp".into(),
+            protocol: TransportProtocol::Tcp,
             extra: HashMap::new(),
             port_type: ResolvedPortType::ForwardingRemote {
                 ext_ip: "203.0.113.43".into(),

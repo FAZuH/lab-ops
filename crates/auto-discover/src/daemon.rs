@@ -185,7 +185,7 @@ impl DiscoveryDaemon {
                     natmap_bind_ip.as_deref(),
                     host_port,
                     resolved.container_port,
-                    &resolved.protocol,
+                    resolved.protocol,
                     None,
                 )
                 .wrap_err("natmap command failed")?;
@@ -264,7 +264,7 @@ impl DiscoveryDaemon {
                     natmap_bind_ip.as_deref(),
                     host_port,
                     resolved.container_port,
-                    &resolved.protocol,
+                    resolved.protocol,
                     Some(local_ip),
                 )
                 .wrap_err("natmap command failed")?;
@@ -496,7 +496,10 @@ impl DiscoveryDaemon {
             service.container_port.to_string(),
         );
         envs.insert("AUTO_DISCOVER_TEMPLATE".into(), template.clone());
-        envs.insert("AUTO_DISCOVER_PROTOCOL".into(), service.protocol.clone());
+        envs.insert(
+            "AUTO_DISCOVER_PROTOCOL".into(),
+            service.protocol.to_string(),
+        );
 
         for (k, v) in &service.extra {
             envs.insert(format!("AUTO_DISCOVER_EXTRA_{k}"), v.clone());

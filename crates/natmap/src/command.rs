@@ -9,6 +9,7 @@ use std::process::Command;
 use color_eyre::eyre::Result;
 use color_eyre::eyre::bail;
 use hyper::Method;
+use lab_lib::TransportProtocol;
 
 use crate::models::DnatConfig;
 use crate::models::DnatRequest;
@@ -139,7 +140,7 @@ pub async fn handle_dnat(
         ext_ip,
         int_ip,
         ports,
-        proto: proto.try_into()?,
+        proto: proto.parse()?,
         ext_if,
     };
     if delete {
@@ -188,7 +189,7 @@ pub async fn handle_hairpin(
         ext_ip,
         int_ip,
         ports,
-        proto: proto.try_into()?,
+        proto: proto.parse()?,
     };
     if delete {
         let _: () = request_json(socket, Method::DELETE, "/hairpin", Some(req)).await?;
@@ -300,8 +301,8 @@ pub async fn add(
     };
 
     let (mapping_part, proto) = match mapping.split_once('/') {
-        Some((m, p)) => (m, p.to_string()),
-        None => (mapping.as_str(), "tcp".to_string()),
+        Some((m, p)) => (m, p.parse()?),
+        None => (mapping.as_str(), TransportProtocol::default()),
     };
 
     let parts: Vec<&str> = mapping_part.split(':').collect();
@@ -353,7 +354,7 @@ pub async fn add(
         host_port,
         container_port,
         target_ip,
-        proto: proto.try_into()?,
+        proto,
     };
     let uri = format!("/mapping/{container_id}");
     let res: DockerPortMap = request_json(socket, Method::POST, &uri, Some(req)).await?;

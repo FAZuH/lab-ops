@@ -18,6 +18,7 @@
 
 pub mod cli;
 mod config;
+mod consts;
 mod consul;
 mod daemon;
 mod docker;

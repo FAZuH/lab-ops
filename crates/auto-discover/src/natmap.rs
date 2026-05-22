@@ -9,6 +9,7 @@ use std::process::Command;
 use color_eyre::Result;
 use color_eyre::eyre::WrapErr;
 use color_eyre::eyre::bail;
+use lab_lib::TransportProtocol;
 
 /// Client that invokes `lab-ops natmap` to add/remove Docker port mappings.
 #[derive(Debug)]
@@ -44,7 +45,7 @@ impl NatmapClient {
         bind_ip: Option<&str>,
         host_port: u16,
         container_port: u16,
-        protocol: &str,
+        protocol: TransportProtocol,
         target_ip: Option<&str>,
     ) -> Result<()> {
         let spec = match (bind_ip, target_ip) {

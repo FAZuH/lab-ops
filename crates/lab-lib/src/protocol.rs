@@ -18,16 +18,13 @@ pub enum TransportProtocol {
     Udp,
 }
 
-impl TryFrom<String> for TransportProtocol {
-    type Error = color_eyre::eyre::Error;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        match value.as_str() {
+impl std::str::FromStr for TransportProtocol {
+    type Err = color_eyre::eyre::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
             "tcp" => Ok(Self::Tcp),
             "udp" => Ok(Self::Udp),
-            _ => Err(color_eyre::eyre::eyre!(
-                "Invalid transport protocol {value}"
-            )),
+            _ => Err(color_eyre::eyre::eyre!("Invalid transport protocol {s}")),
         }
     }
 }

@@ -71,7 +71,7 @@ fn parse_mapping(mapping: &str) -> Result<DockerAddMapRequest, String> {
         _ => return Err("Invalid mapping format".into()),
     }
 
-    let proto = proto.try_into().unwrap();
+    let proto = proto.parse().unwrap();
 
     Ok(DockerAddMapRequest {
         host_ip,
