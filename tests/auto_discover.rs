@@ -686,44 +686,6 @@ echo "PASS: forwarding local no bind (ephemeral), port=$PORT with forwarding_typ
         let out = run(&script);
         assert_pass(&out, "docker_forwarding_local_no_bind");
     }
-    fn default_binding_all_interfaces() {
-        let cname = "it-def-bind";
-        let services_yaml = r#"
-services:
-  it-svc-a:
-    type: docker
-    match:
-      project: it-svc-a
-    rproxy:
-    - port: 80
-      template: HTTP_PROXY
-      domains:
-      - it-svc-a.test.local"#;
-
-        let script = format!(
-            r#"{setup}
-docker run -d --name {cname} -l "com.docker.compose.project=it-svc-a" nginx:alpine
-sleep 4
-
-PORT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-a") | .value.Port')
-if [ -z "$PORT" ] || [ "$PORT" = "null" ]; then echo "FAIL: not registered with Consul" >&2; cat /tmp/discovery.log; exit 1; fi
-
-CID=$(docker inspect -f '{{{{.Id}}}}' {cname} | cut -c1-12)
-MAPPING=$(lab-ops natmap --socket /tmp/natmap.sock ls | awk -v id="$CID" '$6 == id {{print $8}}')
-EXPECTED="0.0.0.0:$PORT"
-if [ "$MAPPING" != "$EXPECTED" ]; then echo "FAIL: expected $EXPECTED, got $MAPPING" >&2; exit 1; fi
-
-echo "PASS: bound to $EXPECTED"
-{teardown}
-"#,
-            setup = new_format_setup(services_yaml, ""),
-            teardown = test_teardown(&[cname]),
-            cname = cname,
-        );
-
-        let out = run(&script);
-        assert_pass(&out, "Test A — default binding");
-    }
 
     // ── Test B: Strict IP Binding (bind_ip) ──────────────────────────
 

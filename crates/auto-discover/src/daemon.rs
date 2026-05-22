@@ -12,7 +12,7 @@ use crate::config::ResolvedPortType;
 use crate::config::ResolvedService;
 use crate::config::ServiceType;
 use crate::consul::ConsulClient;
-use crate::consul::build_consul_service;
+use crate::consul::ConsulServiceRegistration;
 use crate::consul::compute_generation_id;
 use crate::docker::DockerClient;
 use crate::model::ContainerInfo;
@@ -191,7 +191,7 @@ impl DiscoveryDaemon {
                 .wrap_err("natmap command failed")?;
         }
 
-        let registration = build_consul_service(
+        let registration = ConsulServiceRegistration::new(
             resolved,
             host_port,
             server_name,
@@ -271,7 +271,7 @@ impl DiscoveryDaemon {
         }
 
         let consul_ip = local_ip.to_string();
-        let registration = build_consul_service(
+        let registration = ConsulServiceRegistration::new(
             resolved,
             host_port,
             server_name,

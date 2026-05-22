@@ -3,83 +3,69 @@ use natmap::models::TransportProtocol;
 
 /// Helper to parse a mapping string using the same logic as command.rs::add().
 fn parse_mapping(mapping: &str) -> Result<DockerAddMapRequest, String> {
-    let (mapping_part, proto) = match mapping.split_once('/') {
-        Some((m, p)) => (m, p.to_string()),
-        None => (mapping, "tcp".to_string()),
-    };
+    let (mapping_part, proto) = mapping
+        .split_once('/')
+        .map(|(m, p)| (m, p.to_string()))
+        .unwrap_or((mapping, "tcp".to_string()));
 
     let parts: Vec<&str> = mapping_part.split(':').collect();
 
-    let mut host_ip = "0.0.0.0".to_string();
-    let mut target_ip = None;
-
-    let host_port;
-    let container_port;
-
-    match parts.len() {
-        1 => {
-            host_port = parts[0]
-                .parse()
-                .map_err(|e: std::num::ParseIntError| e.to_string())?;
-            container_port = host_port;
+    let (host_ip, host_port, target_ip, container_port) = match parts.as_slice() {
+        [port] => {
+            let p = parse_port(port)?;
+            ("0.0.0.0".to_string(), p, None, p)
         }
-        2 => {
-            if let Ok(ip) = parts[0].parse::<std::net::IpAddr>() {
-                host_ip = ip.to_string();
-                host_port = parts[1]
-                    .parse()
-                    .map_err(|e: std::num::ParseIntError| e.to_string())?;
-                container_port = host_port;
+        [maybe_ip, port] => {
+            if let Ok(ip) = maybe_ip.parse::<std::net::IpAddr>() {
+                let p = parse_port(port)?;
+                (ip.to_string(), p, None, p)
             } else {
-                host_port = parts[0]
-                    .parse()
-                    .map_err(|e: std::num::ParseIntError| e.to_string())?;
-                container_port = parts[1]
-                    .parse()
-                    .map_err(|e: std::num::ParseIntError| e.to_string())?;
+                (
+                    "0.0.0.0".to_string(),
+                    parse_port(maybe_ip)?,
+                    None,
+                    parse_port(port)?,
+                )
             }
         }
-        3 => {
-            if let Ok(ip) = parts[0].parse::<std::net::IpAddr>() {
-                host_ip = ip.to_string();
-                host_port = parts[1]
-                    .parse()
-                    .map_err(|e: std::num::ParseIntError| e.to_string())?;
-                container_port = parts[2]
-                    .parse()
-                    .map_err(|e: std::num::ParseIntError| e.to_string())?;
+        [maybe_ip, host, container] => {
+            if let Ok(ip) = maybe_ip.parse::<std::net::IpAddr>() {
+                (
+                    ip.to_string(),
+                    parse_port(host)?,
+                    None,
+                    parse_port(container)?,
+                )
             } else {
-                host_port = parts[0]
-                    .parse()
-                    .map_err(|e: std::num::ParseIntError| e.to_string())?;
-                target_ip = Some(parts[1].to_string());
-                container_port = parts[2]
-                    .parse()
-                    .map_err(|e: std::num::ParseIntError| e.to_string())?;
+                (
+                    "0.0.0.0".to_string(),
+                    parse_port(maybe_ip)?,
+                    Some(host.to_string()),
+                    parse_port(container)?,
+                )
             }
         }
-        4 => {
-            host_ip = parts[0].to_string();
-            host_port = parts[1]
-                .parse()
-                .map_err(|e: std::num::ParseIntError| e.to_string())?;
-            target_ip = Some(parts[2].to_string());
-            container_port = parts[3]
-                .parse()
-                .map_err(|e: std::num::ParseIntError| e.to_string())?;
-        }
+        [host_ip, host, target, container] => (
+            host_ip.to_string(),
+            parse_port(host)?,
+            Some(target.to_string()),
+            parse_port(container)?,
+        ),
         _ => return Err("Invalid mapping format".into()),
-    }
-
-    let proto = proto.parse().unwrap();
+    };
 
     Ok(DockerAddMapRequest {
         host_ip,
         host_port,
         container_port,
         target_ip,
-        proto,
+        proto: proto.parse().unwrap(),
     })
+}
+
+fn parse_port(s: &str) -> Result<u16, String> {
+    s.parse()
+        .map_err(|e: std::num::ParseIntError| e.to_string())
 }
 
 #[test]

@@ -26,7 +26,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 get_if_addrs = "0.5.3"
 color-eyre = "0.6"
 regex = "1"
-# natmap = { path = "../natmap" }
 
 [dev-dependencies]
 tempfile = "3"
