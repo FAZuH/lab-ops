@@ -1,3 +1,20 @@
+## 0.1.14 (2026-05-22)
+
+
+### Auto Discover
+
+* Make nginx output dirs configurable, default to sites-enabled ([9b6cd8f](https://github.com/FAZuH/lab-ops/commit/9b6cd8fd23587f7d16634b6b086ea18992ed8bc0))
+
+
+### Natmap
+
+* Add iptables rule comments, improve ls output ([7e32f20](https://github.com/FAZuH/lab-ops/commit/7e32f20e1d9a428513836acf71371c1ebb01baa9))
+
+
+### Bug Fixes
+
+* Various bug fixes ([ace88ba](https://github.com/FAZuH/lab-ops/commit/ace88bad24b4256f35bb931e1a0fc56c19301fb1))
+
 ## 0.1.13 (2026-05-22)
 
 
@@ -25,17 +42,4 @@
 ### Auto Discover
 
 * refactor!(ad): Rework discovery.yaml config spec ([9965dd2](https://github.com/FAZuH/lab-ops/commit/9965dd272c26d474be66bf6aef61fa49be36d1ae))
-
-## 0.1.9 (2026-05-21)
-
-
-### Auto Discover
-
-* Fix error when generating service discovery nginx config ([f60274b](https://github.com/FAZuH/lab-ops/commit/f60274b4365fa71cdf5be32d4742c1e9de482a67))
-* Support non-Docker services configuration ([7b3d1a8](https://github.com/FAZuH/lab-ops/commit/7b3d1a8f5761fe4dffe8647863b6a87ae4e8defc))
-
-
-### Natmap
-
-* Add --name to natmap docker add and rm ([8b5c09d](https://github.com/FAZuH/lab-ops/commit/8b5c09d919074796c4df632e05cc37fab9115f7f))
 
