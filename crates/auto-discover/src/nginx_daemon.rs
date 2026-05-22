@@ -15,12 +15,17 @@ use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 
-use color_eyre::eyre::bail;
-use color_eyre::eyre::WrapErr;
 use color_eyre::Result;
+use color_eyre::eyre::WrapErr;
+use color_eyre::eyre::bail;
 
 use crate::consul::ConsulClient;
 use crate::consul::KvEntry;
+
+const AD_NGINX: &str = "/var/lib/auto-discover/nginx-configs";
+const NGINX_SITEAVAIL: &str = "/etc/nginx/sites-available";
+const NGINX_STREAMAVAIL: &str = "/etc/nginx/streams-available";
+const AD_POSTPROC: &str = "/etc/auto-discover/postprocs.d";
 
 /// Proxy-side daemon that watches Consul KV for nginx config changes and
 /// applies them to the local nginx installation.
@@ -30,8 +35,6 @@ use crate::consul::KvEntry;
 /// by lexicographically-sorted common postprocs from the `postproc_dir`.
 pub struct NginxDaemon {
     consul: ConsulClient,
-    tailscale_ip: String,
-    tailscale_reachable: bool,
     configs_dir: PathBuf,
     sites_available: PathBuf,
     streams_available: PathBuf,
@@ -41,9 +44,6 @@ pub struct NginxDaemon {
 
 impl NginxDaemon {
     /// Create a new nginx daemon instance.
-    ///
-    /// Reads `TAILSCALE_IP` and `TAILSCALE_REACHABLE` from the environment
-    /// for use by postproc scripts.
     pub fn new(
         consul_addr: String,
         configs_dir: PathBuf,
@@ -51,14 +51,8 @@ impl NginxDaemon {
         streams_available: PathBuf,
         postproc_dir: PathBuf,
     ) -> Self {
-        let tailscale_ip = std::env::var("TAILSCALE_IP").unwrap_or_default();
-        let tailscale_reachable =
-            std::env::var("TAILSCALE_REACHABLE").unwrap_or_default() == "true";
-
         NginxDaemon {
             consul: ConsulClient::new(consul_addr),
-            tailscale_ip,
-            tailscale_reachable,
             configs_dir,
             sites_available,
             streams_available,
@@ -70,10 +64,10 @@ impl NginxDaemon {
     pub fn new_default_paths(consul_addr: impl ToString) -> Self {
         Self::new(
             consul_addr.to_string(),
-            PathBuf::from("/var/lib/auto-discover/nginx-configs"),
-            PathBuf::from("/etc/nginx/sites-available"),
-            PathBuf::from("/etc/nginx/streams-available"),
-            PathBuf::from("/etc/auto-discover/postprocs.d"),
+            PathBuf::from(AD_NGINX),
+            PathBuf::from(NGINX_SITEAVAIL),
+            PathBuf::from(NGINX_STREAMAVAIL),
+            PathBuf::from(AD_POSTPROC),
         )
     }
 
@@ -131,10 +125,8 @@ impl NginxDaemon {
                 false
             }
         };
-        if should_gc {
-            if let Err(e) = self.gc_orphaned_kv_entries().await {
-                tracing::warn!("nginx config GC failed: {}", e);
-            }
+        if should_gc && let Err(e) = self.gc_orphaned_kv_entries().await {
+            tracing::warn!("nginx config GC failed: {}", e);
         }
 
         let entries = self
@@ -223,15 +215,6 @@ impl NginxDaemon {
                 let mut child = std::process::Command::new("sh")
                     .arg("-c")
                     .arg(script)
-                    .env("TAILSCALE_IP", &self.tailscale_ip)
-                    .env(
-                        "TAILSCALE_REACHABLE",
-                        if self.tailscale_reachable {
-                            "true"
-                        } else {
-                            "false"
-                        },
-                    )
                     .stdin(std::process::Stdio::piped())
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::inherit())
@@ -266,15 +249,6 @@ impl NginxDaemon {
 
         for script in &scripts {
             let mut child = std::process::Command::new(script)
-                .env("TAILSCALE_IP", &self.tailscale_ip)
-                .env(
-                    "TAILSCALE_REACHABLE",
-                    if self.tailscale_reachable {
-                        "true"
-                    } else {
-                        "false"
-                    },
-                )
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::inherit())

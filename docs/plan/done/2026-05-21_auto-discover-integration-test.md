@@ -30,7 +30,7 @@ Tests A–I verify core discovery, forwarding, nginx config generation, and clea
 | `forwarding_static_port` | D | `forwarding.ext_ports[0]` used as static port, forwarding meta registered |
 | `forwarding_hairpin_meta` | E | `forwarding.hairpin: true` → `Meta.hairpin="true"` in Consul |
 | `nginx_config_kv_write` | F | Nginx config stored to `nginx-configs/sites/{id}.conf` in KV |
-| `nginx_config_private_service_placeholder` | G | `REVERSE_PROXY_PRIVATE` template → `__TAILSCALE_IP__` in config |
+| `nginx_config_private_service_placeholder` | G | `HTTP_PROXY` template → custom IP placeholder in config |
 | `forwarding_no_kv_config` | H | Forwarding-only service (empty template) has no nginx KV entry |
 | `container_stop_kv_delete_and_deregister` | I | Stop container → KV key deleted + Consul service deregistered |
 
@@ -71,7 +71,7 @@ Tests for the config generator pipeline and KV storage.
 
 | Test | What it verifies |
 |---|---|
-| `stream_template_stored_in_streams_prefix` | `template: STREAM` → config stored at `nginx-configs/streams/{id}.conf` not `sites/` |
+| `stream_template_stored_in_streams_prefix` | `template: TCP_PROXY` → config stored at `nginx-configs/streams/{id}.conf` not `sites/` |
 | `extra_fields_passed_to_consul_meta` | `extra: { cluster: "us-east", max_conns: "100" }` → `Meta.cluster` and `Meta.max_conns` in Consul |
 | `preprocess_script_modifies_config` | Inline `preprocess` script piped after generator. Output in KV reflects preprocess changes |
 | `postprocess_script_stored_in_kv` | `postprocess` set → `.postproc` key stored alongside `.conf` in KV |

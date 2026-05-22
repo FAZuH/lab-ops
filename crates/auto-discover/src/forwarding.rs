@@ -2,18 +2,19 @@
 //!
 //! Queries the Consul catalog for services with `Meta.forwarding=="true"`,
 //! groups them by `(ext_ip, int_ip, protocol)`, and applies iptables
-//! DNAT + hairpin rules via `lab-ops natmap`. Handles cleanup of stale rules
-//! for (ext_ip, int_ip) pairs no longer found in Consul.
+//! DNAT + hairpin rules via the natmap daemon. Handles cleanup of stale
+//! rules for (ext_ip, int_ip) pairs no longer found in Consul.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::process::Command;
 
-use color_eyre::eyre::bail;
-use color_eyre::eyre::WrapErr;
 use color_eyre::Result;
+use color_eyre::eyre::WrapErr;
+use color_eyre::eyre::bail;
 
 use crate::consul::ConsulClient;
+use crate::natmap::NatmapClient;
 
 /// Internal grouping of forwarding services by key `(ext_ip, int_ip, protocol)`.
 #[derive(Debug, Clone)]
@@ -28,34 +29,36 @@ struct ForwardingGroup {
 /// One-shot sync of kernel-level forwarding rules from Consul.
 ///
 /// Queries the Consul catalog (cross-agent) for services with `forwarding==true`,
-/// applies DNAT and optional hairpin rules via `lab-ops natmap`, and removes
-/// stale rules for (ext_ip, int_ip) pairs that no longer exist in Consul.
+/// applies DNAT and optional hairpin rules via the natmap daemon, and removes
+/// stale DNAT rules for (ext_ip, int_ip) pairs that no longer exist in Consul.
+///
+/// Requires the natmap daemon to be running on the Unix socket at
+/// `NATMAP_SOCKET` (default: [`lab_lib::NATMAP_SOCKET`]).
 pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
     let consul = ConsulClient::new(consul_addr.to_string());
     let groups = query_forwarding_services(&consul).await?;
-
-    let natmap_socket =
-        std::env::var("NATMAP_SOCKET").unwrap_or_else(|_| "/run/natmap.sock".into());
+    let natmap = NatmapClient::default_socket();
 
     if groups.is_empty() {
         tracing::info!("No forwarding services found in Consul; cleaning up stale rules");
         let stale = find_stale_rules(&groups)?;
         for stale_group in stale {
-            for port in &stale_group.ports {
-                let cmd = format!(
-                    "iptables -t nat -D PREROUTING -d {}/32 -p {} -m {} --dport {} -j DNAT --to-destination {}:{}",
-                    stale_group.ext_ip, stale_group.proto, stale_group.proto, port,
-                    stale_group.int_ip, port,
-                );
-                if let Err(e) = Command::new("sh").arg("-c").arg(&cmd).output() {
-                    tracing::warn!(
-                        "Failed to delete stale DNAT rule for {} port {}: {}",
-                        stale_group.ext_ip,
-                        port,
-                        e,
-                    );
-                }
-            }
+            let ports_csv = stale_group
+                .ports
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            natmap
+                .dnat(
+                    &stale_group.ext_ip,
+                    &stale_group.int_ip,
+                    &ports_csv,
+                    &stale_group.proto,
+                    true,
+                )
+                .await
+                .ok();
         }
         return Ok(());
     }
@@ -68,70 +71,40 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
             .collect::<Vec<_>>()
             .join(",");
 
-        let delete_result = run_natmap_dnat(
-            &natmap_socket,
-            "dnat",
-            &group.ext_ip,
-            &group.int_ip,
-            &ports_csv,
-            &group.proto,
-            true,
-        );
-        if let Err(e) = &delete_result {
-            tracing::warn!(
-                "Failed to delete old dnat rules for {}: {}",
-                group.ext_ip,
-                e
-            );
-        }
+        natmap
+            .dnat(&group.ext_ip, &group.int_ip, &ports_csv, &group.proto, true)
+            .await
+            .ok();
 
-        let apply_result = run_natmap_dnat(
-            &natmap_socket,
-            "dnat",
-            &group.ext_ip,
-            &group.int_ip,
-            &ports_csv,
-            &group.proto,
-            false,
-        );
-        if let Err(e) = apply_result {
-            bail!("dnat for {} -> {} failed: {e}", group.ext_ip, group.int_ip);
-        }
-
-        if group.hairpin {
-            let hairpin_delete = run_natmap_dnat(
-                &natmap_socket,
-                "hairpin",
-                &group.ext_ip,
-                &group.int_ip,
-                &ports_csv,
-                &group.proto,
-                true,
-            );
-            if let Err(e) = &hairpin_delete {
-                tracing::warn!(
-                    "Failed to delete old hairpin rules for {}: {}",
-                    group.ext_ip,
-                    e
-                );
-            }
-
-            let hairpin_apply = run_natmap_dnat(
-                &natmap_socket,
-                "hairpin",
+        natmap
+            .dnat(
                 &group.ext_ip,
                 &group.int_ip,
                 &ports_csv,
                 &group.proto,
                 false,
-            );
-            if let Err(e) = hairpin_apply {
-                bail!(
-                    "hairpin for {} -> {} failed: {e}",
-                    group.ext_ip,
-                    group.int_ip
-                );
-            }
+            )
+            .await
+            .wrap_err_with(|| format!("dnat for {} -> {} failed", group.ext_ip, group.int_ip))?;
+
+        if group.hairpin {
+            natmap
+                .hairpin(&group.ext_ip, &group.int_ip, &ports_csv, &group.proto, true)
+                .await
+                .ok();
+
+            natmap
+                .hairpin(
+                    &group.ext_ip,
+                    &group.int_ip,
+                    &ports_csv,
+                    &group.proto,
+                    false,
+                )
+                .await
+                .wrap_err_with(|| {
+                    format!("hairpin for {} -> {} failed", group.ext_ip, group.int_ip)
+                })?;
         }
 
         tracing::info!(
@@ -146,14 +119,22 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
 
     let stale = find_stale_rules(&groups)?;
     for stale_group in stale {
-        for port in &stale_group.ports {
-            let cmd = format!(
-                "iptables -t nat -D PREROUTING -d {}/32 -p {} -m {} --dport {} -j DNAT --to-destination {}:{}",
-                stale_group.ext_ip, stale_group.proto, stale_group.proto, port,
-                stale_group.int_ip, port,
-            );
-            let _ = Command::new("sh").arg("-c").arg(&cmd).output();
-        }
+        let ports_csv = stale_group
+            .ports
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        natmap
+            .dnat(
+                &stale_group.ext_ip,
+                &stale_group.int_ip,
+                &ports_csv,
+                &stale_group.proto,
+                true,
+            )
+            .await
+            .ok();
     }
 
     Ok(())
@@ -170,27 +151,22 @@ async fn query_forwarding_services(consul: &ConsulClient) -> Result<Vec<Forwardi
     let mut group_map: HashMap<(String, String, String), (Vec<u16>, bool)> = HashMap::new();
 
     for svc in services {
-        let meta = svc.get("Meta").and_then(|m| m.as_object());
-        let meta = match meta {
-            Some(m) => m,
-            None => continue,
+        let Some(meta) = svc.get("Meta").and_then(|m| m.as_object()) else {
+            continue;
         };
 
-        let ext_ip = match meta.get("ext_ip").and_then(|v| v.as_str()) {
-            Some(ip) => ip.to_string(),
-            None => continue,
+        let Some(ext_ip) = meta.get("ext_ip").and_then(|v| v.as_str()) else {
+            continue;
         };
 
-        let address = match svc.get("Address").and_then(|v| v.as_str()) {
-            Some(addr) => addr.to_string(),
-            None => continue,
+        let Some(address) = svc.get("Address").and_then(|v| v.as_str()) else {
+            continue;
         };
 
         let protocol = meta
             .get("protocol")
             .and_then(|v| v.as_str())
-            .unwrap_or("tcp")
-            .to_string();
+            .unwrap_or("tcp");
 
         let ports: Vec<u16> = meta
             .get("ext_ports")
@@ -212,9 +188,12 @@ async fn query_forwarding_services(consul: &ConsulClient) -> Result<Vec<Forwardi
             continue;
         }
 
-        let key = (ext_ip.clone(), address.clone(), protocol.clone());
         let entry = group_map
-            .entry(key)
+            .entry((
+                ext_ip.to_string(),
+                address.to_string(),
+                protocol.to_string(),
+            ))
             .or_insert_with(|| (Vec::new(), hairpin));
         entry.0.extend(ports);
         entry.1 = entry.1 || hairpin;
@@ -237,42 +216,6 @@ async fn query_forwarding_services(consul: &ConsulClient) -> Result<Vec<Forwardi
         .collect();
 
     Ok(groups)
-}
-
-/// Invoke `lab-ops natmap dnat` (or `hairpin`) to apply or delete a group of rules.
-fn run_natmap_dnat(
-    socket: &str,
-    subcmd: &str,
-    ext_ip: &str,
-    int_ip: &str,
-    ports: &str,
-    proto: &str,
-    delete: bool,
-) -> Result<()> {
-    let mut args = vec![
-        "natmap", "--socket", socket, subcmd, "--ext-ip", ext_ip, "--int-ip", int_ip, "--ports",
-        ports,
-    ];
-
-    if !proto.is_empty() && proto != "tcp" {
-        args.push("--proto");
-        args.push(proto);
-    }
-
-    if delete {
-        args.push("--delete");
-    }
-
-    let output = Command::new("lab-ops")
-        .args(&args)
-        .output()
-        .wrap_err("failed to run lab-ops")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("lab-ops natmap {} failed: {}", subcmd, stderr.trim());
-    }
-    Ok(())
 }
 
 /// Compare existing natmap DNAT rules against the desired state and return

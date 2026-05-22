@@ -1,13 +1,15 @@
 [package]
 name = "auto-discover"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "Service discovery daemon with Consul registration and nginx config generation"
 
 [features]
 docker-tests = []
 
 [dependencies]
+lab-lib = { path = "../lab-lib" }
+natmap = { path = "../natmap" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
@@ -25,7 +27,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 get_if_addrs = "0.5.3"
 color-eyre = "0.6"
 regex = "1"
-# natmap = { path = "../natmap" }
 
 [dev-dependencies]
 tempfile = "3"

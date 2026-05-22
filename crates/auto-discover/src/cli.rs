@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use bollard::query_parameters::EventsOptions;
 use clap::Parser;
 use clap::Subcommand;
-use color_eyre::eyre::bail;
 use color_eyre::Result;
+use color_eyre::eyre::bail;
 use futures_util::StreamExt;
 use tracing::debug;
 use tracing::error;
@@ -184,7 +184,7 @@ async fn run_daemon(config_path: PathBuf, state_dir: PathBuf) {
         }
     }
 
-    let docker_api = match bollard::Docker::connect_with_local_defaults() {
+    let docker_api = match lab_lib::docker::connect() {
         Ok(d) => d,
         Err(e) => {
             error!("Failed to connect to Docker: {}", e);
@@ -236,10 +236,10 @@ async fn run_daemon(config_path: PathBuf, state_dir: PathBuf) {
 
         match action {
             "start" => {
-                if let Some(ref project) = compose_project {
-                    if let Err(e) = daemon.handle_container_start(container_id, project).await {
-                        error!("Container start error: {}", e);
-                    }
+                if let Some(ref project) = compose_project
+                    && let Err(e) = daemon.handle_container_start(container_id, project).await
+                {
+                    error!("Container start error: {}", e);
                 }
             }
             "die" => {

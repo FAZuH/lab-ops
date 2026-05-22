@@ -30,6 +30,7 @@ use futures_util::stream::StreamExt;
 use hyper_util::rt::TokioExecutor;
 use hyper_util::rt::TokioIo;
 use hyper_util::server::conn::auto::Builder;
+use lab_lib::port::PortAllocator;
 use serde::Serialize;
 use tokio::process::Command;
 use tokio::sync::RwLock;
@@ -54,7 +55,6 @@ use crate::docker;
 use crate::iptables::IptablesManager;
 use crate::models::DaemonState;
 use crate::models::DockerPortMap;
-use crate::port_allocator::PortAllocator;
 
 /// Shared application state held by all Axum route handlers.
 #[derive(Clone)]
