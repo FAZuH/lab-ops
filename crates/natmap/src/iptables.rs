@@ -205,8 +205,8 @@ impl IptablesManager {
     }
 
     /// Flushes and deletes the `NATMAP` chains and removes all natmap-commented
-    /// rules from `POSTROUTING` and `OUTPUT` in both `iptables` (IPv4) and
-    /// `ip6tables` (IPv6).
+    /// rules from `POSTROUTING`, `OUTPUT`, `PREROUTING`, and `FORWARD` in both
+    /// `iptables` (IPv4) and `ip6tables` (IPv6).
     ///
     /// Used during crash recovery and clean shutdown to reset all natmap-managed rules.
     pub fn flush_all_natmap(&self) -> Result<()> {
@@ -217,12 +217,15 @@ impl IptablesManager {
             let _ = self.flush_chain(cmd, "filter", NATMAP);
             let _ = self.delete_all_natmap(cmd, "nat", "POSTROUTING");
             let _ = self.delete_all_natmap(cmd, "nat", "OUTPUT");
+            let _ = self.delete_all_natmap(cmd, "nat", "PREROUTING");
+            let _ = self.delete_all_natmap(cmd, "filter", "FORWARD");
         }
         Ok(())
     }
 
     /// Installs a static DNAT rule (PREROUTING + FORWARD ACCEPT).
     pub fn install_dnat(&self, config: &DnatConfig) -> Result<()> {
+        let comment = config.rule_comment();
         let multiport = config.ports.contains(',');
         let port_args = if multiport {
             vec!["-m", "multiport", "--dports", &config.ports]
@@ -243,56 +246,30 @@ impl IptablesManager {
             format!("{}:{}", config.int_ip, config.ports)
         };
         pre_args.extend(vec!["-j", "DNAT", "--to-destination", &dest]);
+        pre_args.extend(vec!["-m", "comment", "--comment", &comment]);
         self.run_success("iptables", &pre_args)?;
 
         let mut fwd_args = vec!["-A", "FORWARD", "-p", proto, "-d", &config.int_ip];
         fwd_args.extend(port_args);
         fwd_args.extend(vec!["-j", "ACCEPT"]);
+        fwd_args.extend(vec!["-m", "comment", "--comment", &comment]);
         self.run_success("iptables", &fwd_args)?;
         Ok(())
     }
 
     /// Removes a static DNAT rule (PREROUTING + FORWARD ACCEPT).
     ///
-    /// Loops `iptables -D` until all copies of the rule are removed.
+    /// Uses the rule comment to find and delete matching rules.
     pub fn remove_dnat(&self, config: &DnatConfig) -> Result<()> {
-        let multiport = config.ports.contains(',');
-        let port_args: Vec<&str> = if multiport {
-            vec!["-m", "multiport", "--dports", &config.ports]
-        } else {
-            vec!["--dport", &config.ports]
-        };
-
-        let mut pre_args = vec!["-t", "nat", "-D", "PREROUTING"];
-        if let Some(ref iface) = config.ext_if {
-            pre_args.extend(vec!["-i", iface]);
-        }
-        let proto = config.proto.to_lowercase();
-        pre_args.extend(vec!["-d", &config.ext_ip, "-p", proto]);
-        pre_args.extend(port_args.clone());
-        let dest = if multiport {
-            config.int_ip.clone()
-        } else {
-            format!("{}:{}", config.int_ip, config.ports)
-        };
-        pre_args.extend(vec!["-j", "DNAT", "--to-destination", &dest]);
-        while self
-            .run("iptables", &pre_args)
-            .is_ok_and(|o| o.status.success())
-        {}
-
-        let mut fwd_args = vec!["-D", "FORWARD", "-p", proto, "-d", &config.int_ip];
-        fwd_args.extend(port_args);
-        fwd_args.extend(vec!["-j", "ACCEPT"]);
-        while self
-            .run("iptables", &fwd_args)
-            .is_ok_and(|o| o.status.success())
-        {}
+        let comment = config.rule_comment();
+        self.delete_all_matching("iptables", "nat", "PREROUTING", &comment)?;
+        self.delete_all_matching("iptables", "filter", "FORWARD", &comment)?;
         Ok(())
     }
 
     /// Installs a static SNAT (source NAT) rule in the POSTROUTING chain.
     pub fn install_snat(&self, config: &SnatConfig) -> Result<()> {
+        let comment = config.rule_comment();
         let args = vec![
             "-t",
             "nat",
@@ -306,33 +283,27 @@ impl IptablesManager {
             "SNAT",
             "--to-source",
             &config.ext_ip,
+            "-m",
+            "comment",
+            "--comment",
+            &comment,
         ];
         self.run_success("iptables", &args)?;
         Ok(())
     }
 
     /// Removes a static SNAT rule from the POSTROUTING chain.
+    ///
+    /// Uses the rule comment to find and delete matching rules.
     pub fn remove_snat(&self, config: &SnatConfig) -> Result<()> {
-        let args = vec![
-            "-t",
-            "nat",
-            "-D",
-            "POSTROUTING",
-            "-s",
-            &config.int_ip,
-            "-o",
-            &config.ext_if,
-            "-j",
-            "SNAT",
-            "--to-source",
-            &config.ext_ip,
-        ];
-        let _ = self.run("iptables", &args);
+        let comment = config.rule_comment();
+        self.delete_all_matching("iptables", "nat", "POSTROUTING", &comment)?;
         Ok(())
     }
 
     /// Installs a hairpin NAT rule (PREROUTING DNAT + POSTROUTING MASQUERADE).
     pub fn install_hairpin(&self, config: &HairpinConfig) -> Result<()> {
+        let comment = config.rule_comment();
         let multiport = config.ports.contains(',');
         let port_args: Vec<&str> = if multiport {
             vec!["-m", "multiport", "--dports", &config.ports]
@@ -355,6 +326,7 @@ impl IptablesManager {
         ];
         pre_args.extend(port_args.clone());
         pre_args.extend(vec!["-j", "DNAT", "--to-destination", &config.int_ip]);
+        pre_args.extend(vec!["-m", "comment", "--comment", &comment]);
         self.run_success("iptables", &pre_args)?;
 
         let mut post_args = vec![
@@ -371,59 +343,18 @@ impl IptablesManager {
         ];
         post_args.extend(port_args);
         post_args.extend(vec!["-j", "MASQUERADE"]);
+        post_args.extend(vec!["-m", "comment", "--comment", &comment]);
         self.run_success("iptables", &post_args)?;
         Ok(())
     }
 
     /// Removes a hairpin NAT rule (PREROUTING DNAT + POSTROUTING MASQUERADE).
     ///
-    /// Loops `iptables -D` until all copies of the rule are removed.
+    /// Uses the rule comment to find and delete matching rules.
     pub fn remove_hairpin(&self, config: &HairpinConfig) -> Result<()> {
-        let multiport = config.ports.contains(',');
-        let port_args: Vec<&str> = if multiport {
-            vec!["-m", "multiport", "--dports", &config.ports]
-        } else {
-            vec!["--dport", &config.ports]
-        };
-        let proto = config.proto.to_lowercase();
-
-        let mut pre_args = vec![
-            "-t",
-            "nat",
-            "-D",
-            "PREROUTING",
-            "-s",
-            &config.int_ip,
-            "-d",
-            &config.ext_ip,
-            "-p",
-            proto,
-        ];
-        pre_args.extend(port_args.clone());
-        pre_args.extend(vec!["-j", "DNAT", "--to-destination", &config.int_ip]);
-        while self
-            .run("iptables", &pre_args)
-            .is_ok_and(|o| o.status.success())
-        {}
-
-        let mut post_args = vec![
-            "-t",
-            "nat",
-            "-D",
-            "POSTROUTING",
-            "-s",
-            &config.int_ip,
-            "-d",
-            &config.int_ip,
-            "-p",
-            proto,
-        ];
-        post_args.extend(port_args);
-        post_args.extend(vec!["-j", "MASQUERADE"]);
-        while self
-            .run("iptables", &post_args)
-            .is_ok_and(|o| o.status.success())
-        {}
+        let comment = config.rule_comment();
+        self.delete_all_matching("iptables", "nat", "PREROUTING", &comment)?;
+        self.delete_all_matching("iptables", "nat", "POSTROUTING", &comment)?;
         Ok(())
     }
 
