@@ -68,7 +68,7 @@ Consul Agent ──────────────────────�
 
 ### Forwarding Architecture (kernel-level NAT)
 
-For services with `forwarding` config, the flow bypasses NGINX entirely:
+For services with `forwardlocal` or `forwardremote` config, the flow bypasses NGINX entirely:
 
 ```
 Service Server                           Proxy Server
@@ -122,7 +122,7 @@ services:
     type: docker               # "docker" or "local"
     match:
       project: example-drive   # must match com.docker.compose.project label
-    rproxy:                    # reverse proxy entries (nginx configs)
+    rproxylocal:               # reverse proxy entries for services on this node (nginx configs)
       - port: 80
         template: HTTP_PROXY
         domains:
@@ -135,7 +135,7 @@ services:
     extra:
       eas: "true"
     bind_ip: 10.0.0.101        # overrides defaults.bind_ip
-    rproxy:
+    rproxylocal:
       - port: 80
         template: HTTP_PROXY
         domains:
@@ -145,14 +145,13 @@ services:
     type: docker
     match:
       project: example-mc
-    rproxy:
+    rproxylocal:
       - port: 25565            # TCP entry
         template: TCP_PROXY
       - port: 19132            # UDP entry
         template: TCP_PROXY
-    forwarding:                # kernel-level NAT (bypasses NGINX)
-      - type: remote
-        port: 25565
+    forwardremote:             # kernel-level NAT on proxy server (bypasses NGINX)
+      - port: 25565
         ext_ip: 203.0.113.43
         ext_ports: [25565]
         proto: tcp
@@ -183,8 +182,10 @@ services:
 | `address` | No | IP address for `type: local` services. Not used for Docker services |
 | `bind_ip` | No | IP to bind the natmap host port on. Cascades from `defaults.bind_ip`. Falls back to container Docker IP |
 | `bind_interface` | No | Interface name to resolve an IP from via `ip -j -4 addr show`. Cascades from `defaults.bind_interface` |
-| `rproxy` | No | List of reverse proxy port entries. Each entry generates an nginx config stored in Consul KV. See [[#RProxy Config]] below |
-| `forwarding` | No | List of kernel-level NAT port entries (iptables DNAT). See [[#Forwarding Config]] below |
+| `rproxylocal` | No | List of reverse proxy port entries for services on this node. Each entry generates an nginx config stored in Consul KV. See [[#RProxyLocal Config]] below |
+| `rproxyremote` | No | List of reverse proxy port entries for services on other nodes. Requires `proxy_on` to specify target proxy. See [[#RProxyRemote Config]] below |
+| `forwardlocal` | No | List of kernel-level NAT port entries for iptables DNAT on this node. See [[#ForwardLocal Config]] below |
+| `forwardremote` | No | List of kernel-level NAT port entries for iptables DNAT on the proxy server. See [[#ForwardRemote Config]] below |
 | `extra` | No | Arbitrary key-value pairs passed to the generator script as `AUTO_DISCOVER_EXTRA_<key>` env vars |
 
 **Match Config (`services.<name>.match`):**
@@ -197,14 +198,26 @@ services:
 
 At least one match field should be set. If `match` is absent, the service matches **any** container exposing the configured port — use with caution.
 
-**RProxy Config (`services.<name>.rproxy[]`):**
+**RProxyLocal Config (`services.<name>.rproxylocal[]`):**
 
 | Field | Required | Description |
 |-------|----------|-------------|
 | `port` | Yes | Container/host port the service listens on |
 | `template` | Yes | Nginx template type (e.g., `HTTP_PROXY`, `TCP_PROXY`). Used by your custom nginx generator script. |
 | `domains` | No | Domain names for NGINX `server_name`. First domain is the primary — also used as a discriminator in the Consul service ID to prevent collisions when multiple entries share the same name+port |
-| `proxy_on` | No | Only generate nginx config on this specific proxy server node name. Useful for multi-proxy setups |
+| `proxy_ip` | No | Override for the proxy server IP. Cascades from `defaults.proxy_ip` |
+| `nginx_generator` | No | Path to nginx config generator script. Cascades from `defaults.nginx_generator`. Default: `/usr/local/bin/auto-discover-gen-nginx` |
+| `preprocess` | No | Inline shell script run on the service node after the generator. stdin = generator output, stdout = stored config. Cascades from `defaults.preprocess` |
+| `postprocess` | No | Inline shell script stored in Consul KV, run on the proxy. stdin = config from KV, stdout = final nginx config. Exit 1 = skip. Cascades from `defaults.postprocess` |
+
+**RProxyRemote Config (`services.<name>.rproxyremote[]`):**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `port` | Yes | Container/host port the service listens on |
+| `template` | Yes | Nginx template type (e.g., `HTTP_PROXY`, `TCP_PROXY`). Used by your custom nginx generator script. |
+| `domains` | No | Domain names for NGINX `server_name`. First domain is the primary — also used as a discriminator in the Consul service ID to prevent collisions when multiple entries share the same name+port |
+| `proxy_on` | Yes | Target proxy server node name where this nginx config should be generated |
 | `proxy_ip` | No | Override for the proxy server IP. Cascades from `defaults.proxy_ip` |
 | `nginx_generator` | No | Path to nginx config generator script. Cascades from `defaults.nginx_generator`. Default: `/usr/local/bin/auto-discover-gen-nginx` |
 | `preprocess` | No | Inline shell script run on the service node after the generator. stdin = generator output, stdout = stored config. Cascades from `defaults.preprocess` |
@@ -229,83 +242,80 @@ At least one match field should be set. If `match` is absent, the service matche
 4. `defaults.bind_interface` → resolved
 5. Container's Docker network IP (fallback)
 
-### Forwarding Config
+**ForwardLocal Config (`services.<name>.forwardlocal[]`):**
 
-Each entry in `services.<name>.forwarding[]` defines a kernel-level NAT port. Forwarding bypasses NGINX entirely — it creates iptables DNAT rules to route traffic directly from an external IP to the service, eliminating proxy latency for game servers, mail servers, etc.
-
-There are two forwarding types:
-
-- **`remote`** (proxy-server DNAT): Registers Consul metadata (`forwarding=true`, `ext_ip`, `ext_ports`, `hairpin`) for the proxy server's forwarding daemon to sync DNAT rules. The proxy server handles the iptables DNAT from a public IP to the service node address.
-- **`local`** (direct node DNAT): Creates the iptables DNAT rule directly on the service node via `lab-ops natmap`. No proxy-server forwarding sync needed.
-
-When a forwarding entry shares a `port` with an `rproxy` entry, they are **merged**: both the nginx config and the DNAT rule are created for the same port. The nginx config uses the rproxy's `template` and `domains`, while traffic matching the DNAT rule bypasses NGINX.
-
-**Forwarding Config (`services.<name>.forwarding[]`):**
+Each entry in `services.<name>.forwardlocal[]` defines a kernel-level NAT port that creates the iptables DNAT rule directly on the service node via `lab-ops natmap`. No proxy-server forwarding sync needed. ForwardLocal bypasses NGINX entirely — it creates iptables DNAT rules to route traffic directly from an external IP to the service, eliminating proxy latency for game servers, mail servers, etc.
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `type` | Yes | `local` or `remote` |
 | `port` | Yes | Container/host port to forward |
 | `proto` | No | Protocol for the iptables DNAT rule. Defaults to `tcp` |
 | `bind_ip` | No | Override for the natmap bind IP on this forwarding entry. Cascades from service-level `bind_ip` |
 | `bind_interface` | No | Override for the interface on this forwarding entry. Cascades from service-level `bind_interface` |
-| `bind_port` | No | Static host port for `type: local`. When set, uses this port directly (no ephemeral allocation). When absent, allocates from the ephemeral pool |
-| `ext_ip` | Yes (remote) | Public IP on the proxy server to forward FROM. Only used for `type: remote` |
-| `ext_ports` | Yes (remote) | Static port(s) on the public IP (not auto-allocated from ephemeral range). First port (`ext_ports[0]`) is used as the natmap host port. Only used for `type: remote` |
-| `hairpin` | No | Create hairpin NAT rules (internal hosts can reach themselves via external IP). Defaults to `false`. Only used for `type: remote` |
+| `bind_port` | No | Static host port. When set, uses this port directly (no ephemeral allocation). When absent, allocates from the ephemeral pool |
+
+**ForwardRemote Config (`services.<name>.forwardremote[]`):**
+
+Each entry in `services.<name>.forwardremote[]` defines a kernel-level NAT port that registers Consul metadata (`forwarding=true`, `ext_ip`, `ext_ports`, `hairpin`) for the proxy server's forwarding daemon to sync DNAT rules. The proxy server handles the iptables DNAT from a public IP to the service node address. ForwardRemote bypasses NGINX entirely — it creates iptables DNAT rules to route traffic directly from an external IP to the service, eliminating proxy latency for game servers, mail servers, etc.
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `port` | Yes | Container/host port to forward |
+| `proto` | No | Protocol for the iptables DNAT rule. Defaults to `tcp` |
+| `ext_ip` | Yes | Public IP on the proxy server to forward FROM |
+| `ext_ports` | Yes | Static port(s) on the public IP (not auto-allocated from ephemeral range). First port (`ext_ports[0]`) is used as the Consul registration port. No local natmap mapping or port check occurs on the service node |
+| `hairpin` | No | Create hairpin NAT rules (internal hosts can reach themselves via external IP). Defaults to `false` |
 | `proxy_on` | No | Only apply DNAT rules on this specific proxy server node name |
 
 **Examples:**
 
-ForwardingRemote (proxy-server DNAT) with merged rproxy:
+ForwardRemote (proxy-server DNAT):
 ```yaml
 services:
   example-mc:
     type: docker
     match:
       project: example-mc
-    rproxy:
+    forwardremote:
       - port: 25565
-        template: TCP_PROXY
-    forwarding:
-      - type: remote
-        port: 25565
         ext_ip: 203.0.113.43
         ext_ports: [25565]
         proto: tcp
         hairpin: true
 ```
 
-ForwardingLocal (direct node DNAT):
+ForwardLocal (direct node DNAT):
 ```yaml
 services:
   example-mc:
     type: docker
     match:
       project: example-mc
-    forwarding:
-      - type: local
-        port: 25565
+    forwardlocal:
+      - port: 25565
         bind_port: 36000
 ```
 
-**How it works (ForwardingRemote):**
+**How it works (ForwardRemote):**
 
-1. **Service server**: The daemon uses `ext_ports[0]` as a static host port (skips ephemeral port allocation from the pool). The port is NOT persisted to `ports.json`. Port-is-free check still applies.
-2. **Service server**: Registers in Consul with forwarding meta (`forwarding=true`, `type=remote`, `ext_ip`, `ext_ports`, `hairpin`)
+1. **Service server**: The daemon uses `ext_ports[0]` as the Consul registration host port value. No local natmap mapping is created — the DNAT rule lives entirely on the proxy server. The port is NOT persisted to `ports.json`. No `port_is_free` check is performed on the service node.
+2. **Service server**: Registers in Consul with forwarding meta (`forwarding=true`, `forwarding_type=remote`, `ext_ip`, `ext_ports`, `hairpin`)
 3. **Proxy server**: Runs `lab-ops auto-discover daemon --no-discovery --no-nginx` (or one-shot `forwarding-sync`), which:
    - Queries Consul **catalog** API (`GET /v1/catalog/services` → `GET /v1/health/service/:name?passing=true`) across all agents — NOT the local agent API. Forwarding services are registered on service VMs' agents, not the proxy's agent
    - Filters services with `Meta.forwarding=="true"`
    - Groups by `(ext_ip, address, protocol)`
+   - Removes stale DNAT rules (any existing rules with no matching Consul entry)
    - Applies DNAT rules via `IptablesManager`
-   - Optionally applies hairpin rules for hairpin-enabled groups
+   - Optionally applies hairpin rules for hairpin-enabled groups (**non-fatal**: if hairpin fails, the forwarding sync continues and logs a warning)
    - Handles deregistration of stale DNAT rules
 
-**How it works (ForwardingLocal):**
+> **Note**: The forwarding daemon's `remove_dnat` and `remove_hairpin` loop `iptables -D` until all copies of a rule are removed. This prevents duplicate rules from accumulating if multiple sync cycles run before a group's hairpin succeeds.
+
+**How it works (ForwardLocal):**
 
 1. **Service node**: The daemon uses `bind_port` as a static host port (or allocates from ephemeral pool if unset). Always calls natmap to create the DNAT rule on the service node.
 2. **Service node**: Registers in Consul with `forwarding=true`, `forwarding_type=local`. No `ext_ip`, `ext_ports`, or `hairpin` metadata.
-3. **No proxy-server DNAT sync**: ForwardingLocal does NOT participate in the proxy-server forwarding daemon. DNAT is local to the service node.
+3. **No proxy-server DNAT sync**: ForwardLocal does NOT participate in the proxy-server forwarding daemon. DNAT is local to the service node.
 
 ### Proxy Server NGINX Config Generation
 
@@ -401,7 +411,7 @@ RestartSec=10
 
 When forwarding is configured, additional meta fields are present:
 
-**ForwardingRemote** (proxy-server DNAT):
+**ForwardRemote** (proxy-server DNAT):
 ```json
 {
   "Meta": {
@@ -414,24 +424,12 @@ When forwarding is configured, additional meta fields are present:
 }
 ```
 
-**ForwardingLocal** (service-node DNAT):
+**ForwardLocal** (service-node DNAT):
 ```json
 {
   "Meta": {
     "forwarding": "true",
     "forwarding_type": "local"
-  }
-}
-```
-
-When a ForwardingLocal is merged with an RProxy entry (via matching `port`), a `template` field is also present:
-
-```json
-{
-  "Meta": {
-    "forwarding": "true",
-    "forwarding_type": "local",
-    "template": "HTTP_PROXY"
   }
 }
 ```
@@ -446,6 +444,7 @@ When a ForwardingLocal is merged with an RProxy entry (via matching `port`), a `
 - `Meta.template`: Template file name on the proxy server
 - `Meta.protocol`: `tcp` or `udp`
 - `Meta.proxy_ip`: Proxy server IP (used by generator script `listen` directive)
+- `Meta.proxy_on`: Target proxy server node name for nginx config generation (RProxyRemote only)
 - `Meta.generation_id`: Deterministic config version for stale service cleanup (`{node_name}-{sha256_of_config[:16]}`)
 - `Meta.container_id`: Docker container ID for per-container deregistration
 - `Meta.*`: Any `extra` fields from `discovery.yaml` are passed through as-is
@@ -454,10 +453,9 @@ When a ForwardingLocal is merged with an RProxy entry (via matching `port`), a `
 
 - `Meta.forwarding`: `"true"` — marker for proxy server to discover forwarding services
 - `Meta.forwarding_type`: `"remote"` or `"local"` — distinguishes proxy-server DNAT from service-node DNAT
-- `Meta.ext_ip`: Public IP on the proxy server for DNAT (ForwardingRemote only)
-- `Meta.ext_ports`: Comma-separated static ports (e.g., `"25565,19132"`) (ForwardingRemote only)
-- `Meta.hairpin`: `"true"` if hairpin NAT is requested (ForwardingRemote only)
-- `Meta.template`: Present when ForwardingLocal is merged with an RProxy entry sharing the same port
+- `Meta.ext_ip`: Public IP on the proxy server for DNAT (ForwardRemote only)
+- `Meta.ext_ports`: Comma-separated static ports (e.g., `"25565,19132"`) (ForwardRemote only)
+- `Meta.hairpin`: `"true"` if hairpin NAT is requested (ForwardRemote only)
 
 ### UDP Checks
 
@@ -495,14 +493,15 @@ For `sync()`, containers are matched via the match config criteria. Docker event
 
 ### Operations
 
-1. **On startup**: Parse `/etc/auto-discover/discovery.yaml`. Sync all running Docker containers matching configured services via the two-level filter above. The initial sync retries up to 10 times with exponential backoff (2s → 30s) in case `natmap.service` socket is not yet ready — this prevents the race condition where `lab-ops auto-discover` starts before natmap creates `/run/natmap.sock`.
+1. **On startup**: Parse `/etc/auto-discover/discovery.yaml`. Sync all running Docker containers matching configured services via the two-level filter above. The initial sync retries up to 10 times with exponential backoff (2s → 30s) in case `natmap.service` socket is not yet ready — this prevents the race condition where `lab-ops auto-discover` starts before natmap creates `/run/natmap.sock`. Partial failures (one service failing) do not abort the sync — errors are logged and the remaining services are processed.
 
 2. **On Docker event (start)**:
    - Match container to all services in `discovery.yaml` where `services.<name>.match.project == compose_project`
    - Determine bind IP via the resolution chain (service bind_ip → bind_interface → defaults → container IP)
-   - **Forwarding service**: Use `ext_ports[0]` (remote) or `bind_port` (local) as a static port (verify with `port_is_free`). Skip ephemeral allocation and `ports.json` persistence
-   - **Non-forwarding service**: Allocate a persistent free host port from the ephemeral range (32768-60999)
-   - Run `lab-ops natmap docker add <container_id> [bind_ip:]<host_port>:<container_port>/<protocol>`
+   - **ForwardRemote**: Use `ext_ports[0]` as the Consul registration port. No local natmap mapping or port check is performed.
+   - **ForwardLocal (with `bind_port`)**: Use the static `bind_port` directly. Call natmap to create the local DNAT rule.
+   - **ForwardLocal (no `bind_port`)**: Allocate an ephemeral port from the pool. Call natmap to create the local DNAT rule.
+   - **Non-forwarding service**: Allocate a persistent free host port from the ephemeral range (32768-60999). Call natmap to create the Docker mapping.
    - Register the service to Consul with all metadata (including forwarding meta when applicable)
 
 3. **On Docker event (die)**:
@@ -565,7 +564,7 @@ lab-ops auto-discover --version
 
 Ports are allocated from the range 32768-60999 and persisted to `/var/lib/auto-discover/ports.json`. The port mapping is managed by `lab-ops natmap docker add/rm` which handles the iptables rules.
 
-**Forwarding services** use static ports from `ext_ports[0]` instead of ephemeral allocation. These ports are NOT persisted to `ports.json` (they're static, not from the pool). The `port_is_free` check still verifies no other process holds the port before assigning it.
+**ForwardRemote services** use static ports from `ext_ports[0]` instead of ephemeral allocation. These ports are NOT persisted to `ports.json` (they're static, not from the pool). The `port_is_free` check still verifies no other process holds the port before assigning it.
 
 ## Generation Tracking
 

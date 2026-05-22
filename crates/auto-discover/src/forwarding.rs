@@ -93,7 +93,7 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
                 .await
                 .ok();
 
-            natmap
+            if let Err(e) = natmap
                 .hairpin(
                     &group.ext_ip,
                     &group.int_ip,
@@ -102,9 +102,14 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
                     false,
                 )
                 .await
-                .wrap_err_with(|| {
-                    format!("hairpin for {} -> {} failed", group.ext_ip, group.int_ip)
-                })?;
+            {
+                tracing::warn!(
+                    "hairpin for {} -> {} failed (non-fatal): {}",
+                    group.ext_ip,
+                    group.int_ip,
+                    e
+                );
+            }
         }
 
         tracing::info!(

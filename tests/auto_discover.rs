@@ -190,6 +190,39 @@ sleep 1
     }
 
     #[test]
+    fn forwarding_sync_no_duplicate_rules() {
+        let script = r#"
+set -e
+NATMAP_SOCKET=/tmp/natmap.sock
+CONSUL_HTTP_ADDR=http://127.0.0.1:8500
+
+consul agent -dev -http-port=8500 >/tmp/consul.log 2>&1 &
+sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: consul died"; cat /tmp/consul.log; exit 1; }
+
+rm -f /tmp/natmap_state.json
+lab-ops natmap daemon --socket $NATMAP_SOCKET --state /tmp/natmap_state.json --socket-group root >/tmp/natmap.log 2>&1 &
+sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: natmap died"; cat /tmp/natmap.log; exit 1; }
+
+curl -sf -X PUT "$CONSUL_HTTP_ADDR/v1/agent/service/register" \
+    -d '{ "ID": "fwd-dup-svc", "Name": "fwd-dup", "Address": "10.0.0.99", "Port": 36003, "Meta": { "forwarding": "true", "ext_ip": "203.0.113.51", "ext_ports": "36003" } }'
+
+# Run forwarding-sync 3 times — should produce only 1 DNAT rule
+lab-ops auto-discover forwarding-sync $CONSUL_HTTP_ADDR >/tmp/fwd1.log 2>&1 || true
+lab-ops auto-discover forwarding-sync $CONSUL_HTTP_ADDR >/tmp/fwd2.log 2>&1 || true
+lab-ops auto-discover forwarding-sync $CONSUL_HTTP_ADDR >/tmp/fwd3.log 2>&1 || true
+
+COUNT=$(iptables-save -t nat | grep -c "203.0.113.51.*10.0.0.99" || true)
+if [ "$COUNT" -ne 1 ]; then echo "FAIL: expected 1 DNAT rule, got $COUNT" >&2; exit 1; fi
+
+echo "PASS: no duplicate DNAT rules after multiple syncs"
+kill %1 %2 2>/dev/null || true
+sleep 1
+"#.to_string();
+        let out = run(&script);
+        assert_pass(&out, "forwarding_sync_no_duplicate_rules");
+    }
+
+    #[test]
     fn forwarding_sync_removes_stale_rules() {
         let script = r#"
 set -e
@@ -212,10 +245,8 @@ curl -sf -X PUT "$CONSUL_HTTP_ADDR/v1/agent/service/deregister/fwd-stale-svc" >/
 
 lab-ops auto-discover forwarding-sync $CONSUL_HTTP_ADDR >/tmp/fwd2.log 2>&1 || true
 
-if iptables-save -t nat | grep -q "203.0.113.50"; then
-    echo "FAIL: stale DNAT rules not removed" >&2
-    exit 1
-fi
+COUNT=$(iptables-save -t nat | grep -c "203.0.113.50.*10.0.0.99" || true)
+if [ "$COUNT" -ne 0 ]; then echo "FAIL: expected 0 stale DNAT rules, got $COUNT" >&2; exit 1; fi
 
 echo "PASS: stale DNAT rules removed"
 kill %1 %2 2>/dev/null || true
@@ -501,9 +532,8 @@ services:
     type: docker
     match:
       project: it-svc-fwd-local
-    forwarding:
-      - type: local
-        port: 80
+    forwardlocal:
+      - port: 80
         bind_port: 36000
 "#;
 
@@ -548,14 +578,13 @@ services:
     type: docker
     match:
       project: it-svc-fwd-local-tpl
-    rproxy:
+    rproxylocal:
       - port: 80
         template: HTTP_PROXY
         domains:
           - fwd-local-tpl.test.local
-    forwarding:
-      - type: local
-        port: 80
+    forwardlocal:
+      - port: 80
         bind_port: 36001
 "#;
 
@@ -565,29 +594,44 @@ docker rm -f {cname} 2>/dev/null || true
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-fwd-local-tpl" nginx:alpine
 sleep 4
 
+# Expect 2 Consul entries: 1 forwardlocal + 1 rproxylocal (no merging)
 COUNT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq '[to_entries[] | select(.value.Service == "it-svc-fwd-local-tpl")] | length')
-if [ "$COUNT" != "1" ]; then echo "FAIL: expected 1 Consul entry, got $COUNT" >&2; exit 1; fi
+if [ "$COUNT" != "2" ]; then echo "FAIL: expected 2 Consul entries, got $COUNT" >&2; exit 1; fi
 
-SVC=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq 'to_entries[] | select(.value.Service == "it-svc-fwd-local-tpl") | .value')
-PORT=$(echo "$SVC" | jq -r '.Port')
-if [ "$PORT" != "36001" ]; then echo "FAIL: expected static port 36001, got $PORT" >&2; exit 1; fi
+# Find the forwardlocal entry (static port 36001)
+FWD_SVC=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq 'to_entries[] | select(.value.Service == "it-svc-fwd-local-tpl" and .value.Port == 36001) | .value')
+if [ -z "$FWD_SVC" ]; then echo "FAIL: forwardlocal entry at port 36001 not found" >&2; exit 1; fi
 
-META=$(echo "$SVC" | jq '.Meta')
-FORWARDING=$(echo "$META" | jq -r '.forwarding')
-if [ "$FORWARDING" != "true" ]; then echo "FAIL: missing forwarding meta" >&2; exit 1; fi
+FWD_META=$(echo "$FWD_SVC" | jq '.Meta')
+FWD_FORWARDING=$(echo "$FWD_META" | jq -r '.forwarding')
+if [ "$FWD_FORWARDING" != "true" ]; then echo "FAIL: missing forwarding meta" >&2; exit 1; fi
 
-FWD_TYPE=$(echo "$META" | jq -r '.forwarding_type')
+FWD_TYPE=$(echo "$FWD_META" | jq -r '.forwarding_type')
 if [ "$FWD_TYPE" != "local" ]; then echo "FAIL: expected forwarding_type=local, got $FWD_TYPE" >&2; exit 1; fi
 
-TEMPLATE=$(echo "$META" | jq -r '.template')
-if [ "$TEMPLATE" != "HTTP_PROXY" ]; then echo "FAIL: expected template=HTTP_PROXY, got $TEMPLATE" >&2; exit 1; fi
+# ForwardLocal should NOT have a template
+FWD_TEMPLATE=$(echo "$FWD_META" | jq -r '.template // "empty"')
+if [ "$FWD_TEMPLATE" != "empty" ]; then echo "FAIL: forwardlocal should not have template, got $FWD_TEMPLATE" >&2; exit 1; fi
 
-# Verify nginx KV config exists (non-empty template)
+# Find the rproxylocal entry (ephemeral port)
+RPROXY_SVC=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq 'to_entries[] | select(.value.Service == "it-svc-fwd-local-tpl" and .value.Port != 36001) | .value')
+if [ -z "$RPROXY_SVC" ]; then echo "FAIL: rproxylocal entry not found" >&2; exit 1; fi
+
+RPROXY_META=$(echo "$RPROXY_SVC" | jq '.Meta')
+RPROXY_TEMPLATE=$(echo "$RPROXY_META" | jq -r '.template')
+if [ "$RPROXY_TEMPLATE" != "HTTP_PROXY" ]; then echo "FAIL: expected template=HTTP_PROXY for rproxy, got $RPROXY_TEMPLATE" >&2; exit 1; fi
+
+# RProxy should NOT have forwarding meta
+RPROXY_FWD=$(echo "$RPROXY_META" | jq -r '.forwarding // "empty"')
+if [ "$RPROXY_FWD" != "empty" ]; then echo "FAIL: rproxylocal should not have forwarding meta" >&2; exit 1; fi
+
+# Verify nginx KV config exists (from rproxylocal, not forwardlocal)
+# KV keys use domain slug "fwd-local-tpl-test-local" in the service ID
 KEYS=$(curl -sf "$CONSUL_HTTP_ADDR/v1/kv/nginx-configs/?recurse=true" | jq -r '.[].Key // empty')
-MATCH=$(echo "$KEYS" | grep "it-svc-fwd-local-tpl" || true)
-if [ -z "$MATCH" ]; then echo "FAIL: forwarding-local with template should have nginx KV config" >&2; exit 1; fi
+MATCH=$(echo "$KEYS" | grep "fwd-local-tpl-test-local" || true)
+if [ -z "$MATCH" ]; then echo "FAIL: rproxylocal should have nginx KV config" >&2; exit 1; fi
 
-echo "PASS: forwarding local with template merged, port=$PORT forwarding=$FORWARDING template=$TEMPLATE"
+echo "PASS: forwardlocal + rproxylocal separate entries"
 {teardown}
 "#,
             setup = new_format_setup_ext(services_yaml, "", "--no-forwarding"),
@@ -606,9 +650,8 @@ services:
   it-local-fwd-local:
     type: local
     address: 10.99.99.99
-    forwarding:
-      - type: local
-        port: 5000
+    forwardlocal:
+      - port: 5000
         bind_port: 50000
 "#;
 
@@ -653,9 +696,8 @@ services:
     type: docker
     match:
       project: it-svc-fwd-local-nb
-    forwarding:
-      - type: local
-        port: 80
+    forwardlocal:
+      - port: 80
 "#;
 
         let script = format!(
@@ -699,7 +741,7 @@ services:
     match:
       project: it-svc-b
     bind_ip: 10.99.99.1
-    rproxy:
+    rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains:
@@ -742,7 +784,7 @@ services:
     match:
       project: it-svc-c
     bind_interface: dummy0
-    rproxy:
+    rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains:
@@ -784,9 +826,8 @@ services:
     type: docker
     match:
       project: it-svc-d
-    forwarding:
-    - type: remote
-      port: 80
+    forwardremote:
+    - port: 80
       ext_ip: 203.0.113.43
       ext_ports:
       - 36000
@@ -833,9 +874,8 @@ services:
     type: docker
     match:
       project: it-svc-e
-    forwarding:
-    - type: remote
-      port: 80
+    forwardremote:
+    - port: 80
       ext_ip: 203.0.113.43
       ext_ports:
       - 36001
@@ -877,7 +917,7 @@ services:
     type: docker
     match:
       project: it-svc-f
-    rproxy:
+    rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains:
@@ -928,9 +968,8 @@ services:
     type: docker
     match:
       project: it-svc-h
-    forwarding:
-    - type: remote
-      port: 80
+    forwardremote:
+    - port: 80
       ext_ip: 203.0.113.43
       ext_ports:
       - 36000
@@ -971,7 +1010,7 @@ services:
     type: docker
     match:
       project: it-svc-i
-    rproxy:
+    rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains:
@@ -1029,7 +1068,7 @@ services:
     type: docker
     match:
       project: it-svc-hostnet
-    rproxy:
+    rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains:
@@ -1062,7 +1101,7 @@ services:
     type: docker
     match:
       project: it-svc-noexp
-    rproxy:
+    rproxylocal:
     - port: 9999
       template: HTTP_PROXY
       domains:
@@ -1100,7 +1139,7 @@ services:
     type: docker
     match:
       project: it-svc-stream
-    rproxy:
+    rproxylocal:
     - port: 80
       template: TCP_PROXY
       domains:
@@ -1147,7 +1186,7 @@ services:
     type: docker
     match:
       project: it-svc-extra
-    rproxy:
+    rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains:
@@ -1192,7 +1231,7 @@ services:
     type: docker
     match:
       project: it-svc-slug
-    rproxy:
+    rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains:
@@ -1230,7 +1269,7 @@ services:
     type: docker
     match:
       project: it-svc-nodomain
-    rproxy:
+    rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains: []"#;
@@ -1267,7 +1306,7 @@ services:
     type: docker
     match:
       project: it-svc-cidmeta
-    rproxy:
+    rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains:
@@ -1309,7 +1348,7 @@ services:
     type: docker
     match:
       project: it-svc-reuse
-    rproxy:
+    rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains:
@@ -1386,7 +1425,7 @@ services:
     type: docker
     match:
       project: it-svc-pp
-    rproxy:
+    rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains:
@@ -1423,7 +1462,7 @@ services:
     type: docker
     match:
       project: it-svc-post
-    rproxy:
+    rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains:
@@ -1466,7 +1505,7 @@ services:
     type: docker
     match:
       project: it-svc-md
-    rproxy:
+    rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains:
@@ -1505,7 +1544,7 @@ services:
     type: docker
     match:
       project: it-svc-genfail
-    rproxy:
+    rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains:
@@ -1542,7 +1581,7 @@ services:
     type: docker
     match:
       project: it-svc-mismatch
-    rproxy:
+    rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains:
@@ -1575,7 +1614,7 @@ services:
     type: docker
     match:
       project: it-svc-die
-    rproxy:
+    rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains:
@@ -1613,7 +1652,7 @@ services:
   it-local-app:
     type: local
     address: 10.99.99.99
-    rproxy:
+    rproxylocal:
     - port: 3000
       template: HTTP_PROXY
       domains:
@@ -1659,9 +1698,8 @@ services:
   it-local-fwd:
     type: local
     address: 10.99.99.99
-    forwarding:
-    - type: remote
-      port: 4000
+    forwardremote:
+    - port: 4000
       ext_ip: 203.0.113.43
       ext_ports:
       - 40000
@@ -1713,7 +1751,7 @@ services:
     type: docker
     match:
       project: it-svc-reach
-    rproxy:
+    rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains:
@@ -1765,14 +1803,13 @@ services:
     type: docker
     match:
       project: it-svc-combo
-    rproxy:
+    rproxylocal:
       - port: 80
         template: HTTP_PROXY
         domains:
           - combo.test.local
-    forwarding:
-      - type: remote
-        port: 80
+    forwardremote:
+      - port: 80
         ext_ip: 203.0.113.43
         ext_ports:
           - 36000
@@ -1783,30 +1820,42 @@ services:
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-combo" nginx:alpine
 sleep 4
 
-# Should be exactly 1 Consul entry (rproxy + forwarding merged into one)
+# Expect 2 Consul entries: 1 forwardremote + 1 rproxylocal (no merging)
 COUNT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq '[to_entries[] | select(.value.Service == "it-svc-combo")] | length')
-if [ "$COUNT" != "1" ]; then echo "FAIL: expected 1 Consul entry, got $COUNT" >&2; curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq '[to_entries[] | select(.value.Service == "it-svc-combo") | .key, .value.Port, .value.Meta.forwarding // "n/a"]' >&2; exit 1; fi
+if [ "$COUNT" != "2" ]; then echo "FAIL: expected 2 Consul entries, got $COUNT" >&2; curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq '[to_entries[] | select(.value.Service == "it-svc-combo") | .key, .value.Port, .value.Meta.forwarding // "n/a"]' >&2; exit 1; fi
 
-# The entry should have BOTH forwarding meta AND template meta
-SVC_META=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq 'to_entries[] | select(.value.Service == "it-svc-combo") | .value.Meta')
+# Find the forwardremote entry (static port 36000)
+FWD_SVC=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq 'to_entries[] | select(.value.Service == "it-svc-combo" and .value.Port == 36000) | .value')
+if [ -z "$FWD_SVC" ]; then echo "FAIL: forwardremote entry at port 36000 not found" >&2; exit 1; fi
 
-FORWARDING=$(echo "$SVC_META" | jq -r '.forwarding')
+FWD_META=$(echo "$FWD_SVC" | jq '.Meta')
+FORWARDING=$(echo "$FWD_META" | jq -r '.forwarding')
 if [ "$FORWARDING" != "true" ]; then echo "FAIL: missing forwarding meta" >&2; exit 1; fi
 
-EXT_IP=$(echo "$SVC_META" | jq -r '.ext_ip')
+EXT_IP=$(echo "$FWD_META" | jq -r '.ext_ip')
 if [ "$EXT_IP" != "203.0.113.43" ]; then echo "FAIL: missing ext_ip meta" >&2; exit 1; fi
 
-TEMPLATE=$(echo "$SVC_META" | jq -r '.template')
-if [ "$TEMPLATE" != "HTTP_PROXY" ]; then echo "FAIL: expected template HTTP_PROXY, got $TEMPLATE" >&2; exit 1; fi
+# ForwardRemote should NOT have a template
+TEMPLATE=$(echo "$FWD_META" | jq -r '.template // "empty"')
+if [ "$TEMPLATE" != "empty" ]; then echo "FAIL: forwardremote should not have template, got $TEMPLATE" >&2; exit 1; fi
+
+# Find the rproxylocal entry (ephemeral port)
+RPROXY_SVC=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq 'to_entries[] | select(.value.Service == "it-svc-combo" and .value.Port != 36000) | .value')
+if [ -z "$RPROXY_SVC" ]; then echo "FAIL: rproxylocal entry not found" >&2; exit 1; fi
+
+RPROXY_META=$(echo "$RPROXY_SVC" | jq '.Meta')
+RPROXY_TEMPLATE=$(echo "$RPROXY_META" | jq -r '.template')
+if [ "$RPROXY_TEMPLATE" != "HTTP_PROXY" ]; then echo "FAIL: expected template HTTP_PROXY for rproxy, got $RPROXY_TEMPLATE" >&2; exit 1; fi
 
 PORT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-combo") | .value.Port')
-echo "PASS: merged rproxy+forwarding entry at port $PORT with template=$TEMPLATE forwarding=$FORWARDING"
+echo "PASS: forwardremote + rproxylocal separate entries"
 {teardown}
 "#,
             setup = new_format_setup(services_yaml, ""),
             teardown = test_teardown(&[cname]),
             cname = cname,
         );
+
         let out = run(&script);
         assert_pass(&out, "docker_rproxy_and_forwarding");
     }
@@ -1822,7 +1871,7 @@ services:
     type: docker
     match:
       project: it-svc-restart
-    rproxy:
+    rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains:
@@ -1914,7 +1963,7 @@ services:
     type: docker
     match:
       project: it-svc-nmrestart
-    rproxy:
+    rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains:
@@ -2047,7 +2096,7 @@ services:
     type: docker
     match:
       project: it-svc-cfg-a
-    rproxy:
+    rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains:
@@ -2076,7 +2125,7 @@ services:
     type: docker
     match:
       project: it-svc-cfg-a
-    rproxy:
+    rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains:
@@ -2085,7 +2134,7 @@ services:
     type: docker
     match:
       project: it-svc-cfg-b
-    rproxy:
+    rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains:
@@ -2139,7 +2188,7 @@ services:
     type: docker
     match:
       project: it-svc-cfg-rm
-    rproxy:
+    rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains:
@@ -2213,7 +2262,7 @@ services:
     match:
       project: it-cfg-ip-svc
     bind_ip: 127.0.0.1
-    rproxy:
+    rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains:
@@ -2243,7 +2292,7 @@ services:
     match:
       project: it-cfg-ip-svc
     bind_ip: 10.99.99.1
-    rproxy:
+    rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains:
@@ -2297,7 +2346,7 @@ services:
     type: docker
     match:
       project: it-cfg-all-svc
-    rproxy:
+    rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains:
@@ -2361,7 +2410,7 @@ services:
     type: docker
     match:
       project: it-cfg-gen-svc
-    rproxy:
+    rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains:
@@ -2406,7 +2455,7 @@ sleep 1
         for i in 0..5 {
             let project = format!("it-edge-con-{i}");
             yaml_services.push_str(&format!(
-                "  {project}:\n    type: docker\n    match:\n      project: {project}\n    rproxy:\n      - port: 80\n        template: HTTP_PROXY\n        domains:\n          - {project}.test.local\n"
+                "  {project}:\n    type: docker\n    match:\n      project: {project}\n    rproxylocal:\n      - port: 80\n        template: HTTP_PROXY\n        domains:\n          - {project}.test.local\n"
             ));
             cnames.push(project);
         }
@@ -2441,7 +2490,7 @@ sleep 1
         for i in 0..5 {
             let project = format!("it-large-{i}");
             yaml_services.push_str(&format!(
-                "  {project}:\n    type: docker\n    match:\n      project: {project}\n    rproxy:\n      - port: 80\n        template: HTTP_PROXY\n        domains:\n          - {project}.test.local\n"
+                "  {project}:\n    type: docker\n    match:\n      project: {project}\n    rproxylocal:\n      - port: 80\n        template: HTTP_PROXY\n        domains:\n          - {project}.test.local\n"
             ));
             cnames.push(project);
         }

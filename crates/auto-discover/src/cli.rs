@@ -275,8 +275,10 @@ pub fn check_config(config_path: PathBuf) -> Result<()> {
             "docker".into()
         };
         let template = match &svc.port_type {
-            crate::config::ResolvedPortType::RProxy { template, .. } => template.clone(),
-            _ => "forwarding".into(),
+            crate::config::ResolvedPortType::RProxyLocal { template, .. }
+            | crate::config::ResolvedPortType::RProxyRemote { template, .. } => template.clone(),
+            crate::config::ResolvedPortType::ForwardLocal { .. } => "forwardlocal".into(),
+            crate::config::ResolvedPortType::ForwardRemote { .. } => "forwardremote".into(),
         };
         println!(
             "  - {} (port {}, protocol {}, template {}, type {})",

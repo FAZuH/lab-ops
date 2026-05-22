@@ -253,6 +253,8 @@ impl IptablesManager {
     }
 
     /// Removes a static DNAT rule (PREROUTING + FORWARD ACCEPT).
+    ///
+    /// Loops `iptables -D` until all copies of the rule are removed.
     pub fn remove_dnat(&self, config: &DnatConfig) -> Result<()> {
         let multiport = config.ports.contains(',');
         let port_args: Vec<&str> = if multiport {
@@ -274,12 +276,18 @@ impl IptablesManager {
             format!("{}:{}", config.int_ip, config.ports)
         };
         pre_args.extend(vec!["-j", "DNAT", "--to-destination", &dest]);
-        let _ = self.run("iptables", &pre_args);
+        while self
+            .run("iptables", &pre_args)
+            .is_ok_and(|o| o.status.success())
+        {}
 
         let mut fwd_args = vec!["-D", "FORWARD", "-p", proto, "-d", &config.int_ip];
         fwd_args.extend(port_args);
         fwd_args.extend(vec!["-j", "ACCEPT"]);
-        let _ = self.run("iptables", &fwd_args);
+        while self
+            .run("iptables", &fwd_args)
+            .is_ok_and(|o| o.status.success())
+        {}
         Ok(())
     }
 
@@ -368,6 +376,8 @@ impl IptablesManager {
     }
 
     /// Removes a hairpin NAT rule (PREROUTING DNAT + POSTROUTING MASQUERADE).
+    ///
+    /// Loops `iptables -D` until all copies of the rule are removed.
     pub fn remove_hairpin(&self, config: &HairpinConfig) -> Result<()> {
         let multiport = config.ports.contains(',');
         let port_args: Vec<&str> = if multiport {
@@ -391,7 +401,10 @@ impl IptablesManager {
         ];
         pre_args.extend(port_args.clone());
         pre_args.extend(vec!["-j", "DNAT", "--to-destination", &config.int_ip]);
-        let _ = self.run("iptables", &pre_args);
+        while self
+            .run("iptables", &pre_args)
+            .is_ok_and(|o| o.status.success())
+        {}
 
         let mut post_args = vec![
             "-t",
@@ -407,7 +420,10 @@ impl IptablesManager {
         ];
         post_args.extend(port_args);
         post_args.extend(vec!["-j", "MASQUERADE"]);
-        let _ = self.run("iptables", &post_args);
+        while self
+            .run("iptables", &post_args)
+            .is_ok_and(|o| o.status.success())
+        {}
         Ok(())
     }
 

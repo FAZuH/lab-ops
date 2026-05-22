@@ -213,7 +213,7 @@ impl ConsulClient {
 
         for svc_name in catalog.keys() {
             let health_url = format!(
-                "{}/v1/health/service/{}?passing=true",
+                "{}/v1/health/service/{}",
                 self.http_addr,
                 urlencoding(svc_name)
             );
@@ -446,7 +446,10 @@ impl ConsulServiceRegistration {
 
         use crate::config::ResolvedPortType::*;
         match &service.port_type {
-            RProxy {
+            RProxyLocal {
+                template, proxy_ip, ..
+            }
+            | RProxyRemote {
                 template, proxy_ip, ..
             } => {
                 if !template.is_empty() {
@@ -456,18 +459,14 @@ impl ConsulServiceRegistration {
                     meta.insert("proxy_ip".into(), proxy_ip.clone());
                 }
             }
-            ForwardingLocal { template, .. } => {
+            ForwardLocal { .. } => {
                 meta.insert("forwarding".into(), "true".into());
                 meta.insert("forwarding_type".into(), "local".into());
-                if !template.is_empty() {
-                    meta.insert("template".into(), template.clone());
-                }
             }
-            ForwardingRemote {
+            ForwardRemote {
                 ext_ip,
                 ext_ports,
                 hairpin,
-                template,
                 ..
             } => {
                 meta.insert("forwarding".into(), "true".into());
@@ -483,9 +482,6 @@ impl ConsulServiceRegistration {
                 );
                 if *hairpin {
                     meta.insert("hairpin".into(), "true".into());
-                }
-                if !template.is_empty() {
-                    meta.insert("template".into(), template.clone());
                 }
             }
         }
@@ -558,9 +554,10 @@ mod tests {
             bind_interface: None,
             protocol: TransportProtocol::Tcp,
             extra,
-            port_type: ResolvedPortType::RProxy {
+            port_type: ResolvedPortType::RProxyLocal {
                 template: "example-drive.ctmpl".into(),
                 domains: vec!["drive.example.com".into()],
+                proxy_on: None,
                 proxy_ip: Some("203.0.113.43".into()),
                 nginx_generator: "/usr/local/bin/auto-discover-gen-nginx".into(),
                 preprocess: String::new(),
@@ -605,9 +602,10 @@ mod tests {
             bind_interface: None,
             protocol: TransportProtocol::Udp,
             extra: HashMap::new(),
-            port_type: ResolvedPortType::RProxy {
+            port_type: ResolvedPortType::RProxyLocal {
                 template: "dns.ctmpl".into(),
                 domains: vec!["dns.example.com".into()],
+                proxy_on: None,
                 proxy_ip: None,
                 nginx_generator: "/usr/local/bin/auto-discover-gen-nginx".into(),
                 preprocess: String::new(),
@@ -655,16 +653,11 @@ mod tests {
             bind_interface: None,
             protocol: TransportProtocol::Tcp,
             extra: HashMap::new(),
-            port_type: ResolvedPortType::ForwardingRemote {
+            port_type: ResolvedPortType::ForwardRemote {
                 ext_ip: "203.0.113.43".into(),
                 ext_ports: vec![25565],
                 hairpin: true,
-                template: String::new(),
-                domains: Vec::new(),
-                proxy_ip: None,
-                nginx_generator: "/usr/local/bin/auto-discover-gen-nginx".into(),
-                preprocess: String::new(),
-                postprocess: String::new(),
+                proxy_on: None,
             },
         };
 
