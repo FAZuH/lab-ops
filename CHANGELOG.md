@@ -1,3 +1,10 @@
+## 0.1.13 (2026-05-22)
+
+
+### New Features
+
+* Add --version ([cca7d83](https://github.com/FAZuH/lab-ops/commit/cca7d83d07d27e5d7285a0abf82fe5eb5710d375))
+
 ## 0.1.12 (2026-05-21)
 
 
@@ -31,11 +38,4 @@
 ### Natmap
 
 * Add --name to natmap docker add and rm ([8b5c09d](https://github.com/FAZuH/lab-ops/commit/8b5c09d919074796c4df632e05cc37fab9115f7f))
-
-## 0.1.8 (2026-05-20)
-
-
-### Bug Fixes
-
-* Invalid arg on natmap.service ([604b454](https://github.com/FAZuH/lab-ops/commit/604b454366e6411c133e729855f3a2bc635322ba))
 
