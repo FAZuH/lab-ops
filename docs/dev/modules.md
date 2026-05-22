@@ -30,10 +30,25 @@ The canonical `TransportProtocol` enum (`Tcp` / `Udp`) with serde, `Display`, an
 - `connect()` — Connects to the local Docker daemon via `Docker::connect_with_local_defaults()`
 - `trim_container_name(name) -> &str` — Strips the leading `/` from Docker container names
 
-### `port.rs` — Port Utilities
+### `port.rs` — Port Utilities & Management
 
-- `create_freebind_socket(addr) -> io::Result<Socket>` — Creates a `socket2::Socket` with `SO_REUSEADDR` and `IP_FREEBIND`. Extracted from natmap's `PortAllocator`.
+Consolidated from the old `natmap/src/port.rs` and `auto-discover/src/port.rs`. Three layers:
+
+**Low-level socket utilities:**
+- `create_freebind_socket(addr) -> io::Result<Socket>` — Creates a `socket2::Socket` with `SO_REUSEADDR` and `IP_FREEBIND`.
 - `is_port_free(addr: A) -> bool` where `A: ToSocketAddrs` — Checks if a TCP port is free using the robust freebind socket. Generic over any type that can resolve to a socket address.
+
+**`PortAllocator`** — Runtime TCP pre-bind reservation (used by `natmap` daemon):
+- `allocate(addr)` — Bind `addr` via TcpListener with `SO_REUSEADDR` + `IP_FREEBIND`, store listener
+- `deallocate(addr)` — Remove from map, drop Listener (releases port)
+- `is_allocated(addr)` — Check if `addr` has an active reservation; falls back to probing the port
+- `deallocate_all()` — Clear all reservations
+
+**`PortAssignments`** — Persistent ephemeral port allocation (used by `auto-discover`):
+- `get(key) / set(key, port) / remove(key)` — CRUD for port assignments
+- `load(path) / save(path)` — Persist assignments to JSON (for crash recovery)
+- `get_or_allocate(key)` — Look up existing assignment or allocate from ephemeral range
+- `allocate_port(assignments)` — Find first free port in range 32768-61000 using `is_port_free`
 
 ## `crates/natmap/src/`
 
@@ -51,7 +66,6 @@ pub mod docker;
 pub mod install;
 pub mod iptables;
 pub mod models;
-pub mod port;
 pub mod utils;
 ```
 
@@ -131,22 +145,7 @@ Stateless manager for iptables operations. Key methods:
 | `install_hairpin()` / `remove_hairpin()` | Static hairpin rules |
 | `flush_container_rules()` | Remove all rules for a container |
 
-### `port.rs` — PortAllocator
-
-Manages socket-based port reservation. Uses [`lab_lib::port::create_freebind_socket`] for the underlying socket setup:
-
-```rust
-pub struct PortAllocator {
-    sockets: RwLock<HashMap<Vec<SocketAddr, TcpListener>>,
-}
-```
-
-| Method | Purpose |
-|--------|---------|
-| `allocate(addr)` | Bind `addr` via TcpListener with SO_REUSEADDR + IP_FREEBIND, store listener |
-| `deallocate(addr)` | Remove from map, drop Listener (releases port) |
-| `is_allocated(addr)` | Check if a addr has an active reservation; falls back to probing the port |
-| `deallocate_all()` | Clear all reservations |
+<!-- PortAllocator moved to lab_lib::port; see port.rs section in lab-lib crate above -->
 
 ### `docker.rs` — Docker Client
 
@@ -184,7 +183,6 @@ mod forwarding;
 mod model;
 mod natmap;
 mod nginx_daemon;
-mod port;
 ```
 
 ### `cli.rs` — CLI Definitions
@@ -252,13 +250,7 @@ Proxy-side nginx config management:
 - `run_loop()` — Blocking-query watch loop
 - `gc_orphaned_kv_entries()` — GC sweep that finds and deletes KV entries whose service IDs no longer exist in the Consul catalog
 
-### `port.rs` — PortAssignments
-
-Manages ephemeral port allocation (32768-61000) with JSON persistence:
-- `get()` / `set()` / `remove()` — CRUD for port assignments
-- `load()` / `save()` — Persist assignments to JSON
-- `allocate_port()` — Find first free port using [`lab_lib::port::is_port_free`] for the availability check
-- `port_is_free()` — Thin wrapper around [`lab_lib::port::is_port_free`]
+<!-- PortAssignments moved to lab_lib::port; see port.rs section in lab-lib crate above -->
 
 ## `src/` (Root Crate)
 

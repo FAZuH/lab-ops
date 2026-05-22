@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use color_eyre::Result;
 use color_eyre::eyre::WrapErr;
 use color_eyre::eyre::bail;
+use lab_lib::port::PortAssignments;
 use sha2::Digest;
 use sha2::Sha256;
 
@@ -17,9 +18,6 @@ use crate::consul::compute_generation_id;
 use crate::docker::DockerClient;
 use crate::model::ContainerInfo;
 use crate::natmap::NatmapClient;
-use crate::port::PortAssignments;
-use crate::port::allocate_port;
-use crate::port::port_is_free;
 
 pub struct DiscoveryDaemon {
     config_path: PathBuf,
@@ -149,7 +147,7 @@ impl DiscoveryDaemon {
         let (host_port, skip_natmap) = match &resolved.port_type {
             ResolvedPortType::ForwardingRemote { ext_ports, .. } => {
                 let p = ext_ports[0];
-                if !port_is_free("0.0.0.0", p) {
+                if !lab_lib::port::is_port_free(format!("0.0.0.0:{p}")) {
                     tracing::warn!("Port {} already in use (host-published, skipping)", p);
                     (p, true)
                 } else {
@@ -160,22 +158,13 @@ impl DiscoveryDaemon {
                 bind_port: Some(bp),
                 ..
             } => (*bp, false),
-            _ => {
-                if let Some(p) = port_assignments.get(&port_key) {
-                    (p, false)
-                } else {
-                    match allocate_port(port_assignments) {
-                        Some(p) => {
-                            port_assignments.set(port_key.clone(), p);
-                            (p, false)
-                        }
-                        None => {
-                            tracing::warn!("No free ports for {}", resolved.service_id_prefix);
-                            return Ok(None);
-                        }
-                    }
+            _ => match port_assignments.get_or_allocate(&port_key) {
+                Some(p) => (p, false),
+                None => {
+                    tracing::warn!("No free ports for {}", resolved.service_id_prefix);
+                    return Ok(None);
                 }
-            }
+            },
         };
 
         if !skip_natmap {
@@ -234,22 +223,13 @@ impl DiscoveryDaemon {
             } => (*bp, false),
             ResolvedPortType::ForwardingLocal {
                 bind_port: None, ..
-            } => {
-                if let Some(p) = port_assignments.get(&port_key) {
-                    (p, false)
-                } else {
-                    match allocate_port(port_assignments) {
-                        Some(p) => {
-                            port_assignments.set(port_key.clone(), p);
-                            (p, false)
-                        }
-                        None => {
-                            tracing::warn!("No free ports for {}", resolved.service_id_prefix);
-                            return Ok(None);
-                        }
-                    }
+            } => match port_assignments.get_or_allocate(&port_key) {
+                Some(p) => (p, false),
+                None => {
+                    tracing::warn!("No free ports for {}", resolved.service_id_prefix);
+                    return Ok(None);
                 }
-            }
+            },
             ResolvedPortType::RProxy { .. } => {
                 // Local services bypass NAT for reverse proxy. NGINX proxies directly.
                 (resolved.container_port, true)

@@ -22,5 +22,4 @@ pub mod docker;
 pub mod install;
 pub mod iptables;
 pub mod models;
-pub mod port;
 pub mod utils;

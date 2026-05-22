@@ -1083,7 +1083,11 @@ dependencies = [
  "bollard",
  "color-eyre",
  "serde",
+ "serde_json",
  "socket2",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1240,7 +1244,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "socket2",
  "tokio",
  "tokio-stream",
  "tower",

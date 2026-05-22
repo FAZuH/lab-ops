@@ -8,6 +8,7 @@ use axum::extract::Path;
 use axum::extract::State;
 use axum::http::StatusCode;
 use color_eyre::Result;
+use lab_lib::port::PortAllocator;
 
 use crate::daemon::AppState;
 use crate::daemon::ErrorResponse;
@@ -23,7 +24,6 @@ use crate::models::ListResponse;
 use crate::models::SnatConfig;
 use crate::models::SnatRequest;
 use crate::models::TransportProtocol;
-use crate::port::PortAllocator;
 
 /// `GET /mappings` — Returns all managed DNAT, SNAT, hairpin, and Docker mappings.
 pub async fn list_mappings(State(state): State<AppState>) -> Json<ListResponse> {

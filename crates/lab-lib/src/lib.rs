@@ -11,4 +11,6 @@ pub mod protocol;
 pub use consts::NATMAP_SOCKET;
 pub use docker::connect;
 pub use docker::trim_container_name;
+pub use port::PortAllocator;
+pub use port::PortAssignments;
 pub use protocol::TransportProtocol;
