@@ -462,7 +462,7 @@ impl DiscoveryDaemon {
                 } => (template, proxy_ip, nginx_generator, preprocess, postprocess),
             };
 
-        let kv_prefix = if template.starts_with("STREAM") {
+        let kv_prefix = if template.starts_with("TCP") {
             "nginx-configs/streams"
         } else {
             "nginx-configs/sites"

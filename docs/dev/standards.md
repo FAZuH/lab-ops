@@ -110,7 +110,7 @@ build_consul_service_with_forwarding
 build_consul_service_udp_check
 ```
 
-This replaces the legacy `test_<function>_<scenario>` pattern. When refactoring existing tests to this format, update only as part of meaningful work.
+
 
 
 ## 4. Error Handling

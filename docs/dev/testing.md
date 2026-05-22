@@ -26,7 +26,10 @@ Located in `#[cfg(test)] mod tests { }` blocks within source files.
 | `crates/auto-discover/src/consul.rs` | 5 | Consul service registration, metadata encoding |
 | `crates/auto-discover/src/port.rs` | 6 | Port allocation, persistence, free-port checks |
 
-**Total: 57 inline unit tests** (+ 0 in `lab-lib`, currently only re-exports)
+**Total: 83 inline unit tests** (+ 0 in `lab-lib`, currently only re-exports)
+
+| `crates/auto-discover/src/config.rs` | 18 | YAML config parsing, resolution, forwarding |
+| `crates/auto-discover/src/port.rs` | 6 | Port allocation, persistence, free-port checks |
 
 ### Integration Tests (External)
 
@@ -44,8 +47,8 @@ Located in `tests/` or `crates/*/tests/` directories.
 
 Located in `tests/natmap_docker.rs` and `tests/auto_discover.rs`, behind `#[cfg(feature = "docker-tests")]`.
 
-**auto-discover Docker tests** (`tests/auto_discover.rs`, 51 tests):
-Spins up a privileged Docker container (Ubuntu 24.04 + Consul + iptables) running Consul, natmap, and auto-discover daemons. Verifies Consul registration, nginx config KV storage, forwarding metadata, container lifecycle cleanup, crash recovery, natmap integration edge cases, config generation pipeline, registration metadata, forwarding sync (DNAT rules), nginx daemon (file/symlink operations), and stress testing (concurrent starts, large config).
+**auto-discover Docker tests** (`tests/auto_discover.rs`, 49 tests):
+Spins up a privileged Docker container (Ubuntu 24.04 + Consul + iptables) running Consul, natmap, and auto-discover daemons. Verifies Consul registration, port binding, nginx config generation, forwarding metadata, crash recovery, config change handling, nginx config pipeline, registration metadata, forwarding sync (DNAT rules), nginx daemon (file/symlink operations), concurrency, and large configs.
 
 | Category | Count |
 |---|---|
@@ -56,7 +59,7 @@ Spins up a privileged Docker container (Ubuntu 24.04 + Consul + iptables) runnin
 | Graceful shutdown | 3 |
 | Other | 5 |
 
-**Total: 28 natmap Docker tests + 51 auto-discover Docker tests = 79 Docker tests**
+**Total: 28 natmap Docker tests + 49 auto-discover Docker tests = 77 Docker tests**
 
 The Docker image is built once via `Once` from `ubuntu:24.04` with `iptables` installed.
 

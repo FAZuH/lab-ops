@@ -35,8 +35,6 @@ const AD_POSTPROC: &str = "/etc/auto-discover/postprocs.d";
 /// by lexicographically-sorted common postprocs from the `postproc_dir`.
 pub struct NginxDaemon {
     consul: ConsulClient,
-    tailscale_ip: String,
-    tailscale_reachable: bool,
     configs_dir: PathBuf,
     sites_available: PathBuf,
     streams_available: PathBuf,
@@ -46,9 +44,6 @@ pub struct NginxDaemon {
 
 impl NginxDaemon {
     /// Create a new nginx daemon instance.
-    ///
-    /// Reads `TAILSCALE_IP` and `TAILSCALE_REACHABLE` from the environment
-    /// for use by postproc scripts.
     pub fn new(
         consul_addr: String,
         configs_dir: PathBuf,
@@ -56,14 +51,8 @@ impl NginxDaemon {
         streams_available: PathBuf,
         postproc_dir: PathBuf,
     ) -> Self {
-        let tailscale_ip = std::env::var("TAILSCALE_IP").unwrap_or_default();
-        let tailscale_reachable =
-            std::env::var("TAILSCALE_REACHABLE").unwrap_or_default() == "true";
-
         NginxDaemon {
             consul: ConsulClient::new(consul_addr),
-            tailscale_ip,
-            tailscale_reachable,
             configs_dir,
             sites_available,
             streams_available,
@@ -226,15 +215,6 @@ impl NginxDaemon {
                 let mut child = std::process::Command::new("sh")
                     .arg("-c")
                     .arg(script)
-                    .env("TAILSCALE_IP", &self.tailscale_ip)
-                    .env(
-                        "TAILSCALE_REACHABLE",
-                        if self.tailscale_reachable {
-                            "true"
-                        } else {
-                            "false"
-                        },
-                    )
                     .stdin(std::process::Stdio::piped())
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::inherit())
@@ -269,15 +249,6 @@ impl NginxDaemon {
 
         for script in &scripts {
             let mut child = std::process::Command::new(script)
-                .env("TAILSCALE_IP", &self.tailscale_ip)
-                .env(
-                    "TAILSCALE_REACHABLE",
-                    if self.tailscale_reachable {
-                        "true"
-                    } else {
-                        "false"
-                    },
-                )
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::inherit())

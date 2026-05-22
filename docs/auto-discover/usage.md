@@ -36,7 +36,7 @@ auto-discover (daemon)                     │
     │  - Address: 10.0.0.101            │  reloaded on config change
     │  - Port: 32000                      │
     │  - Meta.proxy_ip: 203.0.113.43      │
-    │  - Meta.template: REVERSE_PROXY     ▼
+    │  - Meta.template: HTTP              ▼
     │  - Meta.domain: drive.example.com  Internet ← 203.0.113.43:80/443
     ▼
 Consul Agent ──────────────────────────→ Consul Server
@@ -124,7 +124,7 @@ services:
       project: example-drive   # must match com.docker.compose.project label
     rproxy:                    # reverse proxy entries (nginx configs)
       - port: 80
-        template: REVERSE_PROXY
+        template: HTTP_PROXY
         domains:
           - drive.example.com
 
@@ -137,7 +137,7 @@ services:
     bind_ip: 10.0.0.101        # overrides defaults.bind_ip
     rproxy:
       - port: 80
-        template: REVERSE_PROXY_PRIVATE
+        template: HTTP_PROXY
         domains:
           - mail.internal.example.com
 
@@ -147,9 +147,9 @@ services:
       project: example-mc
     rproxy:
       - port: 25565            # TCP entry
-        template: STREAM
+        template: TCP_PROXY
       - port: 19132            # UDP entry
-        template: STREAM
+        template: TCP_PROXY
     forwarding:                # kernel-level NAT (bypasses NGINX)
       - type: remote
         port: 25565
@@ -202,7 +202,7 @@ At least one match field should be set. If `match` is absent, the service matche
 | Field | Required | Description |
 |-------|----------|-------------|
 | `port` | Yes | Container/host port the service listens on |
-| `template` | Yes | Nginx template type: `REVERSE_PROXY`, `REVERSE_PROXY_PRIVATE`, `STREAM`, or `STREAM_PRIVATE` |
+| `template` | Yes | Nginx template type (e.g., `HTTP_PROXY`, `TCP_PROXY`). Used by your custom nginx generator script. |
 | `domains` | No | Domain names for NGINX `server_name`. First domain is the primary — also used as a discriminator in the Consul service ID to prevent collisions when multiple entries share the same name+port |
 | `proxy_on` | No | Only generate nginx config on this specific proxy server node name. Useful for multi-proxy setups |
 | `proxy_ip` | No | Override for the proxy server IP. Cascades from `defaults.proxy_ip` |
@@ -266,7 +266,7 @@ services:
       project: example-mc
     rproxy:
       - port: 25565
-        template: STREAM
+        template: TCP_PROXY
     forwarding:
       - type: remote
         port: 25565
@@ -307,25 +307,6 @@ services:
 2. **Service node**: Registers in Consul with `forwarding=true`, `forwarding_type=local`. No `ext_ip`, `ext_ports`, or `hairpin` metadata.
 3. **No proxy-server DNAT sync**: ForwardingLocal does NOT participate in the proxy-server forwarding daemon. DNAT is local to the service node.
 
-### Legacy Config Format
-
-The old `networks:` format is still supported for backward compatibility. It is automatically detected when `name:` is at the top level (instead of `node:`):
-
-```yaml
-# Legacy format (auto-detected)
-name: service-node-1
-defaults:
-  proxy_ip: 203.0.113.43
-networks:
-  - name: example-drive
-    container_port: 80
-    domains:
-      - drive.example.com
-    template: REVERSE_PROXY
-```
-
-The legacy format maps each `networks[]` entry to a single `services.<name>` entry. All entries with the same `name` are merged into one service. Forwarding entries in legacy format always use `type: remote`. New deployments should use the `services:` format above.
-
 ### Proxy Server NGINX Config Generation
 
 The proxy server runs **`lab-ops auto-discover daemon --no-discovery`** as a systemd daemon that watches Consul KV for nginx config changes using Consul's blocking-query mechanism.
@@ -346,7 +327,6 @@ The proxy server runs **`lab-ops auto-discover daemon --no-discovery`** as a sys
 **Generator script** (`/usr/local/bin/auto-discover-gen-nginx`):
 - Receives service data via `AUTO_DISCOVER_*` env vars
 - Outputs raw nginx config to stdout
-- Uses `__TAILSCALE_IP__` placeholder for `REVERSE_PROXY_PRIVATE` / `STREAM_PRIVATE` services
 - Optionally piped through `preprocess` (inline shell in discovery.yaml) before storage
 
 **Common postprocs** (`/etc/auto-discover/postprocs.d/`):
@@ -402,7 +382,7 @@ RestartSec=10
   "Port": 32000,
   "Meta": {
     "domain": "drive.example.com",
-    "template": "REVERSE_PROXY",
+    "template": "HTTP_PROXY",
     "protocol": "tcp",
     "proxy_ip": "203.0.113.43",
     "server_name": "service-node-1",
@@ -451,7 +431,7 @@ When a ForwardingLocal is merged with an RProxy entry (via matching `port`), a `
   "Meta": {
     "forwarding": "true",
     "forwarding_type": "local",
-    "template": "REVERSE_PROXY"
+    "template": "HTTP_PROXY"
   }
 }
 ```
