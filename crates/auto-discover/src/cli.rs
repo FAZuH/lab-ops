@@ -13,6 +13,7 @@ use tracing::warn;
 
 use crate::config::DiscoveryConfig;
 use crate::daemon::DiscoveryDaemon;
+use crate::nginx_daemon;
 use crate::nginx_daemon::NginxDaemon;
 
 /// Service discovery daemon: watches Docker events, manages port forwarding
@@ -49,6 +50,12 @@ pub enum Commands {
         /// Disable the nginx component (KV config sync)
         #[arg(long)]
         no_nginx: bool,
+        /// Directory for generated nginx site configs
+        #[arg(long, default_value = nginx_daemon::NGINX_SITEAVAIL)]
+        nginx_sites_dir: PathBuf,
+        /// Directory for generated nginx stream configs
+        #[arg(long, default_value = nginx_daemon::NGINX_STREAMAVAIL)]
+        nginx_streams_dir: PathBuf,
     },
     /// Run a single sync pass and exit
     Sync {
@@ -76,6 +83,12 @@ pub enum Commands {
         /// Consul HTTP address
         #[arg(default_value = "http://127.0.0.1:8500")]
         consul_addr: String,
+        /// Directory for generated nginx site configs
+        #[arg(long, default_value = nginx_daemon::NGINX_SITEAVAIL)]
+        nginx_sites_dir: PathBuf,
+        /// Directory for generated nginx stream configs
+        #[arg(long, default_value = nginx_daemon::NGINX_STREAMAVAIL)]
+        nginx_streams_dir: PathBuf,
     },
 }
 
@@ -88,6 +101,8 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             no_discovery,
             no_forwarding,
             no_nginx,
+            nginx_sites_dir,
+            nginx_streams_dir,
         } => {
             run_unified_daemon(
                 config,
@@ -96,16 +111,23 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 no_discovery,
                 no_forwarding,
                 no_nginx,
+                nginx_sites_dir,
+                nginx_streams_dir,
             )
             .await
         }
         Commands::Sync { config, state_dir } => run_sync(config, state_dir).await,
         Commands::Check { config } => check_config(config),
         Commands::ForwardingSync { consul_addr } => run_forwarding_sync(&consul_addr).await,
-        Commands::NginxSync { consul_addr } => run_nginx_sync(&consul_addr).await,
+        Commands::NginxSync {
+            consul_addr,
+            nginx_sites_dir,
+            nginx_streams_dir,
+        } => run_nginx_sync(&consul_addr, nginx_sites_dir, nginx_streams_dir).await,
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_unified_daemon(
     config_path: PathBuf,
     state_dir: PathBuf,
@@ -113,6 +135,8 @@ pub async fn run_unified_daemon(
     no_discovery: bool,
     no_forwarding: bool,
     no_nginx: bool,
+    nginx_sites_dir: PathBuf,
+    nginx_streams_dir: PathBuf,
 ) -> Result<()> {
     if no_discovery && no_forwarding && no_nginx {
         bail!("All components disabled, nothing to do");
@@ -141,9 +165,11 @@ pub async fn run_unified_daemon(
 
     if !no_nginx {
         let addr = consul_addr.clone();
+        let sites = nginx_sites_dir.clone();
+        let streams = nginx_streams_dir.clone();
         tokio::spawn(async move {
             info!("Nginx component started");
-            run_nginx_daemon(addr).await;
+            run_nginx_daemon(addr, sites, streams).await;
             info!("Nginx component exited");
         });
     }
@@ -306,16 +332,36 @@ async fn run_forwarding_daemon(consul_addr: String) {
     }
 }
 
-pub async fn run_nginx_sync(consul_addr: &str) -> Result<()> {
+pub async fn run_nginx_sync(
+    consul_addr: &str,
+    nginx_sites_dir: PathBuf,
+    nginx_streams_dir: PathBuf,
+) -> Result<()> {
     info!("Running nginx sync...");
-    let daemon = NginxDaemon::new_default_paths(consul_addr);
+    let daemon = NginxDaemon::new(
+        consul_addr.to_string(),
+        PathBuf::from(nginx_daemon::AD_NGINX),
+        nginx_sites_dir,
+        nginx_streams_dir,
+        PathBuf::from(nginx_daemon::AD_POSTPROC),
+    );
     let changed = daemon.sync().await?;
     info!("Nginx sync completed, changed={}", changed);
     Ok(())
 }
 
-async fn run_nginx_daemon(consul_addr: String) {
+async fn run_nginx_daemon(
+    consul_addr: String,
+    nginx_sites_dir: PathBuf,
+    nginx_streams_dir: PathBuf,
+) {
     info!("Nginx daemon started");
-    let daemon = NginxDaemon::new_default_paths(&consul_addr);
+    let daemon = NginxDaemon::new(
+        consul_addr,
+        PathBuf::from(nginx_daemon::AD_NGINX),
+        nginx_sites_dir,
+        nginx_streams_dir,
+        PathBuf::from(nginx_daemon::AD_POSTPROC),
+    );
     daemon.run_loop().await;
 }

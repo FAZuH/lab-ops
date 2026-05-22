@@ -323,8 +323,8 @@ consul agent -dev -http-port=8500 >/tmp/consul.log 2>&1 &
 sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: consul died"; cat /tmp/consul.log; exit 1; }
 
 mkdir -p /var/lib/auto-discover/nginx-configs
-mkdir -p /etc/nginx/sites-available
-mkdir -p /etc/nginx/streams-available
+mkdir -p /etc/nginx/sites-enabled
+mkdir -p /etc/nginx/streams-enabled
 
 curl -sf -X PUT "$CONSUL_HTTP_ADDR/v1/kv/nginx-configs/sites/test-svc.conf" -d 'server { listen 8080; server_name test.local; }'
 
@@ -355,17 +355,17 @@ consul agent -dev -http-port=8500 >/tmp/consul.log 2>&1 &
 sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: consul died"; cat /tmp/consul.log; exit 1; }
 
 mkdir -p /var/lib/auto-discover/nginx-configs
-mkdir -p /etc/nginx/sites-available
-mkdir -p /etc/nginx/streams-available
+mkdir -p /etc/nginx/sites-enabled
+mkdir -p /etc/nginx/streams-enabled
 
 curl -sf -X PUT "$CONSUL_HTTP_ADDR/v1/kv/nginx-configs/sites/symlink-svc.conf" -d 'server { listen 8081; server_name symlink.local; }'
 
 lab-ops auto-discover nginx-sync $CONSUL_HTTP_ADDR >/tmp/ngx.log 2>&1 || true
 
-SYMLINK="/etc/nginx/sites-available/symlink-svc.conf"
+SYMLINK="/etc/nginx/sites-enabled/symlink-svc.conf"
 if [ ! -L "$SYMLINK" ]; then
     echo "FAIL: symlink not created at $SYMLINK" >&2
-    ls -la /etc/nginx/sites-available/ 2>/dev/null || true
+    ls -la /etc/nginx/sites-enabled/ 2>/dev/null || true
     cat /tmp/ngx.log
     exit 1
 fi
@@ -377,7 +377,7 @@ if [ "$TARGET" != "$EXPECTED" ]; then
     exit 1
 fi
 
-echo "PASS: symlink created in sites-available"
+echo "PASS: symlink created in sites-enabled"
 kill %1 2>/dev/null || true
 sleep 1
 "#.to_string();
@@ -395,8 +395,8 @@ consul agent -dev -http-port=8500 >/tmp/consul.log 2>&1 &
 sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: consul died"; cat /tmp/consul.log; exit 1; }
 
 mkdir -p /var/lib/auto-discover/nginx-configs
-mkdir -p /etc/nginx/sites-available
-mkdir -p /etc/nginx/streams-available
+mkdir -p /etc/nginx/sites-enabled
+mkdir -p /etc/nginx/streams-enabled
 
 curl -sf -X PUT "$CONSUL_HTTP_ADDR/v1/kv/nginx-configs/sites/post-svc.conf" -d 'listen 9999;'
 curl -sf -X PUT "$CONSUL_HTTP_ADDR/v1/kv/nginx-configs/sites/post-svc.postproc" -d "sed 's/9999/8888/'"
@@ -427,8 +427,8 @@ consul agent -dev -http-port=8500 >/tmp/consul.log 2>&1 &
 sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: consul died"; cat /tmp/consul.log; exit 1; }
 
 mkdir -p /var/lib/auto-discover/nginx-configs
-mkdir -p /etc/nginx/sites-available
-mkdir -p /etc/nginx/streams-available
+mkdir -p /etc/nginx/sites-enabled
+mkdir -p /etc/nginx/streams-enabled
 mkdir -p /etc/auto-discover/postprocs.d
 
 cat > /etc/auto-discover/postprocs.d/10-replace-port <<'SCRIPT'
@@ -465,15 +465,15 @@ consul agent -dev -http-port=8500 >/tmp/consul.log 2>&1 &
 sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: consul died"; cat /tmp/consul.log; exit 1; }
 
 mkdir -p /var/lib/auto-discover/nginx-configs/sites
-mkdir -p /etc/nginx/sites-available
+mkdir -p /etc/nginx/sites-enabled
 
 echo 'stale config' > /var/lib/auto-discover/nginx-configs/sites/stale-svc.conf
-ln -sf /var/lib/auto-discover/nginx-configs/sites/stale-svc.conf /etc/nginx/sites-available/stale-svc.conf
+ln -sf /var/lib/auto-discover/nginx-configs/sites/stale-svc.conf /etc/nginx/sites-enabled/stale-svc.conf
 
 lab-ops auto-discover nginx-sync $CONSUL_HTTP_ADDR >/tmp/ngx.log 2>&1 || true
 
 STALE_FILE="/var/lib/auto-discover/nginx-configs/sites/stale-svc.conf"
-STALE_LINK="/etc/nginx/sites-available/stale-svc.conf"
+STALE_LINK="/etc/nginx/sites-enabled/stale-svc.conf"
 
 if [ -f "$STALE_FILE" ]; then echo "FAIL: stale config file not removed" >&2; ls -la "$STALE_FILE"; exit 1; fi
 if [ -L "$STALE_LINK" ]; then echo "FAIL: stale symlink not removed" >&2; ls -la "$STALE_LINK"; exit 1; fi
@@ -496,14 +496,14 @@ consul agent -dev -http-port=8500 >/tmp/consul.log 2>&1 &
 sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: consul died"; cat /tmp/consul.log; exit 1; }
 
 mkdir -p /var/lib/auto-discover/nginx-configs/sites
-mkdir -p /etc/nginx/sites-available
+mkdir -p /etc/nginx/sites-enabled
 
 curl -sf -X PUT "$CONSUL_HTTP_ADDR/v1/kv/nginx-configs/sites/cycle-svc.conf" -d 'server { listen 9991; server_name cycle.local; }'
 
 lab-ops auto-discover nginx-sync $CONSUL_HTTP_ADDR >/tmp/ngx.log 2>&1 || true
 
 FILE="/var/lib/auto-discover/nginx-configs/sites/cycle-svc.conf"
-LINK="/etc/nginx/sites-available/cycle-svc.conf"
+LINK="/etc/nginx/sites-enabled/cycle-svc.conf"
 if [ ! -f "$FILE" ]; then echo "FAIL: config not written" >&2; exit 1; fi
 if [ ! -L "$LINK" ]; then echo "FAIL: symlink not created" >&2; exit 1; fi
 if ! grep -q 'cycle.local' "$FILE"; then echo "FAIL: config content wrong" >&2; cat "$FILE"; exit 1; fi
