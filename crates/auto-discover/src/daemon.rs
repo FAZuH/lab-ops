@@ -59,15 +59,16 @@ impl DiscoveryDaemon {
         let all_resolved = config.resolve_all();
 
         for resolved in &all_resolved {
-            match resolved.service_type {
+            let result = match resolved.service_type {
                 ServiceType::Docker => {
                     let matching_containers: Vec<&ContainerInfo> = containers
                         .iter()
                         .filter(|c| container_matches(c, resolved))
                         .collect();
 
+                    let mut ids = Vec::new();
                     for container in matching_containers {
-                        if let Some(id) = self
+                        match self
                             .sync_docker(
                                 resolved,
                                 container,
@@ -75,11 +76,20 @@ impl DiscoveryDaemon {
                                 &generation_id,
                                 &mut port_assignments,
                             )
-                            .await?
+                            .await
                         {
-                            current_service_ids.push(id);
+                            Ok(Some(id)) => ids.push(id),
+                            Ok(None) => {}
+                            Err(e) => {
+                                tracing::error!(
+                                    "Failed to sync {}: {}",
+                                    resolved.service_id_prefix,
+                                    e
+                                );
+                            }
                         }
                     }
+                    Ok(ids)
                 }
                 ServiceType::Local => {
                     if resolved.local_address.is_none() {
@@ -87,20 +97,29 @@ impl DiscoveryDaemon {
                             "Local service {} missing address, skipping",
                             resolved.service_id_prefix
                         );
-                        continue;
-                    }
-                    if let Some(id) = self
-                        .sync_local(
+                        Ok(vec![])
+                    } else {
+                        self.sync_local(
                             resolved,
                             &server_name,
                             &generation_id,
                             &mut port_assignments,
                         )
-                        .await?
-                    {
-                        current_service_ids.push(id);
+                        .await
+                        .map(|id| id.into_iter().collect::<Vec<_>>())
+                        .map_err(|e| {
+                            tracing::error!(
+                                "Failed to sync local service {}: {}",
+                                resolved.service_id_prefix,
+                                e
+                            );
+                            e
+                        })
                     }
                 }
+            };
+            if let Ok(ids) = result {
+                current_service_ids.extend(ids);
             }
         }
 
@@ -145,18 +164,17 @@ impl DiscoveryDaemon {
 
         let port_key = format!("{}-{}", resolved.service_id_prefix, resolved.container_port);
         let (host_port, skip_natmap) = match &resolved.port_type {
-            ResolvedPortType::ForwardingRemote { ext_ports, .. } => {
+            ResolvedPortType::ForwardRemote { ext_ports, .. } => {
                 let p = ext_ports[0];
-                if !lab_lib::port::is_port_free(format!("0.0.0.0:{p}")) {
-                    tracing::warn!("Port {} already in use (host-published, skipping)", p);
-                    (p, true)
-                } else {
-                    (p, false)
-                }
+                // ForwardRemote needs a local natmap mapping so traffic from the
+                // proxy's DNAT rule can reach the container. Always attempt to
+                // create one — if another container has this port mapped, the
+                // natmap daemon will return 409 (handled gracefully as a warning
+                // by the client).
+                (p, false)
             }
-            ResolvedPortType::ForwardingLocal {
+            ResolvedPortType::ForwardLocal {
                 bind_port: Some(bp),
-                ..
             } => (*bp, false),
             _ => match port_assignments.get_or_allocate(&port_key) {
                 Some(p) => (p, false),
@@ -217,22 +235,29 @@ impl DiscoveryDaemon {
 
         let port_key = format!("{}-{}", resolved.service_id_prefix, resolved.container_port);
         let (host_port, skip_natmap) = match &resolved.port_type {
-            ResolvedPortType::ForwardingRemote { ext_ports, .. } => (ext_ports[0], true),
-            ResolvedPortType::ForwardingLocal {
-                bind_port: Some(bp),
-                ..
-            } => (*bp, false),
-            ResolvedPortType::ForwardingLocal {
-                bind_port: None, ..
-            } => match port_assignments.get_or_allocate(&port_key) {
-                Some(p) => (p, false),
-                None => {
-                    tracing::warn!("No free ports for {}", resolved.service_id_prefix);
-                    return Ok(None);
+            ResolvedPortType::ForwardRemote { ext_ports, .. } => {
+                let p = ext_ports[0];
+                let natmap_bind_ip = get_natmap_bind_ip(resolved);
+                let check_ip = natmap_bind_ip.as_deref().unwrap_or("0.0.0.0");
+                if lab_lib::port::is_port_free(format!("{check_ip}:{p}")) {
+                    (p, false)
+                } else {
+                    (p, true)
                 }
-            },
-            ResolvedPortType::RProxy { .. } => {
-                // Local services bypass NAT for reverse proxy. NGINX proxies directly.
+            }
+            ResolvedPortType::ForwardLocal {
+                bind_port: Some(bp),
+            } => (*bp, false),
+            ResolvedPortType::ForwardLocal { bind_port: None } => {
+                match port_assignments.get_or_allocate(&port_key) {
+                    Some(p) => (p, false),
+                    None => {
+                        tracing::warn!("No free ports for {}", resolved.service_id_prefix);
+                        return Ok(None);
+                    }
+                }
+            }
+            ResolvedPortType::RProxyLocal { .. } | ResolvedPortType::RProxyRemote { .. } => {
                 (resolved.container_port, true)
             }
         };
@@ -347,14 +372,23 @@ impl DiscoveryDaemon {
         let mut port_assignments = PortAssignments::load(&ports_path);
 
         for resolved in &resolved_services {
-            self.sync_docker(
-                resolved,
-                &cinfo,
-                &server_name,
-                &generation_id,
-                &mut port_assignments,
-            )
-            .await?;
+            if let Err(e) = self
+                .sync_docker(
+                    resolved,
+                    &cinfo,
+                    &server_name,
+                    &generation_id,
+                    &mut port_assignments,
+                )
+                .await
+            {
+                tracing::error!(
+                    "Failed to sync {} for container {}: {}",
+                    resolved.service_id_prefix,
+                    &container_id[..12.min(container_id.len())],
+                    e
+                );
+            }
         }
 
         port_assignments.save(&ports_path).ok();
@@ -418,7 +452,7 @@ impl DiscoveryDaemon {
     ) -> Result<()> {
         let (template, proxy_ip, nginx_generator, preprocess, postprocess) =
             match &service.port_type {
-                ResolvedPortType::RProxy {
+                ResolvedPortType::RProxyLocal {
                     template,
                     proxy_ip,
                     nginx_generator,
@@ -426,15 +460,7 @@ impl DiscoveryDaemon {
                     postprocess,
                     ..
                 }
-                | ResolvedPortType::ForwardingLocal {
-                    template,
-                    proxy_ip,
-                    nginx_generator,
-                    preprocess,
-                    postprocess,
-                    ..
-                }
-                | ResolvedPortType::ForwardingRemote {
+                | ResolvedPortType::RProxyRemote {
                     template,
                     proxy_ip,
                     nginx_generator,
@@ -442,6 +468,13 @@ impl DiscoveryDaemon {
                     postprocess,
                     ..
                 } => (template, proxy_ip, nginx_generator, preprocess, postprocess),
+                _ => {
+                    tracing::warn!(
+                        "store_nginx_config called for non-rproxy type {:?}, skipping",
+                        std::mem::discriminant(&service.port_type)
+                    );
+                    return Ok(());
+                }
             };
 
         let kv_prefix = if template.starts_with("TCP") {
@@ -462,9 +495,12 @@ impl DiscoveryDaemon {
         );
 
         let domains = match &service.port_type {
-            ResolvedPortType::RProxy { domains, .. }
-            | ResolvedPortType::ForwardingLocal { domains, .. }
-            | ResolvedPortType::ForwardingRemote { domains, .. } => domains,
+            ResolvedPortType::RProxyLocal { domains, .. }
+            | ResolvedPortType::RProxyRemote { domains, .. } => domains,
+            _ => {
+                tracing::warn!("store_nginx_config called for non-rproxy type, skipping");
+                return Ok(());
+            }
         };
         envs.insert("AUTO_DISCOVER_ALL_DOMAINS".into(), domains.join(" "));
 
@@ -582,9 +618,9 @@ fn container_matches(container: &ContainerInfo, resolved: &ResolvedService) -> b
 /// Check if the port type should trigger nginx config generation.
 fn is_rproxy_or_forwarding_with_template(port_type: &ResolvedPortType) -> bool {
     match port_type {
-        ResolvedPortType::RProxy { template, .. }
-        | ResolvedPortType::ForwardingLocal { template, .. }
-        | ResolvedPortType::ForwardingRemote { template, .. } => !template.is_empty(),
+        ResolvedPortType::RProxyLocal { template, .. }
+        | ResolvedPortType::RProxyRemote { template, .. } => !template.is_empty(),
+        _ => false,
     }
 }
 
@@ -593,10 +629,14 @@ fn get_natmap_bind_ip(resolved: &ResolvedService) -> Option<String> {
     if let Some(ref ip) = resolved.bind_ip {
         return Some(ip.clone());
     }
-    if let Some(ref iface) = resolved.bind_interface
-        && let Some(ip) = resolve_interface_ip(iface)
-    {
-        return Some(ip);
+    if let Some(ref iface) = resolved.bind_interface {
+        if let Some(ip) = resolve_interface_ip(iface) {
+            return Some(ip);
+        }
+        tracing::warn!(
+            "bind_interface {} configured but could not resolve IP (interface may be down)",
+            iface
+        );
     }
     None
 }

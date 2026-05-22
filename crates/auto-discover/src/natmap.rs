@@ -123,6 +123,9 @@ impl NatmapClient {
             if msg.contains("409") {
                 tracing::warn!("natmap mapping already exists (409), continuing: {msg}");
                 Ok(())
+            } else if msg.contains("404") || msg.contains("Container not found") {
+                tracing::warn!("Container not found (may have restarted), continuing: {msg}");
+                Ok(())
             } else {
                 Err(e).wrap_err("natmap command failed")
             }

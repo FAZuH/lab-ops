@@ -116,6 +116,13 @@ pub struct DnatConfig {
     pub ext_if: Option<String>,
 }
 
+impl DnatConfig {
+    /// iptables comment used to identify this DNAT rule's rules.
+    pub fn rule_comment(&self) -> String {
+        format!("natmap:dnat:{}:{}", self.ext_ip, self.ports)
+    }
+}
+
 /// A static SNAT (source NAT) rule configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnatConfig {
@@ -125,6 +132,13 @@ pub struct SnatConfig {
     pub ext_ip: String,
     /// External network interface.
     pub ext_if: String,
+}
+
+impl SnatConfig {
+    /// iptables comment used to identify this SNAT rule's rules.
+    pub fn rule_comment(&self) -> String {
+        format!("natmap:snat:{}:{}", self.int_ip, self.ext_ip)
+    }
 }
 
 /// A static hairpin NAT rule configuration.
@@ -138,6 +152,16 @@ pub struct HairpinConfig {
     pub ports: String,
     /// Transport protocol.
     pub proto: TransportProtocol,
+}
+
+impl HairpinConfig {
+    /// iptables comment used to identify this hairpin rule's rules.
+    pub fn rule_comment(&self) -> String {
+        format!(
+            "natmap:hairpin:{}:{}:{}",
+            self.ext_ip, self.int_ip, self.ports
+        )
+    }
 }
 
 // --- API request types ---

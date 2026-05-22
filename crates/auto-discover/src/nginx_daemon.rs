@@ -3,8 +3,8 @@
 //! [`NginxDaemon`] watches the `nginx-configs/` Consul KV prefix with blocking
 //! queries. On any change, it reads all `*.conf` entries, pipes them through
 //! per-service postproc scripts and common postprocs from `/etc/auto-discover/postprocs.d/`,
-//! writes the result to disk, creates symlinks in `sites-available` /
-//! `streams-available`, and reloads nginx.
+//! writes the result to disk, creates symlinks in `sites-enabled` /
+//! `streams-enabled`, and reloads nginx.
 //!
 //! Orphaned KV entries (where the corresponding service no longer exists in
 //! the Consul catalog) are periodically garbage-collected every 5 minutes.
@@ -22,10 +22,10 @@ use color_eyre::eyre::bail;
 use crate::consul::ConsulClient;
 use crate::consul::KvEntry;
 
-const AD_NGINX: &str = "/var/lib/auto-discover/nginx-configs";
-const NGINX_SITEAVAIL: &str = "/etc/nginx/sites-available";
-const NGINX_STREAMAVAIL: &str = "/etc/nginx/streams-available";
-const AD_POSTPROC: &str = "/etc/auto-discover/postprocs.d";
+pub const AD_NGINX: &str = "/var/lib/auto-discover/nginx-configs";
+pub const NGINX_SITEAVAIL: &str = "/etc/nginx/sites-enabled";
+pub const NGINX_STREAMAVAIL: &str = "/etc/nginx/streams-enabled";
+pub const AD_POSTPROC: &str = "/etc/auto-discover/postprocs.d";
 
 /// Proxy-side daemon that watches Consul KV for nginx config changes and
 /// applies them to the local nginx installation.
@@ -59,16 +59,6 @@ impl NginxDaemon {
             postproc_dir,
             last_gc: Mutex::new(Instant::now()),
         }
-    }
-
-    pub fn new_default_paths(consul_addr: impl ToString) -> Self {
-        Self::new(
-            consul_addr.to_string(),
-            PathBuf::from(AD_NGINX),
-            PathBuf::from(NGINX_SITEAVAIL),
-            PathBuf::from(NGINX_STREAMAVAIL),
-            PathBuf::from(AD_POSTPROC),
-        )
     }
 
     /// Run the sync loop forever using Consul blocking queries.

@@ -39,6 +39,9 @@ pub async fn list_mappings(State(state): State<AppState>) -> Json<ListResponse> 
 // --- Static NAT handlers ---
 
 /// `POST /dnat` — Adds a static DNAT rule.
+///
+/// Idempotent: if the exact same DNAT config already exists in the daemon
+/// state (e.g. after restart reconciliation), returns OK without error.
 pub async fn add_dnat(
     State(state): State<AppState>,
     Json(req): Json<DnatRequest>,
@@ -50,6 +53,20 @@ pub async fn add_dnat(
         proto: req.proto,
         ext_if: req.ext_if.clone(),
     };
+
+    // Check if this DNAT already exists (idempotent add).
+    {
+        let lock = state.daemon_state.read().await;
+        if lock.dnats.iter().any(|d| {
+            d.ext_ip == config.ext_ip
+                && d.int_ip == config.int_ip
+                && d.ports == config.ports
+                && d.proto == config.proto
+        }) {
+            return Ok(Json(config));
+        }
+    }
+
     bind_ports(state.ports.clone(), &config.ext_ip, &config.ports).await?;
     if let Err(e) = state.iptables.install_dnat(&config) {
         unbind_ports(state.ports, &config.ext_ip, &config.ports).await;
@@ -83,12 +100,19 @@ pub async fn remove_dnat(
         state.persist().await;
         Ok(StatusCode::OK)
     } else {
-        Err((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: "DNAT rule not found".into(),
-            }),
-        ))
+        // Not in daemon state but may still have stale iptables rules and port
+        // reservations from a previous daemon instance (e.g. after restart with
+        // reconciled DNATs). Clean them up so the caller can re-add cleanly.
+        let config = DnatConfig {
+            ext_ip: req.ext_ip,
+            int_ip: req.int_ip,
+            ports: req.ports,
+            proto: req.proto,
+            ext_if: req.ext_if,
+        };
+        let _ = state.iptables.remove_dnat(&config);
+        unbind_ports(state.ports.clone(), &config.ext_ip, &config.ports).await;
+        Ok(StatusCode::OK)
     }
 }
 
@@ -190,12 +214,17 @@ pub async fn remove_hairpin(
         state.persist().await;
         Ok(StatusCode::OK)
     } else {
-        Err((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: "Hairpin rule not found".into(),
-            }),
-        ))
+        // Not in daemon state but may still have stale iptables rules and port
+        // reservations from a previous daemon instance. Clean them up.
+        let config = HairpinConfig {
+            ext_ip: req.ext_ip,
+            int_ip: req.int_ip,
+            ports: req.ports,
+            proto: req.proto,
+        };
+        let _ = state.iptables.remove_hairpin(&config);
+        unbind_ports(state.ports.clone(), &config.ext_ip, &config.ports).await;
+        Ok(StatusCode::OK)
     }
 }
 

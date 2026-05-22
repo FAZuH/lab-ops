@@ -25,32 +25,31 @@ use crate::utils::request_json;
 
 /// Displays a combined listing of static iptables NAT rules and daemon-managed state.
 ///
-/// Reads live iptables rules via `iptables-save` and queries the daemon at
-/// `GET /mappings` for managed DNAT, SNAT, hairpin, and Docker mappings.
+/// Reads live iptables rules via `iptables-save` (filtering to natmap-commented
+/// rules only) and queries the daemon at `GET /mappings` for managed DNAT, SNAT,
+/// hairpin, and Docker mappings.
 pub async fn handle_list(
     socket: impl AsRef<Path>,
     container_id: Option<String>,
     json: bool,
 ) -> Result<()> {
-    println!("── Static iptables NAT rules ──");
+    println!("── Static iptables NAT rules (natmap-managed) ──");
     let output = Command::new("iptables-save").output();
     match output {
         Ok(o) => {
             let stdout = String::from_utf8_lossy(&o.stdout);
-            let rules: Vec<&str> = stdout
-                .lines()
-                .filter(|l| {
-                    l.starts_with("-A PREROUTING")
-                        || l.starts_with("-A POSTROUTING")
-                        || l.starts_with("-A FORWARD")
-                })
-                .collect();
+            let rules: Vec<&str> = stdout.lines().filter(|l| l.contains("natmap:")).collect();
             if rules.is_empty() {
                 println!("  (none)");
             } else {
-                for r in rules {
-                    println!("  {r}");
+                let mut table = comfy_table::Table::new();
+                table.set_header(vec!["CHAIN", "RULE"]);
+                for r in &rules {
+                    let rest = r.strip_prefix("-A ").unwrap_or(r);
+                    let (chain, rule) = rest.split_once(' ').unwrap_or((rest, ""));
+                    table.add_row(vec![chain.to_string(), rule.to_string()]);
                 }
+                println!("{table}");
             }
         }
         Err(_) => println!("  (could not read iptables rules)"),
@@ -60,32 +59,43 @@ pub async fn handle_list(
     match request_json::<ListResponse, ()>(socket, Method::GET, "/mappings", None).await {
         Ok(resp) => {
             if !resp.dnats.is_empty() {
-                println!("\n  DNAT rules:");
+                let mut table = comfy_table::Table::new();
+                table.set_header(vec!["EXT IP", "INT IP", "PORTS", "PROTO", "IFACE"]);
                 for d in &resp.dnats {
                     let if_info = d.ext_if.as_deref().unwrap_or("-");
-                    println!(
-                        "    {} -> {} (ports: {}, proto: {}, if: {})",
-                        d.ext_ip, d.int_ip, d.ports, d.proto, if_info
-                    );
+                    table.add_row(vec![
+                        d.ext_ip.clone(),
+                        d.int_ip.clone(),
+                        d.ports.clone(),
+                        d.proto.to_string(),
+                        if_info.to_string(),
+                    ]);
                 }
+                println!("  DNAT rules:\n{table}");
             }
             if !resp.snats.is_empty() {
-                println!("\n  SNAT rules:");
+                let mut table = comfy_table::Table::new();
+                table.set_header(vec!["INT IP", "EXT IP", "IFACE"]);
                 for s in &resp.snats {
-                    println!("    {} -> {} (if: {})", s.int_ip, s.ext_ip, s.ext_if);
+                    table.add_row(vec![s.int_ip.clone(), s.ext_ip.clone(), s.ext_if.clone()]);
                 }
+                println!("  SNAT rules:\n{table}");
             }
             if !resp.hairpins.is_empty() {
-                println!("\n  Hairpin rules:");
+                let mut table = comfy_table::Table::new();
+                table.set_header(vec!["EXT IP", "INT IP", "PORTS", "PROTO"]);
                 for h in &resp.hairpins {
-                    println!(
-                        "    {} <-> {} (ports: {}, proto: {})",
-                        h.ext_ip, h.int_ip, h.ports, h.proto
-                    );
+                    table.add_row(vec![
+                        h.ext_ip.clone(),
+                        h.int_ip.clone(),
+                        h.ports.clone(),
+                        h.proto.to_string(),
+                    ]);
                 }
+                println!("  Hairpin rules:\n{table}");
             }
             if !resp.docker.is_empty() {
-                println!("\n  Docker mappings:");
+                println!("  Docker mappings:");
                 if json {
                     println!("{}", serde_json::to_string_pretty(&resp.docker)?);
                 } else {
