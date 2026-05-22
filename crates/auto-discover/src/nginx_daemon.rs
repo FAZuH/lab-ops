@@ -22,6 +22,11 @@ use color_eyre::eyre::bail;
 use crate::consul::ConsulClient;
 use crate::consul::KvEntry;
 
+const AD_NGINX: &str = "/var/lib/auto-discover/nginx-configs";
+const NGINX_SITEAVAIL: &str = "/etc/nginx/sites-available";
+const NGINX_STREAMAVAIL: &str = "/etc/nginx/streams-available";
+const AD_POSTPROC: &str = "/etc/auto-discover/postprocs.d";
+
 /// Proxy-side daemon that watches Consul KV for nginx config changes and
 /// applies them to the local nginx installation.
 ///
@@ -70,10 +75,10 @@ impl NginxDaemon {
     pub fn new_default_paths(consul_addr: impl ToString) -> Self {
         Self::new(
             consul_addr.to_string(),
-            PathBuf::from("/var/lib/auto-discover/nginx-configs"),
-            PathBuf::from("/etc/nginx/sites-available"),
-            PathBuf::from("/etc/nginx/streams-available"),
-            PathBuf::from("/etc/auto-discover/postprocs.d"),
+            PathBuf::from(AD_NGINX),
+            PathBuf::from(NGINX_SITEAVAIL),
+            PathBuf::from(NGINX_STREAMAVAIL),
+            PathBuf::from(AD_POSTPROC),
         )
     }
 
