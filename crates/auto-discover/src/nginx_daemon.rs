@@ -15,9 +15,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 
-use color_eyre::eyre::bail;
-use color_eyre::eyre::WrapErr;
 use color_eyre::Result;
+use color_eyre::eyre::WrapErr;
+use color_eyre::eyre::bail;
 
 use crate::consul::ConsulClient;
 use crate::consul::KvEntry;
@@ -131,10 +131,8 @@ impl NginxDaemon {
                 false
             }
         };
-        if should_gc {
-            if let Err(e) = self.gc_orphaned_kv_entries().await {
-                tracing::warn!("nginx config GC failed: {}", e);
-            }
+        if should_gc && let Err(e) = self.gc_orphaned_kv_entries().await {
+            tracing::warn!("nginx config GC failed: {}", e);
         }
 
         let entries = self

@@ -54,7 +54,7 @@ use crate::docker;
 use crate::iptables::IptablesManager;
 use crate::models::DaemonState;
 use crate::models::DockerPortMap;
-use crate::port_allocator::PortAllocator;
+use crate::port::PortAllocator;
 
 /// Shared application state held by all Axum route handlers.
 #[derive(Clone)]

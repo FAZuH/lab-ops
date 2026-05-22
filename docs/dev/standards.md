@@ -400,7 +400,6 @@ These inconsistencies exist in the codebase and should be addressed in future re
 
 | Item | Priority | Effort |
 |---|---|---|
-| Upgrade `auto-discover` to edition 2024 | Medium | Small |
 | Rename `NatMapCommand` → `Command`, `Commands` → `Command` | Low | Medium |
 | Add `// --- Section ---` delimiters to `natmap/src/api.rs` | Low | Small |
 | Add `#[cfg(test)] mod tests` to every untested module | Medium | Large |

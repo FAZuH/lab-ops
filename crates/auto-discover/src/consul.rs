@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-use color_eyre::eyre::bail;
-use color_eyre::eyre::WrapErr;
 use color_eyre::Result;
+use color_eyre::eyre::WrapErr;
+use color_eyre::eyre::bail;
 use serde_json::json;
 
 use crate::config::ResolvedService;
@@ -14,14 +14,11 @@ use crate::config::ResolvedService;
 ///
 /// Values are automatically base64-decoded by the client.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct KvEntry {
     /// Full key path (e.g. `nginx-configs/sites/svc-123.conf`).
     pub key: String,
     /// Decoded plain-text value.
     pub value: String,
-    /// Consul `ModifyIndex` for blocking-queries and consistency tracking.
-    pub modify_index: u64,
 }
 
 #[derive(serde::Deserialize)]
@@ -29,8 +26,6 @@ pub struct KvEntry {
 struct KvRawEntry {
     Key: String,
     Value: String,
-    #[serde(rename = "ModifyIndex")]
-    ModifyIndex: u64,
 }
 
 fn base64_decode(s: &str) -> Option<String> {
@@ -305,7 +300,6 @@ impl ConsulClient {
             .map(|e| KvEntry {
                 key: e.Key,
                 value: base64_decode(&e.Value).unwrap_or_default(),
-                modify_index: e.ModifyIndex,
             })
             .collect())
     }
@@ -345,7 +339,6 @@ impl ConsulClient {
                 .map(|e| KvEntry {
                     key: e.Key,
                     value: base64_decode(&e.Value).unwrap_or_default(),
-                    modify_index: e.ModifyIndex,
                 })
                 .collect(),
             new_index,
@@ -476,7 +469,7 @@ pub fn build_consul_service(
             if !template.is_empty() {
                 meta.insert("template".into(), template.clone());
             }
-            if let Some(ref proxy_ip) = proxy_ip {
+            if let Some(proxy_ip) = proxy_ip {
                 meta.insert("proxy_ip".into(), proxy_ip.clone());
             }
         }

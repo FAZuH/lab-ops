@@ -9,9 +9,9 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::process::Command;
 
-use color_eyre::eyre::bail;
-use color_eyre::eyre::WrapErr;
 use color_eyre::Result;
+use color_eyre::eyre::WrapErr;
+use color_eyre::eyre::bail;
 
 use crate::consul::ConsulClient;
 
@@ -35,7 +35,7 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
     let groups = query_forwarding_services(&consul).await?;
 
     let natmap_socket =
-        std::env::var("NATMAP_SOCKET").unwrap_or_else(|_| "/run/natmap.sock".into());
+        std::env::var("NATMAP_SOCKET").unwrap_or_else(|_| lab_lib::NATMAP_SOCKET.into());
 
     if groups.is_empty() {
         tracing::info!("No forwarding services found in Consul; cleaning up stale rules");
@@ -44,8 +44,12 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
             for port in &stale_group.ports {
                 let cmd = format!(
                     "iptables -t nat -D PREROUTING -d {}/32 -p {} -m {} --dport {} -j DNAT --to-destination {}:{}",
-                    stale_group.ext_ip, stale_group.proto, stale_group.proto, port,
-                    stale_group.int_ip, port,
+                    stale_group.ext_ip,
+                    stale_group.proto,
+                    stale_group.proto,
+                    port,
+                    stale_group.int_ip,
+                    port,
                 );
                 if let Err(e) = Command::new("sh").arg("-c").arg(&cmd).output() {
                     tracing::warn!(
@@ -149,8 +153,12 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
         for port in &stale_group.ports {
             let cmd = format!(
                 "iptables -t nat -D PREROUTING -d {}/32 -p {} -m {} --dport {} -j DNAT --to-destination {}:{}",
-                stale_group.ext_ip, stale_group.proto, stale_group.proto, port,
-                stale_group.int_ip, port,
+                stale_group.ext_ip,
+                stale_group.proto,
+                stale_group.proto,
+                port,
+                stale_group.int_ip,
+                port,
             );
             let _ = Command::new("sh").arg("-c").arg(&cmd).output();
         }

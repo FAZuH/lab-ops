@@ -111,6 +111,7 @@ dependencies = [
  "get_if_addrs",
  "hex",
  "hostname",
+ "lab-lib",
  "regex",
  "reqwest",
  "serde",
@@ -1076,6 +1077,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lab-lib"
+version = "0.1.0"
+dependencies = [
+ "bollard",
+ "color-eyre",
+ "serde",
+ "socket2",
+]
+
+[[package]]
 name = "lab-ops"
 version = "0.1.0"
 dependencies = [
@@ -1084,6 +1095,7 @@ dependencies = [
  "clap",
  "color-eyre",
  "comfy-table",
+ "lab-lib",
  "natmap",
  "regex",
  "tokio",
@@ -1224,6 +1236,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "lab-lib",
  "reqwest",
  "serde",
  "serde_json",

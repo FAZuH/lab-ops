@@ -6,9 +6,9 @@
 use std::net::IpAddr;
 use std::process::Command;
 
-use color_eyre::eyre::bail;
-use color_eyre::eyre::WrapErr;
 use color_eyre::Result;
+use color_eyre::eyre::WrapErr;
+use color_eyre::eyre::bail;
 
 /// Client that invokes `lab-ops natmap` to add/remove Docker port mappings.
 #[derive(Debug)]
@@ -24,9 +24,10 @@ impl NatmapClient {
     }
 
     /// Create a client using the `NATMAP_SOCKET` env var, defaulting to
-    /// `/run/natmap.sock`.
+    /// [`lab_lib::NATMAP_SOCKET`].
     pub fn default_socket() -> Self {
-        let socket = std::env::var("NATMAP_SOCKET").unwrap_or_else(|_| "/run/natmap.sock".into());
+        let socket =
+            std::env::var("NATMAP_SOCKET").unwrap_or_else(|_| lab_lib::NATMAP_SOCKET.into());
         NatmapClient { socket }
     }
 

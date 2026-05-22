@@ -9,9 +9,6 @@ use std::net::SocketAddr;
 
 use color_eyre::Result;
 use color_eyre::eyre::eyre;
-use socket2::Domain;
-use socket2::Socket;
-use socket2::Type;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tracing::info;
@@ -44,7 +41,7 @@ impl PortAllocator {
     ///
     /// Returns an error if the port is already bound by another process.
     pub async fn allocate(&self, addr: SocketAddr) -> Result<()> {
-        let socket = Self::new_freebind_socket(&addr)
+        let socket = lab_lib::port::create_freebind_socket(&addr)
             .map_err(|e| eyre!("Failed to create socket for {addr}: {e}"))?;
 
         socket
@@ -80,7 +77,7 @@ impl PortAllocator {
             return true;
         }
 
-        let Ok(socket) = Self::new_freebind_socket(&addr) else {
+        let Ok(socket) = lab_lib::port::create_freebind_socket(&addr) else {
             return false;
         };
 
@@ -96,28 +93,5 @@ impl PortAllocator {
         let count = sockets.len();
         sockets.clear();
         info!("Released all {count} reservations");
-    }
-
-    /// Creates and configures a `Socket` for `addr` with `SO_REUSEADDR`
-    /// and the appropriate `IP_FREEBIND` option.
-    fn new_freebind_socket(addr: &SocketAddr) -> std::io::Result<Socket> {
-        let domain = if addr.is_ipv4() {
-            Domain::IPV4
-        } else {
-            Domain::IPV6
-        };
-
-        let socket = Socket::new(domain, Type::STREAM, None)?;
-
-        // Without this we may fail to bind if the socket was just released and the port is briefly in TIME_WAIT.
-        socket.set_reuse_address(true)?;
-
-        if addr.is_ipv4() {
-            socket.set_freebind_v4(true)?;
-        } else {
-            socket.set_freebind_v6(true)?;
-        }
-
-        Ok(socket)
     }
 }

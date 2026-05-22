@@ -23,7 +23,7 @@ use crate::models::ListResponse;
 use crate::models::SnatConfig;
 use crate::models::SnatRequest;
 use crate::models::TransportProtocol;
-use crate::port_allocator::PortAllocator;
+use crate::port::PortAllocator;
 
 /// `GET /mappings` — Returns all managed DNAT, SNAT, hairpin, and Docker mappings.
 pub async fn list_mappings(State(state): State<AppState>) -> Json<ListResponse> {
@@ -312,8 +312,8 @@ pub async fn add_mapping(
         let container_name = inspect
             .name
             .as_deref()
+            .map(lab_lib::docker::trim_container_name)
             .unwrap_or("unknown")
-            .trim_start_matches('/')
             .to_string();
         let network_settings = inspect.network_settings.ok_or_else(|| {
             (

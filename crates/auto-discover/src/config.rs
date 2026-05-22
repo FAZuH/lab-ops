@@ -283,38 +283,38 @@ impl DiscoveryConfig {
                 });
 
             // Legacy forwarding uses ext_ports[0] as the host port directly
-            if let Some(f) = net.forwarding {
-                if let Some(p) = port {
-                    entry.forwarding.push(ForwardingConfig {
-                        fwd_type: ForwardingType::Remote,
-                        port: p,
-                        proto: f.proto,
-                        bind_ip: None,
-                        bind_interface: None,
-                        bind_port: None,
-                        ext_ip: Some(f.ext_ip),
-                        ext_ports: Some(f.ext_ports),
-                        hairpin: Some(f.hairpin),
-                        proxy_on: None,
-                    });
-                }
+            if let Some(f) = net.forwarding
+                && let Some(p) = port
+            {
+                entry.forwarding.push(ForwardingConfig {
+                    fwd_type: ForwardingType::Remote,
+                    port: p,
+                    proto: f.proto,
+                    bind_ip: None,
+                    bind_interface: None,
+                    bind_port: None,
+                    ext_ip: Some(f.ext_ip),
+                    ext_ports: Some(f.ext_ports),
+                    hairpin: Some(f.hairpin),
+                    proxy_on: None,
+                });
             }
 
             // RProxy entries: only create when no forwarding OR when template is non-empty
             let has_forwarding_in_entry = !entry.forwarding.is_empty();
-            if !has_forwarding_in_entry || (!net.template.is_empty() && !net.template.is_empty()) {
-                if let Some(p) = port {
-                    entry.rproxy.push(RProxyConfig {
-                        port: p,
-                        template: net.template.clone(),
-                        domains: net.domains.clone(),
-                        proxy_on: None,
-                        proxy_ip: net.proxy_ip.clone(),
-                        nginx_generator: net.nginx_generator.clone(),
-                        preprocess: net.preprocess.clone(),
-                        postprocess: net.postprocess.clone(),
-                    });
-                }
+            if (!has_forwarding_in_entry || (!net.template.is_empty() && !net.template.is_empty()))
+                && let Some(p) = port
+            {
+                entry.rproxy.push(RProxyConfig {
+                    port: p,
+                    template: net.template.clone(),
+                    domains: net.domains.clone(),
+                    proxy_on: None,
+                    proxy_ip: net.proxy_ip.clone(),
+                    nginx_generator: net.nginx_generator.clone(),
+                    preprocess: net.preprocess.clone(),
+                    postprocess: net.postprocess.clone(),
+                });
             }
 
             entry.extra.extend(net.extra);

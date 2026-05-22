@@ -4,49 +4,11 @@
 //! enums used across the CLI, daemon, and iptables modules.
 
 use std::collections::HashMap;
-use std::fmt::Display;
 use std::net::SocketAddr;
 
+pub use lab_lib::TransportProtocol;
 use serde::Deserialize;
 use serde::Serialize;
-
-/// Transport protocol (TCP or UDP).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum TransportProtocol {
-    #[default]
-    Tcp,
-    Udp,
-}
-
-impl TryFrom<String> for TransportProtocol {
-    type Error = color_eyre::eyre::Error;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        match value.as_str() {
-            "tcp" => Ok(Self::Tcp),
-            "udp" => Ok(Self::Udp),
-            _ => Err(color_eyre::eyre::eyre!(
-                "Invalid transport protocol {value}"
-            )),
-        }
-    }
-}
-
-impl TransportProtocol {
-    pub fn to_lowercase(&self) -> &'static str {
-        match self {
-            Self::Tcp => "tcp",
-            Self::Udp => "udp",
-        }
-    }
-}
-
-impl Display for TransportProtocol {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.to_lowercase())
-    }
-}
 
 /// Describes the desired port mapping between a host and a container.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

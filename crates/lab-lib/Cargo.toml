@@ -1,0 +1,14 @@
+[package]
+name = "lab-lib"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bollard = "0.21.0"
+color-eyre = "0.6"
+serde = { version = "1", features = ["derive"] }
+socket2 = "0.6.3"
+
+[lints.clippy]
+uninlined_format_args = "warn"
+new_without_default = "allow"

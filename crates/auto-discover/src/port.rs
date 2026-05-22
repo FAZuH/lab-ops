@@ -5,9 +5,7 @@
 //! are persisted to `ports.json` for crash recovery.
 
 use std::collections::HashMap;
-use std::net::TcpListener;
 use std::path::Path;
-use std::path::PathBuf;
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -74,26 +72,17 @@ pub fn allocate_port(assignments: &PortAssignments) -> Option<u16> {
         .find(|&port| !assignments.is_used(port) && port_is_free("0.0.0.0", port))
 }
 
-/// Check whether a TCP port is free by attempting a `TcpListener::bind`.
+/// Check whether a TCP port is free by attempting to bind to it
+/// using a socket configured with `SO_REUSEADDR` and `IP_FREEBIND`.
 pub fn port_is_free(host: &str, port: u16) -> bool {
     let addr = format!("{host}:{port}");
-    TcpListener::bind(&addr).is_ok()
-}
-
-/// Default state directory path: `/var/lib/auto-discover`.
-#[allow(dead_code)]
-pub fn default_state_dir() -> PathBuf {
-    PathBuf::from("/var/lib/auto-discover")
-}
-
-/// Default port assignments file: `$state_dir/ports.json`.
-#[allow(dead_code)]
-pub fn port_assignments_path() -> PathBuf {
-    default_state_dir().join("ports.json")
+    lab_lib::port::is_port_free(&addr)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::net::TcpListener;
+
     use tempfile::TempDir;
 
     use super::*;
@@ -130,16 +119,19 @@ mod tests {
 
     #[test]
     fn test_port_is_free_localhost() {
-        let port = 32768;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
         let result = port_is_free("127.0.0.1", port);
         assert!(result);
     }
 
     #[test]
     fn test_port_is_free_occupied() {
-        let port = 32769;
-        let addr = format!("127.0.0.1:{port}");
-        let listener = TcpListener::bind(&addr).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let _addr = format!("127.0.0.1:{port}");
         assert!(!port_is_free("127.0.0.1", port));
         drop(listener);
         assert!(port_is_free("127.0.0.1", port));

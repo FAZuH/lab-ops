@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use color_eyre::eyre::bail;
-use color_eyre::eyre::WrapErr;
 use color_eyre::Result;
+use color_eyre::eyre::WrapErr;
+use color_eyre::eyre::bail;
 use sha2::Digest;
 use sha2::Sha256;
 
@@ -11,15 +11,15 @@ use crate::config::DiscoveryConfig;
 use crate::config::ResolvedPortType;
 use crate::config::ResolvedService;
 use crate::config::ServiceType;
+use crate::consul::ConsulClient;
 use crate::consul::build_consul_service;
 use crate::consul::compute_generation_id;
-use crate::consul::ConsulClient;
-use crate::docker::ContainerInfo;
 use crate::docker::DockerClient;
+use crate::model::ContainerInfo;
 use crate::natmap::NatmapClient;
-use crate::ports::allocate_port;
-use crate::ports::port_is_free;
-use crate::ports::PortAssignments;
+use crate::port::PortAssignments;
+use crate::port::allocate_port;
+use crate::port::port_is_free;
 
 pub struct DiscoveryDaemon {
     config_path: PathBuf,
@@ -205,13 +205,12 @@ impl DiscoveryDaemon {
             .await
             .wrap_err("Consul API error")?;
 
-        if is_rproxy_or_forwarding_with_template(&resolved.port_type) {
-            if let Err(e) = self
+        if is_rproxy_or_forwarding_with_template(&resolved.port_type)
+            && let Err(e) = self
                 .store_nginx_config(resolved, &registration.id, host_port, &consul_ip)
                 .await
-            {
-                tracing::warn!("Failed to store nginx config: {}", e);
-            }
+        {
+            tracing::warn!("Failed to store nginx config: {}", e);
         }
 
         Ok(Some(registration.id))
@@ -286,13 +285,12 @@ impl DiscoveryDaemon {
             .await
             .wrap_err("Consul API error")?;
 
-        if is_rproxy_or_forwarding_with_template(&resolved.port_type) {
-            if let Err(e) = self
+        if is_rproxy_or_forwarding_with_template(&resolved.port_type)
+            && let Err(e) = self
                 .store_nginx_config(resolved, &registration.id, host_port, &consul_ip)
                 .await
-            {
-                tracing::warn!("Failed to store nginx config: {}", e);
-            }
+        {
+            tracing::warn!("Failed to store nginx config: {}", e);
         }
 
         Ok(Some(registration.id))
@@ -325,10 +323,10 @@ impl DiscoveryDaemon {
             }
             // Check container name and regex match criteria
             if let Some(mc) = &res.match_cfg {
-                if let Some(c) = &mc.container {
-                    if cinfo.name != *c {
-                        continue;
-                    }
+                if let Some(c) = &mc.container
+                    && cinfo.name != *c
+                {
+                    continue;
                 }
                 if let Some(cr) = &mc.container_regex {
                     if let Ok(re) = regex::Regex::new(cr) {
@@ -410,10 +408,10 @@ impl DiscoveryDaemon {
         if let Some(ref ip) = resolved.bind_ip {
             return Ok(ip.clone());
         }
-        if let Some(ref iface) = resolved.bind_interface {
-            if let Some(ip) = resolve_interface_ip(iface) {
-                return Ok(ip);
-            }
+        if let Some(ref iface) = resolved.bind_interface
+            && let Some(ip) = resolve_interface_ip(iface)
+        {
+            return Ok(ip);
         }
         self.natmap
             .get_container_ip(container_id)
@@ -488,7 +486,7 @@ impl DiscoveryDaemon {
         };
         envs.insert("AUTO_DISCOVER_ALL_DOMAINS".into(), domains.join(" "));
 
-        if let Some(ref proxy_ip) = proxy_ip {
+        if let Some(proxy_ip) = proxy_ip {
             envs.insert("AUTO_DISCOVER_PROXY_IP".into(), proxy_ip.clone());
         }
         envs.insert("AUTO_DISCOVER_BIND_IP".into(), consul_ip.to_string());
@@ -572,15 +570,15 @@ fn container_matches(container: &ContainerInfo, resolved: &ResolvedService) -> b
         None => return true,
     };
 
-    if let Some(proj) = &mc.project {
-        if container.compose_project.as_deref() != Some(proj.as_str()) {
-            return false;
-        }
+    if let Some(proj) = &mc.project
+        && container.compose_project.as_deref() != Some(proj.as_str())
+    {
+        return false;
     }
-    if let Some(c) = &mc.container {
-        if container.name != *c {
-            return false;
-        }
+    if let Some(c) = &mc.container
+        && container.name != *c
+    {
+        return false;
     }
     if let Some(cr) = &mc.container_regex {
         if let Ok(re) = regex::Regex::new(cr) {
@@ -610,10 +608,10 @@ fn get_natmap_bind_ip(resolved: &ResolvedService) -> Option<String> {
     if let Some(ref ip) = resolved.bind_ip {
         return Some(ip.clone());
     }
-    if let Some(ref iface) = resolved.bind_interface {
-        if let Some(ip) = resolve_interface_ip(iface) {
-            return Some(ip);
-        }
+    if let Some(ref iface) = resolved.bind_interface
+        && let Some(ip) = resolve_interface_ip(iface)
+    {
+        return Some(ip);
     }
     None
 }
@@ -630,16 +628,13 @@ fn resolve_interface_ip(iface_name: &str) -> Option<String> {
     }
 
     let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    if let Some(interfaces) = parsed.as_array() {
-        if let Some(interface) = interfaces.first() {
-            if let Some(addr_info) = interface.get("addr_info").and_then(|a| a.as_array()) {
-                if let Some(first_addr) = addr_info.first() {
-                    if let Some(ip) = first_addr.get("local").and_then(|l| l.as_str()) {
-                        return Some(ip.to_string());
-                    }
-                }
-            }
-        }
+    if let Some(interfaces) = parsed.as_array()
+        && let Some(interface) = interfaces.first()
+        && let Some(addr_info) = interface.get("addr_info").and_then(|a| a.as_array())
+        && let Some(first_addr) = addr_info.first()
+        && let Some(ip) = first_addr.get("local").and_then(|l| l.as_str())
+    {
+        return Some(ip.to_string());
     }
     None
 }
