@@ -8,37 +8,11 @@
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::sync::LazyLock;
 
 use color_eyre::Result;
 use color_eyre::eyre::Context;
-use regex::Regex;
 
-/// Matches the SOA record line to extract the zone name.
-static SOA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\S+\s+\d+\s+IN\s+SOA\s+").unwrap());
-/// Matches a standard DNS resource record line.
-static ZONE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(\S+)\s+(\d+)\s+IN\s+(\S+)\s+(.*)$").unwrap());
-/// Matches an inline `cf-proxied` comment annotation.
-static PROXIED: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\s*;\s*cf_tags=cf-proxied:(true|false)\s*$").unwrap());
-/// Extracts quoted strings from TXT record data.
-static TXT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#""([^"]*)""#).unwrap());
-
-/// A parsed DNS resource record.
-#[derive(Debug, Clone)]
-struct DnsRecord {
-    /// Fully-qualified domain name (trailing dot).
-    name: String,
-    /// Time-to-live in seconds.
-    ttl: u32,
-    /// Record type (A, AAAA, CNAME, MX, TXT, SRV, TLSA, NS).
-    rtype: String,
-    /// Record data (the RDATA portion).
-    data: String,
-    /// Whether Cloudflare proxying is enabled, if annotated.
-    proxied: Option<bool>,
-}
+use crate::cmd::dns_parser;
 
 /// Parses a BIND zone file and prints Ansible Cloudflare DNS tasks to stdout.
 ///
@@ -56,7 +30,7 @@ pub fn run(zone_file: impl AsRef<Path>, zone_name: Option<impl AsRef<str>>) -> R
         .map(|s| s.as_ref().to_string())
         .unwrap_or_else(|| extract_zone(&content));
 
-    let records = parse_zone(&content);
+    let records = dns_parser::parse_zone(&content);
     print_ansible_tasks(&records, &zone)?;
 
     Ok(())
@@ -67,159 +41,13 @@ pub fn run(zone_file: impl AsRef<Path>, zone_name: Option<impl AsRef<str>>) -> R
 /// Returns "example.com" as a fallback if no SOA record is found.
 fn extract_zone(content: &str) -> String {
     for line in content.lines() {
-        if SOA.is_match(line) {
+        if dns_parser::SOA.is_match(line) {
             let parts: Vec<&str> = line.split_whitespace().collect();
             let name = parts[0].trim_end_matches('.');
             return name.to_string();
         }
     }
     "example.com".to_string()
-}
-
-/// Parses BIND zone file content into a vector of [`DnsRecord`].
-///
-/// Skips empty lines, comments, and SOA records.
-fn parse_zone(content: &str) -> Vec<DnsRecord> {
-    let mut records = Vec::new();
-
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with(';') {
-            continue;
-        }
-
-        let caps = match ZONE.captures(line) {
-            Some(c) => c,
-            None => continue,
-        };
-
-        let name = caps[1].to_string();
-        let ttl: u32 = caps[2].parse().unwrap_or(1);
-        let rtype = caps[3].to_uppercase();
-        if rtype == "SOA" {
-            continue;
-        }
-
-        let raw_data = caps[4].to_string();
-
-        let (data, proxied) = split_data_and_proxied(&raw_data);
-
-        records.push(DnsRecord {
-            name,
-            ttl,
-            rtype,
-            data,
-            proxied,
-        });
-    }
-
-    records
-}
-
-/// Splits raw record data into its value and an optional Cloudflare proxied flag.
-fn split_data_and_proxied(raw: &str) -> (String, Option<bool>) {
-    let proxied = PROXIED.captures(raw).map(|c| c[1].to_lowercase() == "true");
-    let data = PROXIED.replace(raw, "").trim().to_string();
-
-    (data, proxied)
-}
-
-/// Strips the zone suffix from a fully-qualified domain name.
-///
-/// Returns `"@"` when the FQDN matches the zone (apex).
-fn strip_zone(fqdn: &str, zone: &str) -> String {
-    let fqdn = fqdn.trim_end_matches('.');
-    let zone = zone.trim_end_matches('.');
-
-    if fqdn == zone {
-        return "@".to_string();
-    }
-
-    let suffix = format!(".{zone}");
-    if fqdn.to_lowercase().ends_with(&suffix.to_lowercase()) {
-        let end = fqdn.len() - suffix.len();
-        return fqdn[..end].to_string();
-    }
-
-    fqdn.to_string()
-}
-
-/// Parses an SRV record name into (remaining record name, service, protocol).
-fn parse_srv_name(fqdn: &str, zone: &str) -> (String, String, String) {
-    let record_part = strip_zone(fqdn, zone);
-
-    if record_part == "@" {
-        return ("@".to_string(), "_unknown".to_string(), "_tcp".to_string());
-    }
-
-    let parts: Vec<&str> = record_part.split('.').collect();
-
-    let service = if !parts.is_empty() && parts[0].starts_with('_') {
-        parts[0][1..].to_string()
-    } else {
-        "_unknown".to_string()
-    };
-
-    let proto = if parts.len() >= 2 && parts[1].starts_with('_') {
-        parts[1][1..].to_string()
-    } else {
-        "_tcp".to_string()
-    };
-
-    let remaining = if parts.len() > 2 {
-        parts[2..].join(".")
-    } else {
-        "@".to_string()
-    };
-
-    (remaining, service, proto)
-}
-
-/// Parses a TLSA record name into (remaining record name, port, protocol).
-fn parse_tlsa_name(fqdn: &str, zone: &str) -> (String, u32, String) {
-    let record_part = strip_zone(fqdn, zone);
-
-    if record_part == "@" {
-        return ("@".to_string(), 0, "tcp".to_string());
-    }
-
-    let parts: Vec<&str> = record_part.split('.').collect();
-
-    let port: u32 = if !parts.is_empty() && parts[0].starts_with('_') {
-        parts[0][1..].parse().unwrap_or(0)
-    } else {
-        0
-    };
-
-    let proto = if parts.len() >= 2 && parts[1].starts_with('_') {
-        parts[1][1..].to_string()
-    } else {
-        "tcp".to_string()
-    };
-
-    let remaining = if parts.len() > 2 {
-        parts[2..].join(".")
-    } else {
-        "@".to_string()
-    };
-
-    (remaining, port, proto)
-}
-
-/// Concatenates all quoted strings in TXT record data into a single string.
-fn parse_txt_data(raw: &str) -> String {
-    let mut result = String::new();
-
-    for cap in TXT.captures_iter(raw) {
-        result.push_str(&cap[1]);
-    }
-
-    result
-}
-
-/// Returns whether a record type supports Cloudflare proxying.
-fn can_proxy(rtype: &str) -> bool {
-    matches!(rtype, "A" | "AAAA" | "CNAME")
 }
 
 /// Escapes a string for safe inclusion in a YAML double-quoted value.
@@ -258,13 +86,13 @@ fn yaml_escape(s: &str) -> String {
 }
 
 /// Prints the full Ansible playbook (YAML) for all parsed DNS records to stdout.
-fn print_ansible_tasks(records: &[DnsRecord], zone: &str) -> Result<()> {
+fn print_ansible_tasks(records: &[dns_parser::DnsRecord], zone: &str) -> Result<()> {
     print_ansible_tasks_to(records, zone, io::stdout().lock())
 }
 
 /// Writes the Ansible playbook for all parsed DNS records to the given writer.
 fn print_ansible_tasks_to<W: io::Write>(
-    records: &[DnsRecord],
+    records: &[dns_parser::DnsRecord],
     zone: &str,
     mut out: W,
 ) -> Result<()> {
@@ -274,12 +102,12 @@ fn print_ansible_tasks_to<W: io::Write>(
     writeln!(out)?;
 
     for rec in records {
-        let record_name = strip_zone(&rec.name, zone);
+        let record_name = dns_parser::strip_zone(&rec.name, zone);
 
         let task_name = match rec.rtype.as_str() {
             "SRV" => {
-                let (_, service, proto) = parse_srv_name(&rec.name, zone);
-                let full = strip_zone(&rec.name, zone);
+                let (_, service, proto) = dns_parser::parse_srv_name(&rec.name, zone);
+                let full = dns_parser::strip_zone(&rec.name, zone);
                 format!(
                     "Create {} {} SRV record",
                     zone,
@@ -291,7 +119,7 @@ fn print_ansible_tasks_to<W: io::Write>(
                 )
             }
             "TLSA" => {
-                let full = strip_zone(&rec.name, zone);
+                let full = dns_parser::strip_zone(&rec.name, zone);
                 format!("Create {zone} {full} TLSA record")
             }
             _ => format!(
@@ -312,7 +140,7 @@ fn print_ansible_tasks_to<W: io::Write>(
 
         match rec.rtype.as_str() {
             "SRV" => {
-                let (record, service, proto) = parse_srv_name(&rec.name, zone);
+                let (record, service, proto) = dns_parser::parse_srv_name(&rec.name, zone);
                 let parts: Vec<&str> = rec.data.split_whitespace().collect();
                 let priority: u32 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
                 let weight: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
@@ -335,7 +163,7 @@ fn print_ansible_tasks_to<W: io::Write>(
                 writeln!(out, "    value: {}", yaml_escape(target))?;
             }
             "TLSA" => {
-                let (record, port, proto) = parse_tlsa_name(&rec.name, zone);
+                let (record, port, proto) = dns_parser::parse_tlsa_name(&rec.name, zone);
                 let parts: Vec<&str> = rec.data.split_whitespace().collect();
                 let cert_usage: u32 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
                 let selector: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -365,7 +193,7 @@ fn print_ansible_tasks_to<W: io::Write>(
                 writeln!(out, "    priority: {priority}")?;
             }
             "TXT" => {
-                let txt = parse_txt_data(&rec.data);
+                let txt = dns_parser::parse_txt_data(&rec.data);
                 writeln!(out, "    record: {}", yaml_escape(&record_name))?;
                 writeln!(out, "    type: {}", yaml_escape(&rec.rtype))?;
                 writeln!(out, "    value: {}", yaml_escape(&txt))?;
@@ -382,7 +210,7 @@ fn print_ansible_tasks_to<W: io::Write>(
             writeln!(out, "    ttl: {}", rec.ttl)?;
         }
 
-        if can_proxy(&rec.rtype)
+        if dns_parser::can_proxy(&rec.rtype)
             && let Some(proxied) = rec.proxied
         {
             writeln!(
@@ -440,129 +268,8 @@ _25._tcp.mail.example.com.	1	IN	TLSA	3 1 1 CERTDATA
 "#;
 
     #[test]
-    fn test_parse_zone_count() {
-        let records = parse_zone(SAMPLE_ZONE);
-        assert!(
-            records.len() >= 12,
-            "Expected at least 12 records, got {}",
-            records.len()
-        );
-    }
-
-    #[test]
-    fn test_strip_zone_apex() {
-        assert_eq!(strip_zone("example.com.", "example.com"), "@");
-    }
-
-    #[test]
-    fn test_strip_zone_subdomain() {
-        assert_eq!(strip_zone("mail.example.com.", "example.com"), "mail");
-    }
-
-    #[test]
-    fn test_strip_zone_deep() {
-        assert_eq!(
-            strip_zone("_autodiscover._tcp.example.com.", "example.com"),
-            "_autodiscover._tcp"
-        );
-    }
-
-    #[test]
-    fn test_strip_zone_deep_with_sub() {
-        assert_eq!(
-            strip_zone("_25._tcp.mail.example.com.", "example.com"),
-            "_25._tcp.mail"
-        );
-    }
-
-    #[test]
-    fn test_strip_zone_hyphenated_subdomain() {
-        assert_eq!(
-            strip_zone("domain0-sg-proxmox-1.server.example.com.", "example.com"),
-            "domain0-sg-proxmox-1.server"
-        );
-    }
-
-    #[test]
-    fn test_parse_txt_single() {
-        assert_eq!(parse_txt_data(r#""hello world""#), "hello world");
-    }
-
-    #[test]
-    fn test_parse_txt_multi() {
-        assert_eq!(parse_txt_data(r#""hello " "world""#), "hello world");
-    }
-
-    #[test]
-    fn test_split_data_proxied_true() {
-        let (data, proxied) = split_data_and_proxied("203.0.113.1 ; cf_tags=cf-proxied:true");
-        assert_eq!(data, "203.0.113.1");
-        assert_eq!(proxied, Some(true));
-    }
-
-    #[test]
-    fn test_split_data_proxied_false() {
-        let (data, proxied) = split_data_and_proxied("192.0.2.1 ; cf_tags=cf-proxied:false");
-        assert_eq!(data, "192.0.2.1");
-        assert_eq!(proxied, Some(false));
-    }
-
-    #[test]
-    fn test_split_data_no_proxied() {
-        let (data, proxied) = split_data_and_proxied("192.0.2.1");
-        assert_eq!(data, "192.0.2.1");
-        assert_eq!(proxied, None);
-    }
-
-    #[test]
-    fn test_extract_zone() {
-        let content = "example.com.\t3600\tIN\tSOA\tns1.example.com. admin.example.com. 2026050601 10000 2400 604800 3600";
-        assert_eq!(extract_zone(content), "example.com");
-    }
-
-    #[test]
-    fn test_extract_zone_no_dot() {
-        let content = "example.com\t3600\tIN\tSOA\tns1.example.com. admin.example.com. 2026050601 10000 2400 604800 3600";
-        assert_eq!(extract_zone(content), "example.com");
-    }
-
-    #[test]
-    fn test_parse_srv_apex() {
-        let (record, service, proto) =
-            parse_srv_name("_autodiscover._tcp.example.com.", "example.com");
-        assert_eq!(record, "@");
-        assert_eq!(service, "autodiscover");
-        assert_eq!(proto, "tcp");
-    }
-
-    #[test]
-    fn test_parse_srv_subdomain() {
-        let (record, service, proto) =
-            parse_srv_name("_minecraft._tcp.mc.example.com.", "example.com");
-        assert_eq!(record, "mc");
-        assert_eq!(service, "minecraft");
-        assert_eq!(proto, "tcp");
-    }
-
-    #[test]
-    fn test_parse_tlsa_name() {
-        let (record, port, proto) = parse_tlsa_name("_25._tcp.mail.example.com.", "example.com");
-        assert_eq!(record, "mail");
-        assert_eq!(port, 25);
-        assert_eq!(proto, "tcp");
-    }
-
-    #[test]
-    fn test_parse_tlsa_name_apex() {
-        let (record, port, proto) = parse_tlsa_name("_443._tcp.example.com.", "example.com");
-        assert_eq!(record, "@");
-        assert_eq!(port, 443);
-        assert_eq!(proto, "tcp");
-    }
-
-    #[test]
     fn test_output_produces_yaml() {
-        let records = parse_zone(SAMPLE_ZONE);
+        let records = dns_parser::parse_zone(SAMPLE_ZONE);
         let types: Vec<&str> = records.iter().map(|r| r.rtype.as_str()).collect();
         assert!(types.contains(&"A"), "Missing A");
         assert!(types.contains(&"AAAA"), "Missing AAAA");
@@ -576,7 +283,7 @@ _25._tcp.mail.example.com.	1	IN	TLSA	3 1 1 CERTDATA
 
     #[test]
     fn test_a_record_proxied() {
-        let records = parse_zone(SAMPLE_ZONE);
+        let records = dns_parser::parse_zone(SAMPLE_ZONE);
         let apex_a = records
             .iter()
             .find(|r| r.name == "example.com." && r.rtype == "A")
@@ -592,7 +299,7 @@ _25._tcp.mail.example.com.	1	IN	TLSA	3 1 1 CERTDATA
 
     #[test]
     fn test_ns_records_not_proxied() {
-        let records = parse_zone(SAMPLE_ZONE);
+        let records = dns_parser::parse_zone(SAMPLE_ZONE);
         for rec in records.iter().filter(|r| r.rtype == "NS") {
             assert_eq!(rec.proxied, None, "NS records should not have proxied flag");
         }
@@ -600,7 +307,7 @@ _25._tcp.mail.example.com.	1	IN	TLSA	3 1 1 CERTDATA
 
     #[test]
     fn test_output_with_api_token() {
-        let records = parse_zone(SAMPLE_ZONE);
+        let records = dns_parser::parse_zone(SAMPLE_ZONE);
         let zone = "example.com";
         let mut buf = Vec::new();
         let result = print_ansible_tasks_to(&records, zone, &mut buf);
