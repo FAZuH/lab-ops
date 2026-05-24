@@ -1,3 +1,20 @@
+## 0.1.15 (2026-05-24)
+
+
+### Logging
+
+* Improve logging ([a688885](https://github.com/FAZuH/lab-ops/commit/a688885f33faed8ca209a6bb29b827bfe9d2cc22))
+
+
+### Bug Fixes
+
+* `bind_interface` not overriding `default.bind_ip` ([819a0db](https://github.com/FAZuH/lab-ops/commit/819a0dbd310c06bf8d0dacc755067c6c049cc240))
+
+
+### New Features
+
+* Add cf2terra command ([59c3d6a](https://github.com/FAZuH/lab-ops/commit/59c3d6a760f20fa55b14a3377d1faad1ce4e103b))
+
 ## 0.1.14 (2026-05-22)
 
 
@@ -35,11 +52,4 @@
 ### Auto Discover
 
 * Delete stale Consul K/V configs ([7e0c46e](https://github.com/FAZuH/lab-ops/commit/7e0c46e5c7dc1729e87fd496529edc53d603de6d))
-
-## 0.1.10 (2026-05-21)
-
-
-### Auto Discover
-
-* refactor!(ad): Rework discovery.yaml config spec ([9965dd2](https://github.com/FAZuH/lab-ops/commit/9965dd272c26d474be66bf6aef61fa49be36d1ae))
 

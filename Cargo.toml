@@ -3,7 +3,7 @@ members = ["crates/natmap", "crates/auto-discover", "crates/lab-lib"]
 
 [package]
 name = "lab-ops"
-version = "0.1.14"
+version = "0.1.15"
 edition = "2024"
 
 [features]
