@@ -226,18 +226,36 @@ impl DiscoveryConfig {
         Ok(config)
     }
 
+    fn resolve_binding(
+        &self,
+        svc_ip: Option<&String>,
+        svc_iface: Option<&String>,
+        def_ip: Option<&String>,
+        def_iface: Option<&String>,
+    ) -> (Option<String>, Option<String>) {
+        if let Some(ip) = svc_ip {
+            (Some(ip.clone()), None)
+        } else if let Some(iface) = svc_iface {
+            (None, Some(iface.clone()))
+        } else if let Some(ip) = def_ip {
+            (Some(ip.clone()), None)
+        } else if let Some(iface) = def_iface {
+            (None, Some(iface.clone()))
+        } else {
+            (None, None)
+        }
+    }
+
     pub fn resolve_all(&self) -> Vec<ResolvedService> {
         let mut resolved = Vec::new();
 
         for (service_id_prefix, service) in &self.services {
-            let svc_bind_ip = service
-                .bind_ip
-                .clone()
-                .or_else(|| self.defaults.bind_ip.clone());
-            let svc_bind_interface = service
-                .bind_interface
-                .clone()
-                .or_else(|| self.defaults.bind_interface.clone());
+            let (svc_bind_ip, svc_bind_interface) = self.resolve_binding(
+                service.bind_ip.as_ref(),
+                service.bind_interface.as_ref(),
+                self.defaults.bind_ip.as_ref(),
+                self.defaults.bind_interface.as_ref(),
+            );
 
             for rp in &service.rproxylocal {
                 resolved.push(ResolvedService {
@@ -316,6 +334,12 @@ impl DiscoveryConfig {
             }
 
             for fl in &service.forwardlocal {
+                let (final_ip, final_iface) = self.resolve_binding(
+                    fl.bind_ip.as_ref(),
+                    fl.bind_interface.as_ref(),
+                    svc_bind_ip.as_ref(),
+                    svc_bind_interface.as_ref(),
+                );
                 resolved.push(ResolvedService {
                     service_id_prefix: service_id_prefix.clone(),
                     service_name: service_id_prefix.clone(),
@@ -327,11 +351,8 @@ impl DiscoveryConfig {
                         .proxy_on
                         .clone()
                         .or_else(|| self.defaults.proxy_on.clone()),
-                    bind_ip: fl.bind_ip.clone().or_else(|| svc_bind_ip.clone()),
-                    bind_interface: fl
-                        .bind_interface
-                        .clone()
-                        .or_else(|| svc_bind_interface.clone()),
+                    bind_ip: final_ip,
+                    bind_interface: final_iface,
                     protocol: fl.proto.unwrap_or_default(),
                     extra: service.extra.clone(),
                     port_type: ResolvedPortType::ForwardLocal {

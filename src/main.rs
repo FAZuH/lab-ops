@@ -7,6 +7,7 @@ use color_eyre::Result;
 use lab_ops::cli::Cli;
 use lab_ops::cli::Command;
 use lab_ops::cmd::cf2ansible;
+use lab_ops::cmd::cf2terra;
 use lab_ops::cmd::dockernet;
 
 fn main() -> Result<()> {
@@ -26,6 +27,11 @@ fn main() -> Result<()> {
             zone_file,
             zone_name,
         } => cf2ansible::run(zone_file, zone_name)?,
+        Command::Cf2Terra {
+            zone_file,
+            zone_name,
+            zone_id_var,
+        } => cf2terra::run(zone_file, zone_name, zone_id_var)?,
         Command::DockerNet => {
             use tokio::runtime::Builder;
 

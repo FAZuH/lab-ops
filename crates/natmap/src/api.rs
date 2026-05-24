@@ -42,6 +42,14 @@ pub async fn list_mappings(State(state): State<AppState>) -> Json<ListResponse> 
 ///
 /// Idempotent: if the exact same DNAT config already exists in the daemon
 /// state (e.g. after restart reconciliation), returns OK without error.
+///
+/// Span fields: `ext.ip`, `int.ip`, `ports`, `proto`.
+#[tracing::instrument(skip_all, fields(
+    ext.ip = %req.ext_ip,
+    int.ip = %req.int_ip,
+    ports = %req.ports,
+    proto = %req.proto
+))]
 pub async fn add_dnat(
     State(state): State<AppState>,
     Json(req): Json<DnatRequest>,
@@ -83,6 +91,14 @@ pub async fn add_dnat(
 }
 
 /// `DELETE /dnat` — Removes a static DNAT rule.
+///
+/// Span fields: `ext.ip`, `int.ip`, `ports`, `proto`.
+#[tracing::instrument(skip_all, fields(
+    ext.ip = %req.ext_ip,
+    int.ip = %req.int_ip,
+    ports = %req.ports,
+    proto = %req.proto
+))]
 pub async fn remove_dnat(
     State(state): State<AppState>,
     Json(req): Json<DnatRequest>,
@@ -303,6 +319,14 @@ pub async fn remap_port(
 }
 
 /// `POST /mapping/:container_id` — Adds a new port mapping.
+///
+/// Span fields: `host.addr`, `container.addr`, `proto`, `container.id`.
+#[tracing::instrument(skip_all, fields(
+    host.addr = tracing::field::Empty,
+    container.addr = tracing::field::Empty,
+    proto = %req.proto,
+    container.id = %container_id
+))]
 pub async fn add_mapping(
     State(state): State<AppState>,
     Path(container_id): Path<String>,
@@ -395,6 +419,11 @@ pub async fn add_mapping(
     })?;
     let host_addr = SocketAddr::new(host_ip, req.host_port);
     let container_addr = SocketAddr::new(container_ip, req.container_port);
+
+    let span = tracing::Span::current();
+    span.record("host.addr", tracing::field::display(host_addr));
+    span.record("container.addr", tracing::field::display(container_addr));
+
     let request = DockerPortMapRequest {
         host_addr,
         container_addr,

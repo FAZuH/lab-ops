@@ -5,6 +5,8 @@ use clap::Subcommand;
 
 /// Subcommand name for the DNS zone-to-Ansible converter.
 pub const CMD_CF2ANSIBLE: &str = "cf2ansible";
+/// Subcommand name for the DNS zone-to-Terraform converter.
+pub const CMD_CF2TERRA: &str = "cf2terra";
 /// Subcommand name for the Docker network viewer.
 pub const CMD_DOCKERNET: &str = "dockernet";
 /// Subcommand name for the NAT mapping tool.
@@ -31,6 +33,17 @@ pub enum Command {
         zone_file: PathBuf,
         /// Zone name override; defaults to the name extracted from the SOA record.
         zone_name: Option<String>,
+    },
+    /// Converts BIND DNS zone files to Terraform Cloudflare DNS resources.
+    #[command(name = CMD_CF2TERRA)]
+    Cf2Terra {
+        /// Path to the DNS zone file to parse.
+        zone_file: PathBuf,
+        /// Zone name override; defaults to the name extracted from the SOA record.
+        zone_name: Option<String>,
+        /// Terraform variable for the Cloudflare Zone ID.
+        #[arg(long, default_value = "var.cloudflare_zone_id")]
+        zone_id_var: String,
     },
     /// Displays IP addresses and port bindings of Docker containers.
     #[command(name = CMD_DOCKERNET)]

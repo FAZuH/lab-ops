@@ -89,22 +89,25 @@ impl NatmapClient {
     ///
     /// Handles the 409 Conflict response (mapping already exists) as a
     /// non-fatal warning rather than an error.
+    ///
+    /// Span fields: `host.port`, `container.port`, `proto`.
+    #[tracing::instrument(skip_all, fields(host.port = %host_port, container.port = %container_port, proto = %proto))]
     pub async fn add_docker_mapping(
         &self,
         container_id: &str,
-        bind_ip: Option<&str>,
+        host_ip: Option<&str>,
         host_port: u16,
         container_port: u16,
-        protocol: TransportProtocol,
+        proto: TransportProtocol,
         target_ip: Option<&str>,
     ) -> Result<()> {
-        let spec = match (bind_ip, target_ip) {
+        let spec = match (host_ip, target_ip) {
             (Some(ip), Some(tip)) => {
-                format!("{ip}:{host_port}:{tip}:{container_port}/{protocol}")
+                format!("{ip}:{host_port}:{tip}:{container_port}/{proto}")
             }
-            (Some(ip), None) => format!("{ip}:{host_port}:{container_port}/{protocol}"),
-            (None, Some(tip)) => format!("{host_port}:{tip}:{container_port}/{protocol}"),
-            (None, None) => format!("{host_port}:{container_port}/{protocol}"),
+            (Some(ip), None) => format!("{ip}:{host_port}:{container_port}/{proto}"),
+            (None, Some(tip)) => format!("{host_port}:{tip}:{container_port}/{proto}"),
+            (None, None) => format!("{host_port}:{container_port}/{proto}"),
         };
         let cli = Cli {
             socket: self.socket.clone().into(),

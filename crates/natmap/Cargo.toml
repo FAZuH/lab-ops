@@ -26,3 +26,6 @@ http-body-util = "0.1.3"
 [lints.clippy]
 uninlined_format_args = "warn"
 new_without_default = "allow"
+[dev-dependencies]
+tracing-test = "0.2"
+tempfile = "3"

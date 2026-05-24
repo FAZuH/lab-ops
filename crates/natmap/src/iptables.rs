@@ -10,9 +10,6 @@ use std::process::Command;
 
 use color_eyre::Result;
 use color_eyre::eyre::bail;
-use tracing::debug;
-use tracing::error;
-use tracing::info;
 
 use crate::models::DnatConfig;
 use crate::models::DockerPortMap;
@@ -45,7 +42,7 @@ impl IptablesManager {
     /// Operates on both `iptables` (IPv4) and `ip6tables` (IPv6).
     /// This method is idempotent.
     pub fn setup(&self) -> Result<()> {
-        info!("Setting up iptables chains and jumps");
+        tracing::info!("setting up iptables chains and jumps");
 
         for &cmd in &["iptables", "ip6tables"] {
             // Verify DOCKER-USER exists (it should, Docker makes it). Create if missing.
@@ -82,7 +79,7 @@ impl IptablesManager {
 
     /// Installs DNAT, FORWARD ACCEPT, MASQUERADE, and OUTPUT DNAT rules for a Docker mapping.
     pub fn install_dockermap(&self, map: &DockerPortMap) -> Result<()> {
-        debug!("Installing mapping: {map:?}");
+        tracing::debug!(mapping = ?map, "installing mapping");
         let cmd = self.cmd_for(map.request.is_ipv6());
         let req = &map.request;
 
@@ -210,7 +207,7 @@ impl IptablesManager {
     ///
     /// Used during crash recovery and clean shutdown to reset all natmap-managed rules.
     pub fn flush_all_natmap(&self) -> Result<()> {
-        info!("Flushing all NATMAP iptables rules");
+        tracing::info!("flushing all NATMAP iptables rules");
 
         for &cmd in &["iptables", "ip6tables"] {
             let _ = self.flush_chain(cmd, "nat", NATMAP);
@@ -380,7 +377,7 @@ impl IptablesManager {
 
     /// Removes all iptables rules associated with a Docker mapping by its rule comment.
     pub fn remove_mapping(&self, map: &DockerPortMap) -> Result<()> {
-        debug!("Removing mapping: {map:?}");
+        tracing::debug!(mapping = ?map, "removing mapping");
         self.remove_by_comment(&map.rule_comment, map.request.is_ipv6())?;
         Ok(())
     }
@@ -435,7 +432,7 @@ impl IptablesManager {
                 .collect::<Vec<_>>()
                 .join(" ");
             let program = program.as_ref().to_string_lossy();
-            error!("{program} {args_str} failed: {err}");
+            tracing::error!(program = %program, args = %args_str, error = %err, "command failed");
             bail!("{program} failed: {err}");
         }
     }
@@ -446,7 +443,14 @@ impl IptablesManager {
         program: impl AsRef<OsStr>,
         args: impl IntoIterator<Item = impl AsRef<OsStr>>,
     ) -> Result<std::process::Output> {
-        Ok(Command::new(program.as_ref()).args(args).output()?)
+        let args_vec: Vec<_> = args.into_iter().map(|a| a.as_ref().to_owned()).collect();
+        let args_str = args_vec
+            .iter()
+            .map(|a| a.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ");
+        tracing::trace!(command = %program.as_ref().to_string_lossy(), args = %args_str, "raw iptables command");
+        Ok(Command::new(program.as_ref()).args(&args_vec).output()?)
     }
 
     /// Checks whether a chain exists in the given table.

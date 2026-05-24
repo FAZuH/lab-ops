@@ -6,7 +6,6 @@ use std::str::FromStr;
 
 use bollard::Docker;
 use color_eyre::Result;
-use tracing::debug;
 
 use crate::models::DockerPortMap;
 use crate::models::DockerPortMapRequest;
@@ -43,7 +42,7 @@ pub async fn get_port_mappings(docker: &Docker, c_id: &str) -> Result<Vec<Docker
                 .and_then(|ip| IpAddr::from_str(ip).ok())
         })
     }) else {
-        debug!("Container {c_id} has no IP address, skipping ports");
+        tracing::debug!(container.id = %c_id, "container has no IP address, skipping ports");
         return Ok(vec![]);
     };
 

@@ -90,15 +90,26 @@ sleep 1
     /// Writes new-format YAML config via extra_setup overwrite.
     /// The services_yaml must contain the `services:` block.
     fn new_format_setup(services_yaml: &str, extra_setup: &str) -> String {
-        new_format_setup_ext(services_yaml, extra_setup, "--no-forwarding --no-nginx")
+        new_format_setup_with_defaults_ext(
+            services_yaml,
+            "",
+            extra_setup,
+            "--no-forwarding --no-nginx",
+        )
     }
 
-    fn new_format_setup_ext(services_yaml: &str, extra_setup: &str, daemon_flags: &str) -> String {
+    fn new_format_setup_with_defaults_ext(
+        services_yaml: &str,
+        defaults_yaml: &str,
+        extra_setup: &str,
+        daemon_flags: &str,
+    ) -> String {
         let full_yaml = format!(
             r#"node:
   name: int-test-node
 defaults:
   nginx_generator: /tmp/gen-nginx
+{defaults_yaml}
 {services_yaml}"#
         );
         format!(
@@ -560,7 +571,7 @@ if [ -n "$MATCH" ]; then echo "FAIL: forwarding-local should have no nginx KV co
 echo "PASS: forwarding local bind_port=36000 with forwarding_type=local"
 {teardown}
 "#,
-            setup = new_format_setup(services_yaml, ""),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
             teardown = test_teardown(&[cname]),
             cname = cname,
         );
@@ -634,7 +645,7 @@ if [ -z "$MATCH" ]; then echo "FAIL: rproxylocal should have nginx KV config" >&
 echo "PASS: forwardlocal + rproxylocal separate entries"
 {teardown}
 "#,
-            setup = new_format_setup_ext(services_yaml, "", "--no-forwarding"),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
             teardown = test_teardown(&[cname]),
             cname = cname,
         );
@@ -681,7 +692,7 @@ echo "PASS: local forwarding local at 10.99.99.99:50000 with forwarding_type=loc
 kill %3 %2 %1 2>/dev/null || true
 sleep 1
 "#,
-            setup = new_format_setup(services_yaml, ""),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
         );
         let out = run(&script);
         assert_pass(&out, "local_forwarding_local_bind_port");
@@ -720,7 +731,7 @@ if [ "$FWD_TYPE" != "local" ]; then echo "FAIL: expected forwarding_type=local, 
 echo "PASS: forwarding local no bind (ephemeral), port=$PORT with forwarding_type=local"
 {teardown}
 "#,
-            setup = new_format_setup(services_yaml, ""),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
             teardown = test_teardown(&[cname]),
             cname = cname,
         );
@@ -763,7 +774,7 @@ if [ "$MAPPING" != "$EXPECTED" ]; then echo "FAIL: expected $EXPECTED, got $MAPP
 echo "PASS: bound to $EXPECTED"
 {teardown}
 "#,
-            setup = new_format_setup(services_yaml, ""),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
             teardown = test_teardown(&[cname]),
             cname = cname,
         );
@@ -806,7 +817,7 @@ if [ "$MAPPING" != "$EXPECTED" ]; then echo "FAIL: expected $EXPECTED, got $MAPP
 echo "PASS: bound to $EXPECTED"
 {teardown}
 "#,
-            setup = new_format_setup(services_yaml, ""),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
             teardown = test_teardown(&[cname]),
             cname = cname,
         );
@@ -814,8 +825,55 @@ echo "PASS: bound to $EXPECTED"
         let out = run(&script);
         assert_pass(&out, "Test C — bind_interface");
     }
+    #[test]
+    fn bind_interface_overrides_defaults() {
+        let cname = "it-iface-override";
+        let services_yaml = r#"
+services:
+  it-svc-override:
+    type: docker
+    match:
+      project: it-svc-override
+    bind_interface: dummy0
+    rproxylocal:
+    - port: 80
+      template: HTTP_PROXY
+      domains:
+      - it-svc-override.test.local"#;
 
-    // ── Test D: Forwarding with Static Port ──────────────────────────
+        let defaults_yaml = r#"
+  bind_ip: 1.2.3.4
+"#;
+
+        let script = format!(
+            r#"{setup}
+docker run -d --name {cname} -l "com.docker.compose.project=it-svc-override" nginx:alpine
+sleep 4
+
+PORT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-override") | .value.Port')
+if [ -z "$PORT" ] || [ "$PORT" = "null" ]; then echo "FAIL: not registered with Consul" >&2; exit 1; fi
+
+CID=$(docker inspect -f '{{{{.Id}}}}' {cname} | cut -c1-12)
+MAPPING=$(lab-ops natmap --socket /tmp/natmap.sock ls | awk -v id="$CID" '$6 == id {{print $8}}')
+EXPECTED="10.99.99.1:$PORT"
+if [ "$MAPPING" != "$EXPECTED" ]; then echo "FAIL: expected $EXPECTED, got $MAPPING" >&2; exit 1; fi
+
+echo "PASS: bound to $EXPECTED, ignored default 1.2.3.4"
+{teardown}
+"#,
+            setup = new_format_setup_with_defaults_ext(
+                services_yaml,
+                defaults_yaml,
+                "",
+                "--no-forwarding --no-nginx"
+            ),
+            teardown = test_teardown(&[cname]),
+            cname = cname,
+        );
+
+        let out = run(&script);
+        assert_pass(&out, "Test C — bind_interface_overrides_defaults");
+    }
 
     #[test]
     fn forwarding_static_port() {
@@ -854,7 +912,7 @@ if [ "$EXT_PORTS" != "36000" ]; then echo "FAIL: incorrect ext_ports: $EXT_PORTS
 echo "PASS: static port 36000 with forwarding meta"
 {teardown}
 "#,
-            setup = new_format_setup(services_yaml, ""),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
             teardown = test_teardown(&[cname]),
             cname = cname,
         );
@@ -897,7 +955,7 @@ if [ "$HAIRPIN" != "true" ]; then echo "FAIL: missing hairpin meta" >&2; exit 1;
 echo "PASS: static port 36001 with hairpin meta"
 {teardown}
 "#,
-            setup = new_format_setup(services_yaml, ""),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
             teardown = test_teardown(&[cname]),
             cname = cname,
         );
@@ -948,7 +1006,7 @@ fi
 echo "PASS: nginx config stored at $KV_KEY"
 {teardown}
 "#,
-            setup = new_format_setup(services_yaml, ""),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
             teardown = test_teardown(&[cname]),
             cname = cname,
         );
@@ -990,7 +1048,7 @@ fi
 echo "PASS: forwarding service has no KV config"
 {teardown}
 "#,
-            setup = new_format_setup(services_yaml, ""),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
             teardown = test_teardown(&[cname]),
             cname = cname,
         );
@@ -1047,7 +1105,7 @@ docker rm -f {cname} 2>/dev/null || true
 kill %3 %2 %1 2>/dev/null || true
 sleep 1
 "#,
-            setup = new_format_setup(services_yaml, ""),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
             cname = cname,
         );
 
@@ -1084,7 +1142,7 @@ if [ -n "$SVC" ]; then echo "FAIL: host-networked container should not be regist
 echo "PASS: host-networked container correctly skipped"
 {teardown}
 "#,
-            setup = new_format_setup(services_yaml, ""),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
             teardown = test_teardown(&[cname]),
             cname = cname,
         );
@@ -1118,7 +1176,7 @@ if [ -z "$SVC" ]; then echo "FAIL: container not registered (port exposure not r
 echo "PASS: container matched despite no port exposure"
 {teardown}
 "#,
-            setup = new_format_setup(services_yaml, ""),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
             teardown = test_teardown(&[cname]),
             cname = cname,
         );
@@ -1169,7 +1227,7 @@ fi
 echo "PASS: stream template stored in streams prefix"
 {teardown}
 "#,
-            setup = new_format_setup(services_yaml, ""),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
             teardown = test_teardown(&[cname]),
             cname = cname,
         );
@@ -1210,7 +1268,7 @@ if [ "$MAX_CONNS" != "100" ]; then echo "FAIL: extra field 'max_conns' not in me
 echo "PASS: extra fields present in Consul meta"
 {teardown}
 "#,
-            setup = new_format_setup(services_yaml, ""),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
             teardown = test_teardown(&[cname]),
             cname = cname,
         );
@@ -1252,7 +1310,7 @@ fi
 echo "PASS: service ID contains domain slug: $SVC_ID"
 {teardown}
 "#,
-            setup = new_format_setup(services_yaml, ""),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
             teardown = test_teardown(&[cname]),
             cname = cname,
         );
@@ -1289,7 +1347,7 @@ fi
 echo "PASS: service ID uses name fallback: $SVC_ID"
 {teardown}
 "#,
-            setup = new_format_setup(services_yaml, ""),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
             teardown = test_teardown(&[cname]),
             cname = cname,
         );
@@ -1327,7 +1385,7 @@ fi
 echo "PASS: Meta.container_id matches container: $META_CID"
 {teardown}
 "#,
-            setup = new_format_setup(services_yaml, ""),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
             teardown = test_teardown(&[cname]),
             cname = cname,
         );
@@ -1382,7 +1440,7 @@ fi
 echo "PASS: port $PORT_AFTER reused across container restart"
 {teardown}
 "#,
-            setup = new_format_setup(services_yaml, ""),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
             teardown = test_teardown(&[cname]),
             cname = cname,
         );
@@ -1445,7 +1503,7 @@ if ! echo "$KV_VAL" | grep -q 'preprocessed.com'; then echo "FAIL: preprocess sh
 echo "PASS: preprocess modified config"
 {teardown}
 "#,
-            setup = new_format_setup(services_yaml, ""),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
             teardown = test_teardown(&[cname]),
             cname = cname,
         );
@@ -1488,7 +1546,7 @@ fi
 echo "PASS: postprocess stored in KV at $POST_KEY"
 {teardown}
 "#,
-            setup = new_format_setup(services_yaml, ""),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
             teardown = test_teardown(&[cname]),
             cname = cname,
         );
@@ -1527,7 +1585,7 @@ if ! echo "$KV_VAL" | grep -q 'primary.test.local'; then echo "FAIL: config miss
 echo "PASS: primary domain=$DOMAIN, multi-domain service registered"
 {teardown}
 "#,
-            setup = new_format_setup(services_yaml, ""),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
             teardown = test_teardown(&[cname]),
             cname = cname,
         );
@@ -1560,7 +1618,7 @@ if [ -z "$PORT" ]; then echo "FAIL: service not registered despite generator fai
 echo "PASS: service registered despite generator failure"
 {teardown}
 "#,
-            setup = new_format_setup(services_yaml, ""),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
             teardown = test_teardown(&[cname]),
             cname = cname,
         );
@@ -1597,7 +1655,7 @@ if [ -n "$SVC" ]; then echo "FAIL: mismatched project should not register" >&2; 
 echo "PASS: mismatched compose project correctly skipped"
 {teardown}
 "#,
-            setup = new_format_setup(services_yaml, ""),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
             teardown = test_teardown(&[cname]),
             cname = cname,
         );
@@ -1638,7 +1696,7 @@ docker rm -f {cname} 2>/dev/null || true
 kill %3 %2 %1 2>/dev/null || true
 sleep 1
 "#,
-            setup = new_format_setup(services_yaml, ""),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
             cname = cname,
         );
         let out = run(&script);
@@ -1683,7 +1741,7 @@ echo "PASS: local service registered at $ADDR:$PORT, NAT bypassed, nginx config 
 kill %3 %2 %1 2>/dev/null || true
 sleep 1
 "#,
-            setup = new_format_setup_ext(services_yaml, "", "--no-forwarding"),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
         );
         let out = run(&script);
         assert_pass(&out, "local_service");
@@ -1734,7 +1792,7 @@ echo "PASS: local forwarding remote at 10.99.99.99:40000 with forwarding meta"
 kill %3 %2 %1 2>/dev/null || true
 sleep 1
 "#,
-            setup = new_format_setup_ext(services_yaml, "", "--no-forwarding"),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
         );
         let out = run(&script);
         assert_pass(&out, "local_forwarding_remote");
@@ -1784,7 +1842,7 @@ docker exec {cname} wget -q -O - http://localhost:80/ 2>/dev/null | grep -qi ngi
 echo "PASS: reachable, DNAT rules verified, container serving"
 {teardown}
 "#,
-            setup = new_format_setup(services_yaml, ""),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
             teardown = test_teardown(&[cname]),
             cname = cname,
         );
@@ -1851,7 +1909,7 @@ PORT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | sele
 echo "PASS: forwardremote + rproxylocal separate entries"
 {teardown}
 "#,
-            setup = new_format_setup(services_yaml, ""),
+            setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
             teardown = test_teardown(&[cname]),
             cname = cname,
         );
@@ -2495,7 +2553,7 @@ sleep 1
             cnames.push(project);
         }
         let services_yaml = format!("\nservices:\n{yaml_services}");
-        let script = format!(
+        let _script = format!(
             r#"{setup}
 for cn in {cnames_list}; do
     docker run -d --name "$cn" -l "com.docker.compose.project=$cn" nginx:alpine
@@ -2513,7 +2571,61 @@ sleep 1
             setup = new_format_setup(&services_yaml, ""),
             cnames_list = cnames.join(" "),
         );
+    }
+
+    #[test]
+    fn event_loop_logs_structured_fields() {
+        let cname = "it-log-fields";
+        let services_yaml = r#"
+services:
+  it-svc-log:
+    type: docker
+    match:
+      project: it-svc-log
+    rproxylocal:
+    - port: 80
+      template: HTTP_PROXY
+      domains:
+      - it-svc-log.test.local"#;
+
+        let script = format!(
+            r#"{setup}
+# Restart daemon with debug logging so fields are visible
+kill %3 2>/dev/null || true
+sleep 1
+NO_COLOR=1 RUST_LOG_STYLE=never RUST_LOG="info,auto_discover=debug" lab-ops auto-discover daemon /tmp/discovery.yaml \
+    --state-dir /tmp/state \
+    --no-forwarding --no-nginx \
+    --consul-addr http://127.0.0.1:8500 \
+    >/tmp/discovery-debug.log 2>&1 &
+sleep 3
+
+RUST_LOG=debug docker run -d --name {cname} \
+    -l "com.docker.compose.project=it-svc-log" nginx:alpine
+sleep 5
+
+if ! grep -q 'container.id=' /tmp/discovery-debug.log && \
+   ! grep -q 'container_id=' /tmp/discovery-debug.log; then
+    echo "FAIL: no structured container.id field in logs" >&2
+    head -50 /tmp/discovery-debug.log >&2
+    exit 1
+fi
+
+if grep -qP 'Docker event.*:.*' /tmp/discovery-debug.log; then
+    echo "FAIL: found interpolated string format in logs" >&2
+    grep -P 'Docker event.*:.*' /tmp/discovery-debug.log >&2
+    exit 1
+fi
+
+echo "PASS: structured log fields present"
+{teardown}
+"#,
+            setup = new_format_setup(services_yaml, ""),
+            teardown = test_teardown(&[cname]),
+            cname = cname,
+        );
+
         let out = run(&script);
-        assert_pass(&out, "Phase 9 — large config");
+        assert_pass(&out, "event_loop_logs_structured_fields");
     }
 }

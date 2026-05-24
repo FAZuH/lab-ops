@@ -82,9 +82,9 @@ impl DiscoveryDaemon {
                             Ok(None) => {}
                             Err(e) => {
                                 tracing::error!(
-                                    "Failed to sync {}: {}",
-                                    resolved.service_id_prefix,
-                                    e
+                                    service.id_prefix = %resolved.service_id_prefix,
+                                    error = %e,
+                                    "failed to sync service"
                                 );
                             }
                         }
@@ -94,8 +94,8 @@ impl DiscoveryDaemon {
                 ServiceType::Local => {
                     if resolved.local_address.is_none() {
                         tracing::warn!(
-                            "Local service {} missing address, skipping",
-                            resolved.service_id_prefix
+                            service.id_prefix = %resolved.service_id_prefix,
+                            "local service missing address, skipping"
                         );
                         Ok(vec![])
                     } else {
@@ -109,9 +109,9 @@ impl DiscoveryDaemon {
                         .map(|id| id.into_iter().collect::<Vec<_>>())
                         .map_err(|e| {
                             tracing::error!(
-                                "Failed to sync local service {}: {}",
-                                resolved.service_id_prefix,
-                                e
+                                service.id_prefix = %resolved.service_id_prefix,
+                                error = %e,
+                                "failed to sync local service"
                             );
                             e
                         })
@@ -125,7 +125,7 @@ impl DiscoveryDaemon {
 
         port_assignments
             .save(&ports_path)
-            .map_err(|e| tracing::warn!("Failed to save port assignments: {}", e))
+            .map_err(|e| tracing::warn!(error = %e, "failed to save port assignments"))
             .ok();
 
         let stale_ids = self
@@ -135,17 +135,20 @@ impl DiscoveryDaemon {
             .unwrap_or_default();
         for id in &stale_ids {
             if let Err(e) = self.consul.delete_nginx_config_kv(id).await {
-                tracing::warn!("Failed to delete nginx config KV for {}: {}", id, e);
+                tracing::warn!(service.id = %id, error = %e, "failed to delete nginx config KV");
             }
         }
         if !stale_ids.is_empty() {
-            tracing::info!("Deregistered {} stale services", stale_ids.len());
+            tracing::info!(
+                services.count = stale_ids.len(),
+                "deregistered stale services"
+            );
         }
 
         tracing::info!(
-            "Sync complete: {} services active, generation_id={}",
-            current_service_ids.len(),
-            generation_id
+            services.active = current_service_ids.len(),
+            generation.id = %generation_id,
+            "sync complete"
         );
 
         Ok(())
@@ -179,7 +182,7 @@ impl DiscoveryDaemon {
             _ => match port_assignments.get_or_allocate(&port_key) {
                 Some(p) => (p, false),
                 None => {
-                    tracing::warn!("No free ports for {}", resolved.service_id_prefix);
+                    tracing::warn!(service.id_prefix = %resolved.service_id_prefix, "no free ports for service");
                     return Ok(None);
                 }
             },
@@ -218,7 +221,7 @@ impl DiscoveryDaemon {
                 .store_nginx_config(resolved, &registration.id, host_port, &consul_ip)
                 .await
         {
-            tracing::warn!("Failed to store nginx config: {}", e);
+            tracing::warn!(error = %e, "failed to store nginx config");
         }
 
         Ok(Some(registration.id))
@@ -252,7 +255,7 @@ impl DiscoveryDaemon {
                 match port_assignments.get_or_allocate(&port_key) {
                     Some(p) => (p, false),
                     None => {
-                        tracing::warn!("No free ports for {}", resolved.service_id_prefix);
+                        tracing::warn!(service.id_prefix = %resolved.service_id_prefix, "no free ports for service");
                         return Ok(None);
                     }
                 }
@@ -297,17 +300,27 @@ impl DiscoveryDaemon {
                 .store_nginx_config(resolved, &registration.id, host_port, &consul_ip)
                 .await
         {
-            tracing::warn!("Failed to store nginx config: {}", e);
+            tracing::warn!(error = %e, "failed to store nginx config");
         }
 
         Ok(Some(registration.id))
     }
 
+    /// Handles container start events.
+    ///
+    /// Span fields: `container.id`, `event.action`, `compose.project`.
+    #[tracing::instrument(skip_all, fields(
+        container.id = %container_id,
+        event.action = %action,
+        compose.project = %compose_project
+    ))]
     pub async fn handle_container_start(
         &self,
         container_id: &str,
         compose_project: &str,
+        action: &str,
     ) -> Result<()> {
+        tracing::debug!("handling container start");
         let config =
             DiscoveryConfig::load(&self.config_path).wrap_err("failed to load discovery config")?;
 
@@ -341,7 +354,7 @@ impl DiscoveryDaemon {
                             continue;
                         }
                     } else {
-                        tracing::warn!("Invalid container_regex: {}", cr);
+                        tracing::warn!(regex = %cr, "invalid container_regex");
                         continue;
                     }
                 }
@@ -351,17 +364,17 @@ impl DiscoveryDaemon {
 
         if resolved_services.is_empty() {
             tracing::debug!(
-                "handle_container_start: no matching services for container {} (project={})",
-                &container_id[..12.min(container_id.len())],
-                compose_project
+                container.id = %&container_id[..12.min(container_id.len())],
+                compose.project = %compose_project,
+                "no matching services for container"
             );
             return Ok(());
         }
 
         tracing::info!(
-            "handle_container_start: {} port bindings for project {}",
-            resolved_services.len(),
-            compose_project
+            services.count = resolved_services.len(),
+            compose.project = %compose_project,
+            "port bindings for project"
         );
 
         let server_name = config.node.name.clone();
@@ -383,10 +396,10 @@ impl DiscoveryDaemon {
                 .await
             {
                 tracing::error!(
-                    "Failed to sync {} for container {}: {}",
-                    resolved.service_id_prefix,
-                    &container_id[..12.min(container_id.len())],
-                    e
+                    service.id_prefix = %resolved.service_id_prefix,
+                    container.id = %&container_id[..12.min(container_id.len())],
+                    error = %e,
+                    "failed to sync service for container"
                 );
             }
         }
@@ -395,7 +408,15 @@ impl DiscoveryDaemon {
         Ok(())
     }
 
+    /// Handles container die events.
+    ///
+    /// Span fields: `container.id`, `event.action`.
+    #[tracing::instrument(skip_all, fields(
+        container.id = %container_id,
+        event.action = "die"
+    ))]
     pub async fn handle_container_die(&self, container_id: &str) -> Result<()> {
+        tracing::debug!("handling container die");
         let ids = self
             .consul
             .deregister_services_by_container(container_id)
@@ -404,14 +425,14 @@ impl DiscoveryDaemon {
 
         for id in &ids {
             if let Err(e) = self.consul.delete_nginx_config_kv(id).await {
-                tracing::warn!("Failed to delete nginx config KV for {}: {}", id, e);
+                tracing::warn!(service.id = %id, error = %e, "failed to delete nginx config KV");
             }
         }
 
-        tracing::info!(
-            "Deregistered {} services for container {}",
-            ids.len(),
-            container_id
+        tracing::debug!(
+            services.count = ids.len(),
+            container.id = %container_id,
+            "deregistered services for container"
         );
         Ok(())
     }
@@ -662,4 +683,39 @@ fn resolve_interface_ip(iface_name: &str) -> Option<String> {
         return Some(ip.to_string());
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use tracing_test::traced_test;
+
+    use super::*;
+
+    #[tokio::test]
+    #[traced_test]
+    async fn handle_container_start_span_fields() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let daemon =
+            DiscoveryDaemon::new(PathBuf::from("/dev/null"), temp_dir.path().to_path_buf());
+
+        let _ = daemon
+            .handle_container_start("123456789012", "my_project", "start")
+            .await;
+
+        assert!(logs_contain("container.id=123456789012"));
+        assert!(logs_contain("event.action=start"));
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn handle_container_die_logs_deregister() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let daemon =
+            DiscoveryDaemon::new(PathBuf::from("/dev/null"), temp_dir.path().to_path_buf());
+
+        let _ = daemon.handle_container_die("123456789012").await;
+
+        // This will log a debug event or an error, but the span has the fields
+        assert!(logs_contain("container.id=123456789012"));
+    }
 }
