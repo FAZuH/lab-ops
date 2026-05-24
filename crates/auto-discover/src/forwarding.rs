@@ -34,6 +34,9 @@ struct ForwardingGroup {
 ///
 /// Requires the natmap daemon to be running on the Unix socket at
 /// `NATMAP_SOCKET` (default: [`lab_lib::NATMAP_SOCKET`]).
+///
+/// Span fields: `rule.count`.
+#[tracing::instrument(skip_all, fields(rule.count = tracing::field::Empty))]
 pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
     let consul = ConsulClient::new(consul_addr.to_string());
     let groups = query_forwarding_services(&consul).await?;
@@ -42,6 +45,7 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
     if groups.is_empty() {
         tracing::info!("No forwarding services found in Consul; cleaning up stale rules");
         let stale = find_stale_rules(&groups)?;
+        tracing::Span::current().record("rule.count", stale.len());
         for stale_group in stale {
             let ports_csv = stale_group
                 .ports
@@ -62,6 +66,9 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
         }
         return Ok(());
     }
+
+    let stale = find_stale_rules(&groups)?;
+    tracing::Span::current().record("rule.count", groups.len() + stale.len());
 
     for group in &groups {
         let ports_csv: String = group
@@ -113,16 +120,15 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
         }
 
         tracing::info!(
-            "Applied forwarding: {} -> {} ports={} proto={} hairpin={}",
-            group.ext_ip,
-            group.int_ip,
-            ports_csv,
-            group.proto,
-            group.hairpin
+            ext.ip = %group.ext_ip,
+            int.ip = %group.int_ip,
+            ports = %ports_csv,
+            proto = %group.proto,
+            hairpin = group.hairpin,
+            "applied forwarding"
         );
     }
 
-    let stale = find_stale_rules(&groups)?;
     for stale_group in stale {
         let ports_csv = stale_group
             .ports

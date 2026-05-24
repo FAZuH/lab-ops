@@ -104,6 +104,9 @@ impl NginxDaemon {
     /// entries whose registered services no longer exist in the Consul catalog.
     ///
     /// Returns `Ok(true)` if configs changed and nginx was reloaded.
+    ///
+    /// Span fields: `config.count`.
+    #[tracing::instrument(skip_all, fields(config.count = tracing::field::Empty))]
     pub async fn sync(&self) -> Result<bool> {
         // Periodic GC: sweep orphaned nginx config KV entries every 5 min
         let should_gc = {
@@ -137,6 +140,8 @@ impl NginxDaemon {
                 postproc_entries.insert(base.to_string(), entry);
             }
         }
+
+        tracing::Span::current().record("config.count", conf_entries.len());
 
         let mut written = Vec::new();
 

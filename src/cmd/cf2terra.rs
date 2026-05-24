@@ -59,10 +59,7 @@ fn print_terraform_resources<W: io::Write>(
             i
         );
 
-        writeln!(
-            out,
-            "resource \"cloudflare_record\" \"{resource_name}\" {{"
-        )?;
+        writeln!(out, "resource \"cloudflare_record\" \"{resource_name}\" {{")?;
         writeln!(out, "  zone_id = {zone_id}")?;
         writeln!(out, "  name    = {record_name:?}")?;
         writeln!(out, "  type    = {:?}", rec.rtype)?;

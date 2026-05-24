@@ -155,10 +155,10 @@ pub async fn handle_dnat(
     };
     if delete {
         let _: () = request_json(socket, Method::DELETE, "/dnat", Some(req)).await?;
-        println!("DNAT rule removed.");
+        tracing::info!("dnat rule removed");
     } else {
         let _res: DnatConfig = request_json(socket, Method::POST, "/dnat", Some(req)).await?;
-        println!("DNAT rule added.");
+        tracing::info!("dnat rule added");
     }
     Ok(())
 }
@@ -178,10 +178,10 @@ pub async fn handle_snat(
     };
     if delete {
         let _: () = request_json(socket, Method::DELETE, "/snat", Some(req)).await?;
-        println!("SNAT rule removed.");
+        tracing::info!("snat rule removed");
     } else {
         let _res: SnatConfig = request_json(socket, Method::POST, "/snat", Some(req)).await?;
-        println!("SNAT rule added.");
+        tracing::info!("snat rule added");
     }
     Ok(())
 }
@@ -203,10 +203,10 @@ pub async fn handle_hairpin(
     };
     if delete {
         let _: () = request_json(socket, Method::DELETE, "/hairpin", Some(req)).await?;
-        println!("Hairpin rule removed.");
+        tracing::info!("hairpin rule removed");
     } else {
         let _res: HairpinConfig = request_json(socket, Method::POST, "/hairpin", Some(req)).await?;
-        println!("Hairpin rule added.");
+        tracing::info!("hairpin rule added");
     }
     Ok(())
 }
@@ -214,7 +214,7 @@ pub async fn handle_hairpin(
 /// Sends a clear-all request to the daemon, removing all managed rules and resetting state.
 pub async fn handle_clear(socket: impl AsRef<Path>) -> Result<()> {
     let _: () = request_json(socket, Method::DELETE, "/clear", None::<()>).await?;
-    println!("All NAT rules cleared.");
+    tracing::info!("all nat rules cleared");
     Ok(())
 }
 
@@ -288,7 +288,7 @@ pub async fn remap(
     if json {
         println!("{}", serde_json::to_string_pretty(&res)?);
     } else {
-        println!("Successfully remapped {} rules", res.len());
+        tracing::info!(count = res.len(), "successfully remapped rules");
     }
     Ok(())
 }
@@ -371,7 +371,7 @@ pub async fn add(
     if json {
         println!("{}", serde_json::to_string_pretty(&res)?);
     } else {
-        println!("Successfully added mapping.");
+        tracing::info!("successfully added mapping");
     }
     Ok(())
 }
@@ -390,7 +390,7 @@ pub async fn remove(
         let uri = format!("/mapping/by-id/{mapping_id}");
         let _res: () = request_json(socket, Method::DELETE, &uri, None::<()>).await?;
         if !json {
-            println!("Successfully removed mapping {mapping_id}.");
+            tracing::info!(mapping.id = mapping_id, "successfully removed mapping");
         }
     } else if all {
         bail!("--all not implemented yet");
@@ -403,7 +403,7 @@ pub async fn remove(
         let uri = format!("/mapping/{cid}/{port_num}");
         let _res: () = request_json(socket, Method::DELETE, &uri, None::<()>).await?;
         if !json {
-            println!("Successfully removed mapping.");
+            tracing::info!("successfully removed mapping");
         }
     }
     Ok(())

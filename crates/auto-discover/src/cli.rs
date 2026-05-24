@@ -6,7 +6,7 @@ use clap::Subcommand;
 use color_eyre::Result;
 use color_eyre::eyre::bail;
 use futures_util::StreamExt;
-use tracing::debug;
+use tracing::Instrument;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
@@ -236,46 +236,55 @@ async fn run_daemon(config_path: PathBuf, state_dir: PathBuf) {
 
     info!("Listening for Docker events...");
 
-    while let Some(event) = stream.next().await {
-        let e = match event {
-            Ok(e) => e,
-            Err(e) => {
-                error!("Docker event error: {}", e);
-                continue;
-            }
-        };
-
-        let actor = e.actor.as_ref();
-        let attrs = actor.and_then(|a| a.attributes.as_ref());
-
-        let container_id = actor.map(|a| a.id.as_deref().unwrap_or("")).unwrap_or("");
-        let action = e.action.as_deref().unwrap_or("");
-        let compose_project = attrs
-            .and_then(|a| a.get("com.docker.compose.project"))
-            .cloned();
-
-        debug!(
-            "Event: {} container={}",
-            action,
-            &container_id[..12.min(container_id.len())]
-        );
-
-        match action {
-            "start" => {
-                if let Some(ref project) = compose_project
-                    && let Err(e) = daemon.handle_container_start(container_id, project).await
-                {
-                    error!("Container start error: {}", e);
+    let span = tracing::info_span!("event_loop", daemon = "auto-discover");
+    async {
+        while let Some(event) = stream.next().await {
+            let e = match event {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::error!(error = %e, "docker event error");
+                    continue;
                 }
-            }
-            "die" => {
-                if let Err(e) = daemon.handle_container_die(container_id).await {
-                    error!("Container die error: {}", e);
+            };
+
+            tracing::trace!(raw_event = ?e, "raw docker event");
+
+            let actor = e.actor.as_ref();
+            let attrs = actor.and_then(|a| a.attributes.as_ref());
+
+            let container_id = actor.map(|a| a.id.as_deref().unwrap_or("")).unwrap_or("");
+            let action = e.action.as_deref().unwrap_or("");
+            let compose_project = attrs
+                .and_then(|a| a.get("com.docker.compose.project"))
+                .cloned();
+
+            tracing::debug!(
+                container.id = container_id,
+                event.action = action,
+                "docker event"
+            );
+
+            match action {
+                "start" => {
+                    if let Some(ref project) = compose_project
+                        && let Err(e) = daemon
+                            .handle_container_start(container_id, project, action)
+                            .await
+                    {
+                        tracing::error!(error = %e, "container start error");
+                    }
                 }
+                "die" => {
+                    if let Err(e) = daemon.handle_container_die(container_id).await {
+                        tracing::error!(error = %e, "container die error");
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
+    .instrument(span)
+    .await;
 }
 
 pub async fn run_sync(config_path: PathBuf, state_dir: PathBuf) -> Result<()> {

@@ -339,6 +339,73 @@ tracing_subscriber::fmt()
 | `debug!` | Per-event detail (container start, rule added) |
 | `trace!` | Very detailed (per-request, per-field) |
 
+### 9.4. Structured Fields
+
+**No string interpolation in messages.** The message is a static label. All variable data goes in fields.
+
+```rust
+// WRONG
+info!("Docker event received: {} on container {}", action, id);
+
+// CORRECT
+info!(
+    container.id = %id,
+    container.name = %name,
+    event.action = %action,
+    event.type   = %typ,
+    "docker event received"
+);
+```
+
+Field sigils:
+- `%value` — Display (strings, IDs, IPs, ports)
+- `?value` — Debug (structs/enums you don't control)
+- bare value — primitives (bool, u16, etc.)
+
+Standard field names:
+- `container.id`
+- `container.name`
+- `event.action`
+- `consul.svc_id`
+- `consul.addr`
+- `host.addr`
+- `host.port`
+- `container.addr`
+- `container.port`
+- `ext.ip`
+- `int.ip`
+- `proto`
+- `rule.count`
+- `config.count`
+- `mappings.count`
+- `dnats.count`
+- `daemon`
+- `socket.path`
+
+### 9.5. Span Hierarchy
+
+Every async function that handles a Docker event, processes a Consul operation, or applies an iptables rule MUST be wrapped in a span using `#[instrument(skip_all, fields(...))]` or `.instrument(span)`.
+
+**auto-discover hierarchy:**
+```
+event_loop              ← long-lived, fields: daemon="auto-discover"
+  handle_container_start  ← per-event, fields: container.id, event.action, compose.project
+    register_consul         ← fields: consul.svc_id, consul.addr
+    add_natmap_mapping      ← fields: host.port, container.port, proto
+  handle_container_die    ← per-event, fields: container.id, event.action
+    deregister_consul       ← fields: consul.svc_id
+  sync_forwarding_rules   ← fields: rule.count
+  sync_nginx_configs      ← fields: config.count
+```
+
+**natmap hierarchy:**
+```
+daemon                  ← long-lived, fields: daemon="natmap", socket.path
+  handle_docker_event     ← per-event, fields: container.id, event.action
+  reload                  ← fields: mappings.count, dnats.count
+  add_dnat / remove_dnat  ← fields: ext.ip, int.ip, ports, proto
+  add_mapping             ← fields: host.addr, container.addr, proto, container.id
+```
 
 ## 10. Dependency Management
 

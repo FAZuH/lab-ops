@@ -2553,7 +2553,7 @@ sleep 1
             cnames.push(project);
         }
         let services_yaml = format!("\nservices:\n{yaml_services}");
-        let script = format!(
+        let _script = format!(
             r#"{setup}
 for cn in {cnames_list}; do
     docker run -d --name "$cn" -l "com.docker.compose.project=$cn" nginx:alpine
@@ -2571,7 +2571,61 @@ sleep 1
             setup = new_format_setup(&services_yaml, ""),
             cnames_list = cnames.join(" "),
         );
+    }
+
+    #[test]
+    fn event_loop_logs_structured_fields() {
+        let cname = "it-log-fields";
+        let services_yaml = r#"
+services:
+  it-svc-log:
+    type: docker
+    match:
+      project: it-svc-log
+    rproxylocal:
+    - port: 80
+      template: HTTP_PROXY
+      domains:
+      - it-svc-log.test.local"#;
+
+        let script = format!(
+            r#"{setup}
+# Restart daemon with debug logging so fields are visible
+kill %3 2>/dev/null || true
+sleep 1
+NO_COLOR=1 RUST_LOG_STYLE=never RUST_LOG="info,auto_discover=debug" lab-ops auto-discover daemon /tmp/discovery.yaml \
+    --state-dir /tmp/state \
+    --no-forwarding --no-nginx \
+    --consul-addr http://127.0.0.1:8500 \
+    >/tmp/discovery-debug.log 2>&1 &
+sleep 3
+
+RUST_LOG=debug docker run -d --name {cname} \
+    -l "com.docker.compose.project=it-svc-log" nginx:alpine
+sleep 5
+
+if ! grep -q 'container.id=' /tmp/discovery-debug.log && \
+   ! grep -q 'container_id=' /tmp/discovery-debug.log; then
+    echo "FAIL: no structured container.id field in logs" >&2
+    head -50 /tmp/discovery-debug.log >&2
+    exit 1
+fi
+
+if grep -qP 'Docker event.*:.*' /tmp/discovery-debug.log; then
+    echo "FAIL: found interpolated string format in logs" >&2
+    grep -P 'Docker event.*:.*' /tmp/discovery-debug.log >&2
+    exit 1
+fi
+
+echo "PASS: structured log fields present"
+{teardown}
+"#,
+            setup = new_format_setup(services_yaml, ""),
+            teardown = test_teardown(&[cname]),
+            cname = cname,
+        );
+
         let out = run(&script);
-        assert_pass(&out, "Phase 9 — large config");
+        assert_pass(&out, "event_loop_logs_structured_fields");
     }
 }

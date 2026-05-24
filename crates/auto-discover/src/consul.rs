@@ -78,6 +78,9 @@ impl ConsulClient {
     }
 
     /// Register a service with the local Consul agent via `PUT /v1/agent/service/register`.
+    ///
+    /// Span fields: `consul.svc_id`, `consul.addr`.
+    #[tracing::instrument(skip_all, fields(consul.svc_id = %registration.id, consul.addr = %registration.address))]
     pub async fn register_service(&self, registration: &ConsulServiceRegistration) -> Result<()> {
         let payload = json!({
             "ID": registration.id,
@@ -126,6 +129,9 @@ impl ConsulClient {
 
     /// Find and deregister all services whose `Meta.container_id` matches
     /// the given container ID. Returns the list of deregistered service IDs.
+    ///
+    /// Span fields: `consul.svc_id`.
+    #[tracing::instrument(skip_all, fields(consul.svc_id = tracing::field::Empty))]
     pub async fn deregister_services_by_container(
         &self,
         container_id: &str,

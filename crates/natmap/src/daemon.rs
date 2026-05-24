@@ -35,7 +35,6 @@ use serde::Serialize;
 use tokio::process::Command;
 use tokio::sync::RwLock;
 use tower_service::Service;
-use tracing::error;
 use tracing::info;
 
 use crate::api::add_dnat;
@@ -114,12 +113,12 @@ impl Daemon {
         state_path: PathBuf,
         socket_group: String,
     ) -> Result<Self> {
-        info!("Starting natmap daemon...");
+        tracing::info!(daemon = "natmap", "starting natmap daemon");
 
         let docker = docker::connect().ok();
         if docker.is_none() {
-            info!(
-                "Failed connecting to Docker daemon via Unix socket — running without Docker support"
+            tracing::info!(
+                "failed connecting to Docker daemon via Unix socket — running without Docker support"
             );
         }
 
@@ -174,6 +173,7 @@ impl Daemon {
     ///
     /// Sets up iptables chains, loads persisted state, spawns Docker event listeners,
     /// installs a Ctrl-C handler for clean shutdown, and starts the HTTP API server.
+    #[tracing::instrument(skip_all, fields(daemon = "natmap", socket.path = %self.state.socket_path.display()))]
     pub async fn run(&self) -> Result<()> {
         self.reload().await?;
 
@@ -183,17 +183,17 @@ impl Daemon {
             let self_clone = self.clone();
             tokio::spawn(async move {
                 if let Err(e) = self_clone.listen_docker_events().await {
-                    error!("Docker listener exited with error: {}", e);
+                    tracing::error!(error = %e, "docker listener exited with error");
                 }
             });
         }
 
         tokio::spawn(async move {
             tokio::signal::ctrl_c().await.ok();
-            info!("Shutting down: flushing iptables rules...");
+            tracing::info!("shutting down: flushing iptables rules");
             let _ = state.iptables.flush_all_natmap();
             state.ports.deallocate_all().await;
-            info!("Shutdown complete.");
+            tracing::info!("shutdown complete");
             std::process::exit(0);
         });
 
@@ -217,7 +217,7 @@ impl Daemon {
             .status()
             .await;
 
-        info!("Listening on unix socket: {}", socket_path_str);
+        tracing::info!(socket.path = %socket_path_str, "listening on unix socket");
 
         loop {
             let (socket, _) = listener.accept().await?;
@@ -234,7 +234,7 @@ impl Daemon {
                     .serve_connection_with_upgrades(socket, srv)
                     .await
                 {
-                    error!("failed to serve connection: {err:#}");
+                    tracing::error!(error = %err, "failed to serve connection");
                 }
             });
         }
@@ -247,8 +247,9 @@ impl Daemon {
     ///
     /// Flushes iptables rules, releases old port reservations, and re-installs
     /// rules for surviving containers and static configurations.
+    #[tracing::instrument(skip_all, fields(mappings.count = tracing::field::Empty, dnats.count = tracing::field::Empty))]
     pub async fn reload(&self) -> Result<()> {
-        info!("Crash recovery: flushing stale iptables rules");
+        info!("crash recovery: flushing stale iptables rules");
         let state = self.state.clone();
         let ports = self.state.ports.clone();
         let iptables = self.state.iptables.clone();
@@ -263,16 +264,60 @@ impl Daemon {
         let _ = self
             .reconcile_docker_portmaps(&mut daemon_state)
             .await
-            .map_err(|e| error!("Error when reconciling docker portmaps: {e}"));
+            .map_err(|e| tracing::error!(error = %e, "error when reconciling docker portmaps"));
 
         // Reconcile NAT rules
         self.reconcile_hairpins(&mut daemon_state).await;
         self.reconcile_dnats(&mut daemon_state).await;
         self.reconcile_snats(&daemon_state).await;
 
+        let mappings_count: usize = daemon_state.mapping.values().map(|m| m.len()).sum();
+        let dnats_count = daemon_state.dnats.len();
+
+        let span = tracing::Span::current();
+        span.record("mappings.count", mappings_count);
+        span.record("dnats.count", dnats_count);
+
         *state.daemon_state.write().await = daemon_state;
         self.state.persist().await;
+
+        tracing::info!("reload complete");
         Ok(())
+    }
+
+    /// Handles a single Docker event, creating the required span.
+    #[tracing::instrument(skip_all, fields(container.id = tracing::field::Empty, event.action = tracing::field::Empty))]
+    pub async fn handle_docker_event(&self, event: bollard::models::EventMessage, docker: &Docker) {
+        tracing::trace!(?event, "raw docker event");
+
+        let Some(action) = event.action else {
+            return;
+        };
+        let Some(actor) = event.actor else {
+            return;
+        };
+        let Some(container_id) = actor.id else {
+            return;
+        };
+
+        use bollard::plugin::EventMessageTypeEnum::*;
+        let Some(typ) = event.typ else {
+            return;
+        };
+
+        let span = tracing::Span::current();
+        span.record("container.id", &container_id);
+        span.record("event.action", &action);
+
+        match (typ, action.as_str()) {
+            (CONTAINER, "start") | (NETWORK, "connect") => {
+                self.on_container_start(container_id, docker).await
+            }
+            (CONTAINER, "die" | "kill") | (NETWORK, "disconnect") => {
+                self.on_container_stop(container_id).await
+            }
+            _ => {}
+        }
     }
 
     /// Listens for Docker container events and automatically manages port mappings.
@@ -298,29 +343,13 @@ impl Daemon {
 
         while let Some(msg) = stream.next().await {
             let Ok(event) = msg else { continue };
-            let Some(action) = event.action else { continue };
-            let Some(actor) = event.actor else { continue };
-            let Some(container_id) = actor.id else {
-                continue;
-            };
-
-            use bollard::plugin::EventMessageTypeEnum::*;
-            let Some(typ) = event.typ else { continue };
-            match (typ, action.as_str()) {
-                (CONTAINER, "start") | (NETWORK, "connect") => {
-                    self.on_container_start(container_id, docker).await
-                }
-                (CONTAINER, "die" | "kill") | (NETWORK, "disconnect") => {
-                    self.on_container_stop(container_id).await
-                }
-                _ => {}
-            }
+            self.handle_docker_event(event, docker).await;
         }
         Ok(())
     }
 
     async fn on_container_stop(&self, container_id: String) {
-        info!("Container {container_id} died, flushing rules");
+        tracing::debug!("container died, flushing rules");
         let state = &self.state;
         let mut lock = state.daemon_state.write().await;
 
@@ -337,7 +366,7 @@ impl Daemon {
     }
 
     async fn on_container_start(&self, container_id: String, docker: &Docker) {
-        info!("Container {} started, parsing mappings", container_id);
+        tracing::debug!("container started, parsing mappings");
         let state = &self.state;
 
         let Ok(discovered) = docker::get_port_mappings(docker, &container_id).await else {
@@ -349,15 +378,15 @@ impl Daemon {
             m.id = state.allocate_id();
             let host_addr = m.request.host_addr;
             if state.ports.is_allocated(host_addr).await {
-                info!("Address {host_addr} already allocated, skipping");
+                tracing::warn!(host.addr = %host_addr, "address already allocated, skipping");
                 continue;
             }
             if let Err(e) = state.ports.allocate(host_addr).await {
-                error!("Failed allocating {host_addr}, skipping: {e}");
+                tracing::warn!(host.addr = %host_addr, error = %e, "failed allocating, skipping");
                 continue;
             }
             if let Err(e) = state.iptables.install_dockermap(&m) {
-                error!("Failed to install mapping {m:?}: {e}");
+                tracing::error!(mapping = ?m, error = %e, "failed to install mapping");
                 state.ports.deallocate(host_addr).await;
                 continue;
             }
@@ -406,7 +435,7 @@ impl Daemon {
             // iter containers
             for (id, maps) in old_maps {
                 if !running_ids.contains(&id) {
-                    info!("Container {id} gone, removing mappings");
+                    tracing::info!(container.id = %id, "container gone, removing mappings");
                     continue;
                 }
                 let mut kept = Vec::new();
@@ -416,11 +445,11 @@ impl Daemon {
 
                     // check this map
                     if ports.is_allocated(host_addr).await {
-                        info!("Address {host_addr} already held, removing stale mapping");
+                        tracing::warn!(host.addr = %host_addr, "address already held, removing stale mapping");
                         continue;
                     }
                     if let Err(e) = ports.allocate(host_addr).await {
-                        error!("Address {host_addr} in use, dropping mapping: {e}");
+                        tracing::warn!(host.addr = %host_addr, error = %e, "address in use, dropping mapping");
                         continue;
                     }
 
@@ -478,7 +507,7 @@ impl Daemon {
         let ip = match ext_ip.parse() {
             Ok(ip) => ip,
             Err(e) => {
-                error!("Invalid IP {ext_ip}: {e}");
+                tracing::error!(ext.ip = %ext_ip, error = %e, "invalid IP");
                 return false;
             }
         };
@@ -492,10 +521,89 @@ impl Daemon {
                 continue;
             }
             if let Err(e) = ports.allocate(addr).await {
-                error!("Port {port} in use, dropping: {e}");
+                tracing::warn!(port = %port, error = %e, "port in use, dropping");
                 return false;
             }
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
+
+    use axum::Router;
+    use bollard::Docker;
+    use bollard::models::EventActor;
+    use bollard::models::EventMessage;
+    use lab_lib::port::PortAllocator;
+    use tokio::sync::RwLock;
+    use tracing_test::traced_test;
+
+    use super::AppState;
+    use super::Daemon;
+    use crate::iptables::IptablesManager;
+    use crate::models::DaemonState;
+
+    fn create_test_daemon(state_path: PathBuf) -> Daemon {
+        let iptables = Arc::new(IptablesManager::new());
+        let ports = Arc::new(PortAllocator::new());
+        let daemon_state = Arc::new(RwLock::new(DaemonState::default()));
+
+        let state = AppState {
+            daemon_state,
+            iptables,
+            docker: None,
+            state_path,
+            next_id: Arc::new(AtomicU64::new(1)),
+            ports,
+            socket_group: "root".to_string(),
+            socket_path: PathBuf::from("/tmp/natmap.sock"),
+        };
+
+        Daemon {
+            state,
+            app: Router::new(),
+        }
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn reload_state_logs_mapping_count() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+
+        let daemon = create_test_daemon(state_path);
+
+        let _ = daemon.reload().await;
+
+        assert!(logs_contain("mappings.count="));
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn handle_docker_event_span_has_container_id() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+
+        let daemon = create_test_daemon(state_path);
+        let docker = Docker::connect_with_local_defaults().unwrap();
+
+        let event = EventMessage {
+            action: Some("start".to_string()),
+            actor: Some(EventActor {
+                id: Some("1234567890".to_string()),
+                ..Default::default()
+            }),
+            typ: Some(bollard::plugin::EventMessageTypeEnum::CONTAINER),
+            ..Default::default()
+        };
+
+        daemon.handle_docker_event(event, &docker).await;
+
+        assert!(logs_contain("container.id=\"1234567890\""));
     }
 }
