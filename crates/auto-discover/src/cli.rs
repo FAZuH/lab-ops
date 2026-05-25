@@ -13,7 +13,6 @@ use tracing::warn;
 
 use crate::config::DiscoveryConfig;
 use crate::daemon::DiscoveryDaemon;
-use crate::nginx_daemon;
 use crate::nginx_daemon::NginxDaemon;
 
 /// Service discovery daemon: watches Docker events, manages port forwarding
@@ -51,10 +50,10 @@ pub enum Commands {
         #[arg(long)]
         no_nginx: bool,
         /// Directory for generated nginx site configs
-        #[arg(long, default_value = nginx_daemon::NGINX_SITEAVAIL)]
+        #[arg(long, default_value = crate::consts::NGINX_SITEAVAIL)]
         nginx_sites_dir: PathBuf,
         /// Directory for generated nginx stream configs
-        #[arg(long, default_value = nginx_daemon::NGINX_STREAMAVAIL)]
+        #[arg(long, default_value = crate::consts::NGINX_STREAMAVAIL)]
         nginx_streams_dir: PathBuf,
     },
     /// Run a single sync pass and exit
@@ -84,10 +83,10 @@ pub enum Commands {
         #[arg(default_value = "http://127.0.0.1:8500")]
         consul_addr: String,
         /// Directory for generated nginx site configs
-        #[arg(long, default_value = nginx_daemon::NGINX_SITEAVAIL)]
+        #[arg(long, default_value = crate::consts::NGINX_SITEAVAIL)]
         nginx_sites_dir: PathBuf,
         /// Directory for generated nginx stream configs
-        #[arg(long, default_value = nginx_daemon::NGINX_STREAMAVAIL)]
+        #[arg(long, default_value = crate::consts::NGINX_STREAMAVAIL)]
         nginx_streams_dir: PathBuf,
     },
 }
@@ -349,10 +348,10 @@ pub async fn run_nginx_sync(
     info!("Running nginx sync...");
     let daemon = NginxDaemon::new(
         consul_addr.to_string(),
-        PathBuf::from(nginx_daemon::AD_NGINX),
+        PathBuf::from(crate::consts::AD_NGINX),
         nginx_sites_dir,
         nginx_streams_dir,
-        PathBuf::from(nginx_daemon::AD_POSTPROC),
+        PathBuf::from(crate::consts::AD_POSTPROC),
     );
     let changed = daemon.sync().await?;
     info!("Nginx sync completed, changed={}", changed);
@@ -367,10 +366,10 @@ async fn run_nginx_daemon(
     info!("Nginx daemon started");
     let daemon = NginxDaemon::new(
         consul_addr,
-        PathBuf::from(nginx_daemon::AD_NGINX),
+        PathBuf::from(crate::consts::AD_NGINX),
         nginx_sites_dir,
         nginx_streams_dir,
-        PathBuf::from(nginx_daemon::AD_POSTPROC),
+        PathBuf::from(crate::consts::AD_POSTPROC),
     );
     daemon.run_loop().await;
 }

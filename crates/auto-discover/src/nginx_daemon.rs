@@ -22,11 +22,6 @@ use color_eyre::eyre::bail;
 use crate::consul::ConsulClient;
 use crate::consul::KvEntry;
 
-pub const AD_NGINX: &str = "/var/lib/auto-discover/nginx-configs";
-pub const NGINX_SITEAVAIL: &str = "/etc/nginx/sites-enabled";
-pub const NGINX_STREAMAVAIL: &str = "/etc/nginx/streams-enabled";
-pub const AD_POSTPROC: &str = "/etc/auto-discover/postprocs.d";
-
 /// Proxy-side daemon that watches Consul KV for nginx config changes and
 /// applies them to the local nginx installation.
 ///

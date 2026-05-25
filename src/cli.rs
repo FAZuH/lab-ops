@@ -3,21 +3,16 @@ use std::path::PathBuf;
 use clap::Parser;
 use clap::Subcommand;
 
-/// Subcommand name for the DNS zone-to-Ansible converter.
-pub const CMD_CF2ANSIBLE: &str = "cf2ansible";
-/// Subcommand name for the DNS zone-to-Terraform converter.
-pub const CMD_CF2TERRA: &str = "cf2terra";
-/// Subcommand name for the Docker network viewer.
-pub const CMD_DOCKERNET: &str = "dockernet";
-/// Subcommand name for the NAT mapping tool.
-pub const CMD_NATMAP: &str = "natmap";
-/// Subcommand name for the service discovery daemon.
-pub const CMD_AUTO_DISCOVER: &str = "auto-discover";
+use crate::consts::CMD_AUTO_DISCOVER;
+use crate::consts::CMD_CF2ANSIBLE;
+use crate::consts::CMD_CF2TERRA;
+use crate::consts::CMD_DOCKERNET;
+use crate::consts::CMD_NATMAP;
 
 /// Top-level CLI argument parser for `lab-ops`.
 #[derive(Parser)]
 #[command(version = env!("CARGO_PKG_VERSION"))]
-#[command(name = "lab-ops", about = "Lab operations toolkit")]
+#[command(name = crate::consts::CMD, about = "Lab operations toolkit")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,

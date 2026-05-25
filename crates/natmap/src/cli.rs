@@ -18,7 +18,6 @@ use crate::command::handle_list;
 use crate::command::handle_snat;
 use crate::command::remap;
 use crate::command::remove;
-use crate::consts::BIN;
 use crate::consts::DAEMON_SOCK;
 use crate::consts::PKG_NAME;
 use crate::consts::STATE;
@@ -145,7 +144,7 @@ pub enum NatMapCommand {
         #[arg(long, default_value = PKG_NAME)]
         group: String,
         /// Path to the binary to install.
-        #[arg(long, default_value = BIN)]
+        #[arg(long, default_value = lab_lib::consts::LABOPS_BIN)]
         binary: String,
     },
 }
