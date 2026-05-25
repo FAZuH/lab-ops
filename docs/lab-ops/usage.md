@@ -9,24 +9,53 @@ sudo cp target/release/lab-ops /usr/local/bin/
 
 ## Overview
 
-`lab-ops` is a homelab operations toolkit with three main commands:
+`lab-ops` is a homelab operations toolkit with these commands:
 
 | Command | Purpose |
 |---------|---------|
 | `dockernet` | List IP addresses and port bindings of Docker containers |
 | `cf2ansible` | Convert BIND DNS zone files to Ansible Cloudflare DNS tasks |
 | `natmap` | Manage iptables NAT rules (static VMs & dynamic Docker mappings) |
+| `auto-discover` | Service discovery daemon with Consul integration |
+| `completions` | Generate shell completion scripts |
 
 ---
 
 ## Global Options
 
-The `natmap` command accepts global options that apply to all subcommands:
+All commands accept these global options:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-v` / `--verbose` | — | Repeat for higher verbosity: `-v` (info), `-vv` (debug), `-vvv+` (trace) |
+| `--color` | `auto` | Output coloring: `auto` (terminal-detect), `always`, `never`. Also respects `NO_COLOR` / `CLICOLOR` env vars |
+
+The `natmap` command also accepts these global options:
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--socket` | `/run/natmap.sock` | Path to the natmap daemon Unix socket |
 | `--json` | off | Output in JSON format instead of tables |
+
+---
+
+## Shell Completions
+
+Generate and install completion scripts (these scripts use dynamic evaluation to support runtime completions like Docker container names/IDs):
+
+```bash
+# Print to stdout (eval with quotes for zsh)
+eval "$(lab-ops completions bash)"
+eval "$(lab-ops completions zsh)"
+source <(lab-ops completions fish)
+
+# Write to a directory
+lab-ops completions bash --dir ~/.local/share/bash-completion/completions
+lab-ops completions zsh --dir ~/.config/zsh/completions
+lab-ops completions fish --dir ~/.config/fish/completions
+```
+
+Shell values: `bash`, `elvish`, `fish`, `powershell`, `zsh`.
 
 ---
 
@@ -38,7 +67,7 @@ Lists Docker container network information.
 lab-ops dockernet
 ```
 
-Displays a table with container names, network names, IP addresses, and port bindings.
+Displays a table with container names, network names, IP addresses, and port bindings. Table headers are colorized when ANSI is enabled.
 
 ---
 

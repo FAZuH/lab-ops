@@ -44,18 +44,21 @@ impl NatmapClient {
         proto: &str,
         delete: bool,
     ) -> Result<()> {
-        natmap::cli::run_cli(Cli {
-            socket: self.socket.clone().into(),
-            json: false,
-            command: NatMapCommand::Dnat {
-                ext_ip: ext_ip.to_string(),
-                int_ip: int_ip.to_string(),
-                proto: proto.to_string(),
-                ports: ports.to_string(),
-                ext_if: None,
-                delete,
+        natmap::cli::run_cli(
+            Cli {
+                socket: self.socket.clone().into(),
+                json: false,
+                command: NatMapCommand::Dnat {
+                    ext_ip: ext_ip.to_string(),
+                    int_ip: int_ip.to_string(),
+                    proto: proto.to_string(),
+                    ports: ports.to_string(),
+                    ext_if: None,
+                    delete,
+                },
             },
-        })
+            false,
+        )
         .await
     }
 
@@ -68,17 +71,20 @@ impl NatmapClient {
         proto: &str,
         delete: bool,
     ) -> Result<()> {
-        natmap::cli::run_cli(Cli {
-            socket: self.socket.clone().into(),
-            json: false,
-            command: NatMapCommand::Hairpin {
-                ext_ip: ext_ip.to_string(),
-                int_ip: int_ip.to_string(),
-                proto: proto.to_string(),
-                ports: ports.to_string(),
-                delete,
+        natmap::cli::run_cli(
+            Cli {
+                socket: self.socket.clone().into(),
+                json: false,
+                command: NatMapCommand::Hairpin {
+                    ext_ip: ext_ip.to_string(),
+                    int_ip: int_ip.to_string(),
+                    proto: proto.to_string(),
+                    ports: ports.to_string(),
+                    delete,
+                },
             },
-        })
+            false,
+        )
         .await
     }
 
@@ -121,7 +127,7 @@ impl NatmapClient {
             },
         };
 
-        natmap::cli::run_cli(cli).await.or_else(|e| {
+        natmap::cli::run_cli(cli, false).await.or_else(|e| {
             let msg = e.to_string();
             if msg.contains("409") {
                 tracing::warn!("natmap mapping already exists (409), continuing: {msg}");
@@ -138,19 +144,22 @@ impl NatmapClient {
     /// Remove a Docker port mapping by host port.
     #[allow(dead_code)]
     pub async fn remove_docker_mapping(&self, container_id: &str, host_port: u16) -> Result<()> {
-        natmap::cli::run_cli(Cli {
-            socket: self.socket.clone().into(),
-            json: false,
-            command: NatMapCommand::Docker {
-                cmd: DockerCommand::Remove {
-                    container_id: Some(container_id.to_string()),
-                    port: Some(host_port.to_string()),
-                    all: false,
-                    id: None,
-                    name: None,
+        natmap::cli::run_cli(
+            Cli {
+                socket: self.socket.clone().into(),
+                json: false,
+                command: NatMapCommand::Docker {
+                    cmd: DockerCommand::Remove {
+                        container_id: Some(container_id.to_string()),
+                        port: Some(host_port.to_string()),
+                        all: false,
+                        id: None,
+                        name: None,
+                    },
                 },
             },
-        })
+            false,
+        )
         .await
         .wrap_err("natmap command failed")
     }

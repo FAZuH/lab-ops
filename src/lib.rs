@@ -5,5 +5,5 @@
 //! subcommands routed through [`cli::Cli`].
 
 pub mod cli;
-pub mod consts;
 pub mod cmd;
+pub mod consts;

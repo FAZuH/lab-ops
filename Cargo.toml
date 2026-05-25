@@ -12,6 +12,7 @@ docker-tests = []
 [dependencies]
 regex = "1.12.3"
 clap = { version = "4", features = ["derive"] }
+clap_complete = { version = "4", features = ["unstable-dynamic"] }
 bollard = "0.21.0"
 color-eyre = "0.6.5"
 comfy-table = "7.2.2"

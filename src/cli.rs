@@ -2,10 +2,12 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use clap::Subcommand;
+use clap::ValueEnum;
 
 use crate::consts::CMD_AUTO_DISCOVER;
 use crate::consts::CMD_CF2ANSIBLE;
 use crate::consts::CMD_CF2TERRA;
+use crate::consts::CMD_COMPLETIONS;
 use crate::consts::CMD_DOCKERNET;
 use crate::consts::CMD_NATMAP;
 
@@ -16,6 +18,29 @@ use crate::consts::CMD_NATMAP;
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
+
+    /// Verbosity level (-v, -vv, -vvv, -vvvv)
+    #[arg(short, long, global = true, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+
+    /// Color output mode [auto|always|never]
+    #[arg(
+        long,
+        global = true,
+        default_value = "auto",
+        value_enum,
+        hide_possible_values = true
+    )]
+    pub color: ColorMode,
+}
+
+/// Controls ANSI color output in logs and error formatting.
+#[derive(Clone, Debug, Default, ValueEnum)]
+pub enum ColorMode {
+    #[default]
+    Auto,
+    Always,
+    Never,
 }
 
 /// All supported subcommands of lab-ops.
@@ -55,5 +80,15 @@ pub enum Command {
     AutoDiscover {
         #[command(flatten)]
         args: auto_discover::cli::Cli,
+    },
+    /// Generate shell completion scripts.
+    #[command(name = CMD_COMPLETIONS)]
+    Completions {
+        /// Target shell [bash, elvish, fish, powershell, zsh]
+        #[arg(value_enum, hide_possible_values = true)]
+        shell: clap_complete::Shell,
+        /// Output directory (e.g., ~/.zfunc)
+        #[arg(long)]
+        dir: Option<PathBuf>,
     },
 }

@@ -7,7 +7,7 @@ struct TestOutput {
 impl TestOutput {
     fn new(file: &str) -> Self {
         let output = Command::new(env!("CARGO_BIN_EXE_lab-ops"))
-            .arg(lab_ops::cli::CMD_CF2ANSIBLE)
+            .arg(lab_ops::consts::CMD_CF2ANSIBLE)
             .arg(format!("tests/{file}"))
             .output()
             .expect("Failed to run binary");

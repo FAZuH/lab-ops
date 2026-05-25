@@ -47,6 +47,30 @@ lab-ops auto-discover forwarding-sync [--consul-addr URL]    # One-shot DNAT syn
 lab-ops auto-discover nginx-sync [--consul-addr URL]         # One-shot nginx config sync
 ```
 
+## Global Options
+
+| Flag | Description |
+|------|-------------|
+| `-v` / `-vv` / `-vvv+` | Increase verbosity (info → debug → trace) |
+| `--color auto\|always\|never` | Control ANSI color output (default: auto, respects `NO_COLOR`) |
+
+## Shell Completions
+
+Generate completion scripts for bash, zsh, fish, powershell, or elvish:
+
+```bash
+# Write to a completions directory
+lab-ops completions bash --dir ~/.local/share/bash-completion/completions
+lab-ops completions zsh --dir ~/.config/zsh/completions       # add dir to $fpath
+lab-ops completions fish --dir ~/.config/fish/completions
+
+# Or append to your .rc file (bash / zsh)
+echo 'eval "$(lab-ops completions bash)"' >> ~/.bashrc
+echo 'eval "$(lab-ops completions zsh)"' >> ~/.zshrc
+```
+
+After installing, restart your shell or run `source ~/.zshrc` / `source ~/.bashrc` to activate.
+
 ## License
 
 [MIT](https://spdx.org/licenses/MIT.html)

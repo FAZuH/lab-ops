@@ -50,10 +50,10 @@ pub enum Commands {
         #[arg(long)]
         no_nginx: bool,
         /// Directory for generated nginx site configs
-        #[arg(long, default_value = crate::consts::NGINX_SITEAVAIL)]
+        #[arg(long, default_value = crate::consts::NGINX_SITEENABLED)]
         nginx_sites_dir: PathBuf,
         /// Directory for generated nginx stream configs
-        #[arg(long, default_value = crate::consts::NGINX_STREAMAVAIL)]
+        #[arg(long, default_value = crate::consts::NGINX_STREAMENABLED)]
         nginx_streams_dir: PathBuf,
     },
     /// Run a single sync pass and exit
@@ -83,10 +83,10 @@ pub enum Commands {
         #[arg(default_value = "http://127.0.0.1:8500")]
         consul_addr: String,
         /// Directory for generated nginx site configs
-        #[arg(long, default_value = crate::consts::NGINX_SITEAVAIL)]
+        #[arg(long, default_value = crate::consts::NGINX_SITEENABLED)]
         nginx_sites_dir: PathBuf,
         /// Directory for generated nginx stream configs
-        #[arg(long, default_value = crate::consts::NGINX_STREAMAVAIL)]
+        #[arg(long, default_value = crate::consts::NGINX_STREAMENABLED)]
         nginx_streams_dir: PathBuf,
     },
 }

@@ -93,7 +93,7 @@ pub enum DockerCommand {
 }
 ```
 
-Also defines the top-level `Cli` struct with global `--socket` and `--json` flags. The `run_cli()` function dispatches each variant to the appropriate handler in `command.rs`.
+Also defines the top-level `Cli` struct with global `--socket`, `--json`, and `--color` flags. The `run_cli(cli, use_color)` function dispatches each variant to the appropriate handler in `command.rs`, passing the color preference for table styling.
 
 ### `command.rs` — Handler Functions
 
@@ -187,7 +187,7 @@ mod nginx_daemon;
 
 ### `cli.rs` — CLI Definitions
 
-Defines `Cli` struct and `Commands` enum with clap derives. The `run_cli()` function dispatches each variant. Subcommands:
+Defines `Cli` struct and `Commands` enum with clap derives. The `run_cli(cli, _use_color)` function dispatches each variant. Subcommands:
 
 | Variant | Purpose |
 |---|---|
@@ -256,7 +256,11 @@ Proxy-side nginx config management:
 
 ### `cli.rs` — Top-Level CLI
 
-Defines the root `Cli` struct and `Command` enum. Each variant delegates to a workspace crate via `#[command(flatten)]` or to a `src/cmd/` module.
+Defines the root `Cli` struct with `--verbose` and `--color` global flags, and the `Command` enum with a `Completions` variant. Each other variant delegates to a workspace crate via `#[command(flatten)]` or to a `src/cmd/` module.
+
+### `main.rs` — Entrypoint
+
+Initializes tracing with verbosity and color from CLI args, then dispatches to the selected command. Also contains the `generate_completions()` helper and `completion_filename()` for the `completions` subcommand.
 
 ### `cmd/cf2ansible.rs` — DNS Zone Converter
 
@@ -264,4 +268,4 @@ Converts BIND DNS zone files to Ansible YAML for Cloudflare DNS management.
 
 ### `cmd/dockernet.rs` — Docker Network Viewer
 
-Displays Docker container IPs and port bindings in a formatted table.
+Displays Docker container IPs and port bindings in a formatted table. Accepts a `use_color: bool` parameter to control header/status coloring.

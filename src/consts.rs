@@ -14,4 +14,5 @@ pub const CMD_DOCKERNET: &str = "dockernet";
 pub const CMD_NATMAP: &str = "natmap";
 /// Subcommand name for the service discovery daemon.
 pub const CMD_AUTO_DISCOVER: &str = "auto-discover";
-
+/// Subcommand name for shell completion generation.
+pub const CMD_COMPLETIONS: &str = "completions";
