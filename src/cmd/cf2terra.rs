@@ -67,6 +67,9 @@ fn print_terraform_resources<W: io::Write>(
     write_terraform_header(&mut out)?;
 
     for (i, rec) in records.iter().enumerate() {
+        if rec.rtype == "NS" {
+            continue;
+        }
         let record_name = dns_parser::strip_zone(&rec.name, zone);
         let resource_base = if record_name == zone {
             "apex".to_string()
