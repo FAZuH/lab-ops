@@ -164,6 +164,11 @@ jobs:
           name: patched-cargo-toml
           path: .
 
+      - name: Stage patched files
+        run: |
+          git add Cargo.toml
+          git add crates/*/Cargo.toml 2>/dev/null || true
+
       - name: Install changelog dependencies
         run: npm install conventional-changelog-conventionalcommits@7.0.2
 

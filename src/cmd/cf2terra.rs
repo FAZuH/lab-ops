@@ -43,6 +43,20 @@ fn extract_zone(content: &str) -> String {
     "example.com".to_string()
 }
 
+fn write_terraform_header<W: io::Write>(mut out: W) -> Result<()> {
+    Ok(writeln!(
+        out,
+        r#"terraform {{
+  required_providers {{
+    cloudflare = {{
+      source = "cloudflare/cloudflare"
+    }}
+  }}
+}}
+"#
+    )?)
+}
+
 /// Prints the Terraform resource blocks for all parsed DNS records to the given writer.
 fn print_terraform_resources<W: io::Write>(
     records: &[dns_parser::DnsRecord],
@@ -50,11 +64,21 @@ fn print_terraform_resources<W: io::Write>(
     zone_id: &str,
     mut out: W,
 ) -> Result<()> {
+    write_terraform_header(&mut out)?;
+
     for (i, rec) in records.iter().enumerate() {
+        if rec.rtype == "NS" {
+            continue;
+        }
         let record_name = dns_parser::strip_zone(&rec.name, zone);
+        let resource_base = if record_name == zone {
+            "apex".to_string()
+        } else {
+            record_name.replace('.', "_")
+        };
         let resource_name = format!(
             "record_{}_{}_{}",
-            record_name.replace('.', "_").replace('@', "apex"),
+            resource_base,
             rec.rtype.to_lowercase(),
             i
         );
@@ -135,7 +159,7 @@ api.example.com.	3600	IN	A	10.0.0.1
 "#;
 
     #[test]
-    fn test_output_produces_hcl() {
+    fn output_produces_hcl() {
         let records = dns_parser::parse_zone(SAMPLE_ZONE);
         let zone = "example.com";
         let zone_id = "var.cloudflare_zone_id";

@@ -198,17 +198,17 @@ mod tests {
     }
 
     #[test]
-    fn test_format_ips_none() {
+    fn format_ips_none() {
         assert_eq!(format_ips(None), "");
     }
 
     #[test]
-    fn test_format_ips_single() {
+    fn format_ips_single() {
         assert_eq!(format_ips(make_networks(&["172.19.0.2"])), "172.19.0.2");
     }
 
     #[test]
-    fn test_format_ips_multiple() {
+    fn format_ips_multiple() {
         let result = format_ips(make_networks(&["172.19.0.2", "10.0.0.1"]));
         let mut lines: Vec<&str> = result.lines().collect();
         lines.sort();
@@ -216,30 +216,30 @@ mod tests {
     }
 
     #[test]
-    fn test_format_binds_none() {
+    fn format_binds_none() {
         assert_eq!(format_binds(None), "");
     }
 
     #[test]
-    fn test_format_binds_single() {
+    fn format_binds_single() {
         let ports = make_ports(&[("5432/tcp", &[("0.0.0.0", "5432")])]);
         assert_eq!(format_binds(ports), "tcp: 0.0.0.0:5432");
     }
 
     #[test]
-    fn test_format_binds_multiple_ips() {
+    fn format_binds_multiple_ips() {
         let ports = make_ports(&[("5432/tcp", &[("0.0.0.0", "5432"), ("::", "5432")])]);
         assert_eq!(format_binds(ports), "tcp: 0.0.0.0:5432, :::5432");
     }
 
     #[test]
-    fn test_format_binds_no_proto() {
+    fn format_binds_no_proto() {
         let ports = make_ports(&[("5432", &[("0.0.0.0", "5432")])]);
         assert_eq!(format_binds(ports), ": 0.0.0.0:5432");
     }
 
     #[test]
-    fn test_format_binds_null_binding() {
+    fn format_binds_null_binding() {
         let mut map = HashMap::new();
         map.insert("5432/tcp".to_string(), None);
         assert_eq!(format_binds(Some(map)), "");

@@ -268,7 +268,7 @@ _25._tcp.mail.example.com.	1	IN	TLSA	3 1 1 CERTDATA
 "#;
 
     #[test]
-    fn test_output_produces_yaml() {
+    fn output_produces_yaml() {
         let records = dns_parser::parse_zone(SAMPLE_ZONE);
         let types: Vec<&str> = records.iter().map(|r| r.rtype.as_str()).collect();
         assert!(types.contains(&"A"), "Missing A");
@@ -282,7 +282,7 @@ _25._tcp.mail.example.com.	1	IN	TLSA	3 1 1 CERTDATA
     }
 
     #[test]
-    fn test_a_record_proxied() {
+    fn a_record_proxied() {
         let records = dns_parser::parse_zone(SAMPLE_ZONE);
         let apex_a = records
             .iter()
@@ -298,7 +298,7 @@ _25._tcp.mail.example.com.	1	IN	TLSA	3 1 1 CERTDATA
     }
 
     #[test]
-    fn test_ns_records_not_proxied() {
+    fn ns_records_not_proxied() {
         let records = dns_parser::parse_zone(SAMPLE_ZONE);
         for rec in records.iter().filter(|r| r.rtype == "NS") {
             assert_eq!(rec.proxied, None, "NS records should not have proxied flag");
@@ -306,7 +306,7 @@ _25._tcp.mail.example.com.	1	IN	TLSA	3 1 1 CERTDATA
     }
 
     #[test]
-    fn test_output_with_api_token() {
+    fn output_with_api_token() {
         let records = dns_parser::parse_zone(SAMPLE_ZONE);
         let zone = "example.com";
         let mut buf = Vec::new();

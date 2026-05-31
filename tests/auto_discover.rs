@@ -65,7 +65,7 @@ mod auto_discover {
     }
 
     /// Cleanup helper.
-    fn test_teardown(container_names: &[&str]) -> String {
+    fn teardown(container_names: &[&str]) -> String {
         let removes: String = container_names
             .iter()
             .map(|n| format!("docker rm -f {n} 2>/dev/null || true"))
@@ -572,7 +572,7 @@ echo "PASS: forwarding local bind_port=36000 with forwarding_type=local"
 {teardown}
 "#,
             setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
-            teardown = test_teardown(&[cname]),
+            teardown = teardown(&[cname]),
             cname = cname,
         );
 
@@ -646,7 +646,7 @@ echo "PASS: forwardlocal + rproxylocal separate entries"
 {teardown}
 "#,
             setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
-            teardown = test_teardown(&[cname]),
+            teardown = teardown(&[cname]),
             cname = cname,
         );
 
@@ -732,7 +732,7 @@ echo "PASS: forwarding local no bind (ephemeral), port=$PORT with forwarding_typ
 {teardown}
 "#,
             setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
-            teardown = test_teardown(&[cname]),
+            teardown = teardown(&[cname]),
             cname = cname,
         );
 
@@ -775,7 +775,7 @@ echo "PASS: bound to $EXPECTED"
 {teardown}
 "#,
             setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
-            teardown = test_teardown(&[cname]),
+            teardown = teardown(&[cname]),
             cname = cname,
         );
 
@@ -818,7 +818,7 @@ echo "PASS: bound to $EXPECTED"
 {teardown}
 "#,
             setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
-            teardown = test_teardown(&[cname]),
+            teardown = teardown(&[cname]),
             cname = cname,
         );
 
@@ -867,7 +867,7 @@ echo "PASS: bound to $EXPECTED, ignored default 1.2.3.4"
                 "",
                 "--no-forwarding --no-nginx"
             ),
-            teardown = test_teardown(&[cname]),
+            teardown = teardown(&[cname]),
             cname = cname,
         );
 
@@ -913,7 +913,7 @@ echo "PASS: static port 36000 with forwarding meta"
 {teardown}
 "#,
             setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
-            teardown = test_teardown(&[cname]),
+            teardown = teardown(&[cname]),
             cname = cname,
         );
 
@@ -956,7 +956,7 @@ echo "PASS: static port 36001 with hairpin meta"
 {teardown}
 "#,
             setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
-            teardown = test_teardown(&[cname]),
+            teardown = teardown(&[cname]),
             cname = cname,
         );
 
@@ -1007,7 +1007,7 @@ echo "PASS: nginx config stored at $KV_KEY"
 {teardown}
 "#,
             setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
-            teardown = test_teardown(&[cname]),
+            teardown = teardown(&[cname]),
             cname = cname,
         );
 
@@ -1049,7 +1049,7 @@ echo "PASS: forwarding service has no KV config"
 {teardown}
 "#,
             setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
-            teardown = test_teardown(&[cname]),
+            teardown = teardown(&[cname]),
             cname = cname,
         );
 
@@ -1143,7 +1143,7 @@ echo "PASS: host-networked container correctly skipped"
 {teardown}
 "#,
             setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
-            teardown = test_teardown(&[cname]),
+            teardown = teardown(&[cname]),
             cname = cname,
         );
         let out = run(&script);
@@ -1177,7 +1177,7 @@ echo "PASS: container matched despite no port exposure"
 {teardown}
 "#,
             setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
-            teardown = test_teardown(&[cname]),
+            teardown = teardown(&[cname]),
             cname = cname,
         );
         let out = run(&script);
@@ -1228,7 +1228,7 @@ echo "PASS: stream template stored in streams prefix"
 {teardown}
 "#,
             setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
-            teardown = test_teardown(&[cname]),
+            teardown = teardown(&[cname]),
             cname = cname,
         );
         let out = run(&script);
@@ -1269,7 +1269,7 @@ echo "PASS: extra fields present in Consul meta"
 {teardown}
 "#,
             setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
-            teardown = test_teardown(&[cname]),
+            teardown = teardown(&[cname]),
             cname = cname,
         );
         let out = run(&script);
@@ -1311,7 +1311,7 @@ echo "PASS: service ID contains domain slug: $SVC_ID"
 {teardown}
 "#,
             setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
-            teardown = test_teardown(&[cname]),
+            teardown = teardown(&[cname]),
             cname = cname,
         );
         let out = run(&script);
@@ -1348,7 +1348,7 @@ echo "PASS: service ID uses name fallback: $SVC_ID"
 {teardown}
 "#,
             setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
-            teardown = test_teardown(&[cname]),
+            teardown = teardown(&[cname]),
             cname = cname,
         );
         let out = run(&script);
@@ -1386,7 +1386,7 @@ echo "PASS: Meta.container_id matches container: $META_CID"
 {teardown}
 "#,
             setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
-            teardown = test_teardown(&[cname]),
+            teardown = teardown(&[cname]),
             cname = cname,
         );
         let out = run(&script);
@@ -1441,7 +1441,7 @@ echo "PASS: port $PORT_AFTER reused across container restart"
 {teardown}
 "#,
             setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
-            teardown = test_teardown(&[cname]),
+            teardown = teardown(&[cname]),
             cname = cname,
         );
         let out = run(&script);
@@ -1504,7 +1504,7 @@ echo "PASS: preprocess modified config"
 {teardown}
 "#,
             setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
-            teardown = test_teardown(&[cname]),
+            teardown = teardown(&[cname]),
             cname = cname,
         );
         let out = run(&script);
@@ -1547,7 +1547,7 @@ echo "PASS: postprocess stored in KV at $POST_KEY"
 {teardown}
 "#,
             setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
-            teardown = test_teardown(&[cname]),
+            teardown = teardown(&[cname]),
             cname = cname,
         );
         let out = run(&script);
@@ -1586,7 +1586,7 @@ echo "PASS: primary domain=$DOMAIN, multi-domain service registered"
 {teardown}
 "#,
             setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
-            teardown = test_teardown(&[cname]),
+            teardown = teardown(&[cname]),
             cname = cname,
         );
         let out = run(&script);
@@ -1619,7 +1619,7 @@ echo "PASS: service registered despite generator failure"
 {teardown}
 "#,
             setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
-            teardown = test_teardown(&[cname]),
+            teardown = teardown(&[cname]),
             cname = cname,
         );
         let out = run(&script);
@@ -1656,7 +1656,7 @@ echo "PASS: mismatched compose project correctly skipped"
 {teardown}
 "#,
             setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
-            teardown = test_teardown(&[cname]),
+            teardown = teardown(&[cname]),
             cname = cname,
         );
         let out = run(&script);
@@ -1843,7 +1843,7 @@ echo "PASS: reachable, DNAT rules verified, container serving"
 {teardown}
 "#,
             setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
-            teardown = test_teardown(&[cname]),
+            teardown = teardown(&[cname]),
             cname = cname,
         );
         let out = run(&script);
@@ -1910,7 +1910,7 @@ echo "PASS: forwardremote + rproxylocal separate entries"
 {teardown}
 "#,
             setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
-            teardown = test_teardown(&[cname]),
+            teardown = teardown(&[cname]),
             cname = cname,
         );
 
@@ -2621,7 +2621,7 @@ echo "PASS: structured log fields present"
 {teardown}
 "#,
             setup = new_format_setup(services_yaml, ""),
-            teardown = test_teardown(&[cname]),
+            teardown = teardown(&[cname]),
             cname = cname,
         );
 

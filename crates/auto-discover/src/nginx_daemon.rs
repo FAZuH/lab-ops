@@ -420,7 +420,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_service_id_sites_conf() {
+    fn extract_service_id_sites_conf() {
         assert_eq!(
             extract_service_id("nginx-configs/sites/node1-example-com-32000.conf"),
             Some("node1-example-com-32000"),
@@ -428,7 +428,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_service_id_streams_conf() {
+    fn extract_service_id_streams_conf() {
         assert_eq!(
             extract_service_id("nginx-configs/streams/node2-dns-53530.conf"),
             Some("node2-dns-53530"),
@@ -436,7 +436,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_service_id_postproc_is_none() {
+    fn extract_service_id_postproc_is_none() {
         assert_eq!(
             extract_service_id("nginx-configs/sites/svc-123.postproc"),
             None,
@@ -444,12 +444,12 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_service_id_unrelated_key_is_none() {
+    fn extract_service_id_unrelated_key_is_none() {
         assert_eq!(extract_service_id("some-other-prefix/foo.conf"), None);
     }
 
     #[test]
-    fn test_extract_service_id_with_hyphens_and_numbers() {
+    fn extract_service_id_with_hyphens_and_numbers() {
         assert_eq!(
             extract_service_id("nginx-configs/sites/service-node-1-drive-example-com-32000.conf"),
             Some("service-node-1-drive-example-com-32000"),

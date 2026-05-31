@@ -81,13 +81,13 @@ pub fn split_data_and_proxied(raw: &str) -> (String, Option<bool>) {
 
 /// Strips the zone suffix from a fully-qualified domain name.
 ///
-/// Returns `"@"` when the FQDN matches the zone (apex).
+/// Returns the zone name when the FQDN matches the zone (apex).
 pub fn strip_zone(fqdn: &str, zone: &str) -> String {
     let fqdn = fqdn.trim_end_matches('.');
     let zone = zone.trim_end_matches('.');
 
     if fqdn == zone {
-        return "@".to_string();
+        return zone.to_string();
     }
 
     let suffix = format!(".{zone}");
@@ -102,9 +102,10 @@ pub fn strip_zone(fqdn: &str, zone: &str) -> String {
 /// Parses an SRV record name into (remaining record name, service, protocol).
 pub fn parse_srv_name(fqdn: &str, zone: &str) -> (String, String, String) {
     let record_part = strip_zone(fqdn, zone);
+    let zone = zone.trim_end_matches('.');
 
-    if record_part == "@" {
-        return ("@".to_string(), "_unknown".to_string(), "_tcp".to_string());
+    if record_part == zone {
+        return (zone.to_string(), "_unknown".to_string(), "_tcp".to_string());
     }
 
     let parts: Vec<&str> = record_part.split('.').collect();
@@ -133,9 +134,10 @@ pub fn parse_srv_name(fqdn: &str, zone: &str) -> (String, String, String) {
 /// Parses a TLSA record name into (remaining record name, port, protocol).
 pub fn parse_tlsa_name(fqdn: &str, zone: &str) -> (String, u32, String) {
     let record_part = strip_zone(fqdn, zone);
+    let zone = zone.trim_end_matches('.');
 
-    if record_part == "@" {
-        return ("@".to_string(), 0, "tcp".to_string());
+    if record_part == zone {
+        return (zone.to_string(), 0, "tcp".to_string());
     }
 
     let parts: Vec<&str> = record_part.split('.').collect();
