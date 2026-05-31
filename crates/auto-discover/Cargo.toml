@@ -11,8 +11,8 @@ repository.workspace = true
 docker-tests = []
 
 [dependencies]
-lab-lib = { path = "../lab-lib" }
-natmap = { path = "../natmap" }
+lab-lib = { workspace = true }
+natmap = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
