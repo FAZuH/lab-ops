@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 jobs:
-  changelog-preview:
+  preview:
     name: Preview Changelog
     if: "! github.event.pull_request.draft"
     runs-on: ubuntu-latest
@@ -28,17 +28,11 @@ jobs:
 
       - name: Prepare Tag for Preview
         run: |
-          # Find the actual latest tag in the whole repo
           LATEST_TAG=$(git tag -l 'v*' --sort=-version:refname | head -1)
-          
           if [ -n "$LATEST_TAG" ]; then
-            # Find the common ancestor between HEAD and the tag branch point, or just use HEAD^
             MERGE_BASE=$(git merge-base HEAD "$LATEST_TAG" 2>/dev/null || git rev-parse HEAD^)
-            # Forcefully move the tag to the ancestor (local only)
             git tag -f "$LATEST_TAG" "$MERGE_BASE"
           fi
-          
-          # Give the action the fallback version just in case
           echo "{\"version\":\"${LATEST_TAG:-v0.0.0}\"}" > version.json
 
       - name: Install changelog dependencies
@@ -55,8 +49,100 @@ jobs:
           skip-git-pull: true
           skip-on-empty: false
           git-push: false
-          output-file: "false"
+          output-file: "CHANGELOG_PREVIEW.md"
           github-token: ${{ secrets.GITHUB_TOKEN }}
           config-file-path: ./.github/.config.js
           version-file: ./version.json
           preset: conventionalcommits
+
+      - name: Save changelog outputs
+        run: |
+          echo '${{ steps.changelog.outputs.tag }}' > /tmp/next_tag.txt
+          echo '${{ steps.changelog.outputs.skipped }}' > /tmp/skipped.txt
+
+      - name: Detect changed workspace members
+        run: |
+          echo '[]' > /tmp/members.json
+          if ! grep -q '^\[workspace\]' Cargo.toml; then
+            exit 0
+          fi
+          MEMBERS=$(find crates -maxdepth 2 -name Cargo.toml -exec dirname {} \; | sed 's|^crates/||' | sort -u)
+          if [ -z "$MEMBERS" ]; then
+            exit 0
+          fi
+          PREV_TAG=$(git tag -l 'v*' --sort=-version:refname | head -1)
+          CHANGED=""
+          if [ -z "$PREV_TAG" ]; then
+            CHANGED="$MEMBERS"
+          else
+            for member in $MEMBERS; do
+              if git diff --name-only "$PREV_TAG"..HEAD -- "crates/$member/" | grep -q .; then
+                CHANGED="$CHANGED $member"
+              fi
+            done
+          fi
+          if [ -n "$CHANGED" ]; then
+            echo "[$(echo $CHANGED | xargs -n1 | sed 's/.*/"&"/' | paste -sd,)]" > /tmp/members.json
+          fi
+
+      - name: Post PR Comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+
+            const skipped = fs.readFileSync('/tmp/skipped.txt', 'utf8').trim();
+            if (skipped === 'true') {
+              console.log('Changelog skipped — nothing to preview');
+              return;
+            }
+
+            const tag = fs.readFileSync('/tmp/next_tag.txt', 'utf8').trim();
+            if (!tag) {
+              console.log('No tag generated');
+              return;
+            }
+
+            const changelog = fs.readFileSync('CHANGELOG_PREVIEW.md', 'utf8').trim();
+            const members = JSON.parse(fs.readFileSync('/tmp/members.json', 'utf8'));
+
+            let body = '## Release Preview\n\n';
+            body += '**Next version:** `' + tag + '`\n\n';
+
+            if (members.length > 0) {
+              body += '**Crates to bump:**\n';
+              body += '| Crate | Version |\n|-------|---------|\n';
+              const ver = tag.replace(/^v/, '');
+              members.forEach(function (m) {
+                body += '| ' + m + ' | ' + ver + ' |\n';
+              });
+              body += '\n';
+            }
+
+            body += changelog;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(function (c) {
+              return c.user.type === 'Bot' && c.body.startsWith('## Release Preview');
+            });
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
