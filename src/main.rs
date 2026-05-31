@@ -115,12 +115,11 @@ fn generate_completions(shell: clap_complete::Shell, dir: Option<&Path>) -> Resu
 
     // For zsh, if writing to stdout, strip the #compdef line because `eval $(...)` without
     // quotes in zsh will treat it as a comment for the entire collapsed string.
-    // We also append `compdef _name name` to register it properly in the eval context.
-    if shell == clap_complete::Shell::Zsh && dir.is_none() {
-        if let Some(stripped) = out.strip_prefix(&format!("#compdef {name}\n")) {
-            out = stripped.to_string();
-        }
-        out.push_str(&format!("\ncompdef _{name} {name}\n"));
+    if shell == clap_complete::Shell::Zsh
+        && dir.is_none()
+        && let Some(stripped) = out.strip_prefix(&format!("#compdef {name}\n"))
+    {
+        out = stripped.to_string();
     }
 
     match dir {

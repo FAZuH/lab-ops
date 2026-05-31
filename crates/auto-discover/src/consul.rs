@@ -544,7 +544,7 @@ mod tests {
     use crate::config::ServiceType;
 
     #[test]
-    fn test_build_consul_service() {
+    fn build_consul_service() {
         let mut extra = HashMap::new();
         extra.insert("client_max_body_size".into(), "50M".into());
 
@@ -595,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_consul_service_udp_check() {
+    fn build_consul_service_udp_check() {
         let service = ResolvedService {
             service_id_prefix: "dns".into(),
             service_name: "dns".into(),
@@ -634,19 +634,19 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_generation_id() {
+    fn generation_id_format() {
         let id = compute_generation_id("service-node-1", "a1b2c3");
         assert_eq!(id, "service-node-1-a1b2c3");
     }
 
     #[test]
-    fn test_urlencoding() {
+    fn url_encoding_format() {
         let encoded = urlencoding("\"key\"=value");
         assert_eq!(encoded, "%22key%22%3Dvalue");
     }
 
     #[test]
-    fn test_build_consul_service_with_forwarding() {
+    fn build_consul_service_with_forwarding() {
         let service = ResolvedService {
             service_id_prefix: "example-mc".into(),
             service_name: "example-mc".into(),
