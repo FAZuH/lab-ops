@@ -1,13 +1,25 @@
-[workspace]
-members = ["crates/natmap", "crates/auto-discover", "crates/lab-lib"]
-
 [package]
 name = "lab-ops"
+# Version will be updated by CI in `release` branch.
+# Avoid modifying version manually or it will break CI
+
+
 version = "0.1.0"
+
+
 edition = "2024"
+authors = ["FAZuH <mail@fazuh.com>"]
+description = "Personal utility tools for my homelab"
+license = "MIT"
+repository = "https://github.com/FAZuH/lab-ops"
+keywords = ["homelab", "docker", "iptables", "devops", "cli"]
+categories = ["command-line-utilities", "network-programming", "virtualization"]
 
 [features]
 docker-tests = []
+
+[workspace]
+members = ["crates/natmap", "crates/auto-discover", "crates/lab-lib"]
 
 [dependencies]
 regex = "1.12.3"
