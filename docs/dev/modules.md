@@ -262,9 +262,21 @@ Defines the root `Cli` struct with `--verbose` and `--color` global flags, and t
 
 Initializes tracing with verbosity and color from CLI args, then dispatches to the selected command. Also contains the `generate_completions()` helper and `completion_filename()` for the `completions` subcommand.
 
-### `cmd/cf2ansible.rs` — DNS Zone Converter
+### `consts.rs` — CLI Constants
 
-Converts BIND DNS zone files to Ansible YAML for Cloudflare DNS management.
+Command name constants (`CMD_*`) used across the root binary, natmap subprocess invocations, and output headers.
+
+### `cmd/cf2ansible.rs` — DNS Zone → Ansible Converter
+
+Converts BIND DNS zone files to Ansible YAML for Cloudflare DNS management using `community.general.cloudflare_dns`.
+
+### `cmd/cf2terra.rs` — DNS Zone → Terraform Converter
+
+Converts BIND DNS zone files to Terraform `cloudflare_record` resource blocks. Supports `A`, `AAAA`, `CNAME`, `MX`, `TXT`, `SRV`, `NS`. Accepts `--zone-id-var` for the Terraform zone ID variable reference.
+
+### `cmd/dns_parser.rs` — Shared DNS Zone Parser
+
+Parses BIND zone files into `DnsRecord` structs used by both `cf2ansible` and `cf2terra`. Handles `A`, `AAAA`, `CNAME`, `MX`, `TXT`, `SRV`, `TLSA`, `NS` record types and Cloudflare proxy annotations (`; cf_tags=cf-proxied:true|false`).
 
 ### `cmd/dockernet.rs` — Docker Network Viewer
 
