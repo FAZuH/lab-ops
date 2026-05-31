@@ -1,3 +1,20 @@
+## 0.1.16 (2026-05-31)
+
+
+### Miscellaneous Chores
+
+* Publish crate to crates.io ([96add3e](https://github.com/FAZuH/lab-ops/commit/96add3e36478e2b2172ed727ebb8ba3e7f00e60a))
+
+
+### Documentation
+
+* Add installation section to readme ([fe3b6e1](https://github.com/FAZuH/lab-ops/commit/fe3b6e156774e7c25b23fd4412fcad9d8d2fdf86))
+
+
+### New Features
+
+* Add --verbose, --color, completions subcommand ([1f6ecf6](https://github.com/FAZuH/lab-ops/commit/1f6ecf619568ea59e7cc253bb264c34d821efddc))
+
 ## 0.1.15 (2026-05-24)
 
 
@@ -45,11 +62,4 @@
 ### Auto Discover
 
 * Remove requirement of exposed port ([d31135b](https://github.com/FAZuH/lab-ops/commit/d31135ba1602c42ca2351d488e995939b0e92760))
-
-## 0.1.11 (2026-05-21)
-
-
-### Auto Discover
-
-* Delete stale Consul K/V configs ([7e0c46e](https://github.com/FAZuH/lab-ops/commit/7e0c46e5c7dc1729e87fd496529edc53d603de6d))
 
