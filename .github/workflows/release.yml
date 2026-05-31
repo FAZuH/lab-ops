@@ -1,5 +1,3 @@
-# Credit: Workflow configs based on https://github.com/Wynntils/Wynntils
-
 name: Release & Deploy
 
 on:
@@ -18,4 +16,5 @@ jobs:
     with:
       binary-name: lab-ops
       platforms: linux
+      publish-crates: true
     secrets: inherit

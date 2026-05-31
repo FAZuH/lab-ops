@@ -80,6 +80,9 @@ lab-ops natmap --socket /tmp/natmap.sock ls
 |--------|---------|-------------|
 | `--socket` | `/run/natmap.sock` | Path to the natmap daemon Unix socket |
 | `--json` | off | Output in JSON format instead of tables |
+| `--color` | `auto` | Output coloring: `auto`, `always`, `never`. Table headers are colorized when enabled |
+
+Verbosity is controlled via the root-level `-v` / `--verbose` flag (repeatable: `-v`, `-vv`, `-vvv+`).
 
 ### Utility Commands
 

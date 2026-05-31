@@ -2,25 +2,45 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use clap::Subcommand;
+use clap::ValueEnum;
 
-/// Subcommand name for the DNS zone-to-Ansible converter.
-pub const CMD_CF2ANSIBLE: &str = "cf2ansible";
-/// Subcommand name for the DNS zone-to-Terraform converter.
-pub const CMD_CF2TERRA: &str = "cf2terra";
-/// Subcommand name for the Docker network viewer.
-pub const CMD_DOCKERNET: &str = "dockernet";
-/// Subcommand name for the NAT mapping tool.
-pub const CMD_NATMAP: &str = "natmap";
-/// Subcommand name for the service discovery daemon.
-pub const CMD_AUTO_DISCOVER: &str = "auto-discover";
+use crate::consts::CMD_AUTO_DISCOVER;
+use crate::consts::CMD_CF2ANSIBLE;
+use crate::consts::CMD_CF2TERRA;
+use crate::consts::CMD_COMPLETIONS;
+use crate::consts::CMD_DOCKERNET;
+use crate::consts::CMD_NATMAP;
 
 /// Top-level CLI argument parser for `lab-ops`.
 #[derive(Parser)]
 #[command(version = env!("CARGO_PKG_VERSION"))]
-#[command(name = "lab-ops", about = "Lab operations toolkit")]
+#[command(name = crate::consts::CMD, about = "Lab operations toolkit")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
+
+    /// Verbosity level (-v, -vv, -vvv, -vvvv)
+    #[arg(short, long, global = true, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+
+    /// Color output mode [auto|always|never]
+    #[arg(
+        long,
+        global = true,
+        default_value = "auto",
+        value_enum,
+        hide_possible_values = true
+    )]
+    pub color: ColorMode,
+}
+
+/// Controls ANSI color output in logs and error formatting.
+#[derive(Clone, Debug, Default, ValueEnum)]
+pub enum ColorMode {
+    #[default]
+    Auto,
+    Always,
+    Never,
 }
 
 /// All supported subcommands of lab-ops.
@@ -60,5 +80,15 @@ pub enum Command {
     AutoDiscover {
         #[command(flatten)]
         args: auto_discover::cli::Cli,
+    },
+    /// Generate shell completion scripts.
+    #[command(name = CMD_COMPLETIONS)]
+    Completions {
+        /// Target shell [bash, elvish, fish, powershell, zsh]
+        #[arg(value_enum, hide_possible_values = true)]
+        shell: clap_complete::Shell,
+        /// Output directory (e.g., ~/.zfunc)
+        #[arg(long)]
+        dir: Option<PathBuf>,
     },
 }

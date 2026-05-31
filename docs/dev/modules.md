@@ -93,7 +93,7 @@ pub enum DockerCommand {
 }
 ```
 
-Also defines the top-level `Cli` struct with global `--socket` and `--json` flags. The `run_cli()` function dispatches each variant to the appropriate handler in `command.rs`.
+Also defines the top-level `Cli` struct with global `--socket`, `--json`, and `--color` flags. The `run_cli(cli, use_color)` function dispatches each variant to the appropriate handler in `command.rs`, passing the color preference for table styling.
 
 ### `command.rs` — Handler Functions
 
@@ -187,7 +187,7 @@ mod nginx_daemon;
 
 ### `cli.rs` — CLI Definitions
 
-Defines `Cli` struct and `Commands` enum with clap derives. The `run_cli()` function dispatches each variant. Subcommands:
+Defines `Cli` struct and `Commands` enum with clap derives. The `run_cli(cli, _use_color)` function dispatches each variant. Subcommands:
 
 | Variant | Purpose |
 |---|---|
@@ -256,12 +256,28 @@ Proxy-side nginx config management:
 
 ### `cli.rs` — Top-Level CLI
 
-Defines the root `Cli` struct and `Command` enum. Each variant delegates to a workspace crate via `#[command(flatten)]` or to a `src/cmd/` module.
+Defines the root `Cli` struct with `--verbose` and `--color` global flags, and the `Command` enum with a `Completions` variant. Each other variant delegates to a workspace crate via `#[command(flatten)]` or to a `src/cmd/` module.
 
-### `cmd/cf2ansible.rs` — DNS Zone Converter
+### `main.rs` — Entrypoint
 
-Converts BIND DNS zone files to Ansible YAML for Cloudflare DNS management.
+Initializes tracing with verbosity and color from CLI args, then dispatches to the selected command. Also contains the `generate_completions()` helper and `completion_filename()` for the `completions` subcommand.
+
+### `consts.rs` — CLI Constants
+
+Command name constants (`CMD_*`) used across the root binary, natmap subprocess invocations, and output headers.
+
+### `cmd/cf2ansible.rs` — DNS Zone → Ansible Converter
+
+Converts BIND DNS zone files to Ansible YAML for Cloudflare DNS management using `community.general.cloudflare_dns`.
+
+### `cmd/cf2terra.rs` — DNS Zone → Terraform Converter
+
+Converts BIND DNS zone files to Terraform `cloudflare_record` resource blocks. Supports `A`, `AAAA`, `CNAME`, `MX`, `TXT`, `SRV`, `NS`. Accepts `--zone-id-var` for the Terraform zone ID variable reference.
+
+### `cmd/dns_parser.rs` — Shared DNS Zone Parser
+
+Parses BIND zone files into `DnsRecord` structs used by both `cf2ansible` and `cf2terra`. Handles `A`, `AAAA`, `CNAME`, `MX`, `TXT`, `SRV`, `TLSA`, `NS` record types and Cloudflare proxy annotations (`; cf_tags=cf-proxied:true|false`).
 
 ### `cmd/dockernet.rs` — Docker Network Viewer
 
-Displays Docker container IPs and port bindings in a formatted table.
+Displays Docker container IPs and port bindings in a formatted table. Accepts a `use_color: bool` parameter to control header/status coloring.

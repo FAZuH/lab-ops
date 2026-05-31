@@ -1,5 +1,3 @@
-// Credit: Workflow configs based on https://github.com/Wynntils/Wynntils
-//
 // https://github.com/conventional-changelog/conventional-changelog-config-spec/blob/master/versions/2.2.0/README.md
 "use strict";
 const config = require("conventional-changelog-conventionalcommits");

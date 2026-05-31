@@ -8,6 +8,7 @@ use std::process::Command;
 
 use clap::Parser;
 use clap::Subcommand;
+use clap_complete::engine::ArgValueCompleter;
 use color_eyre::Result;
 
 use crate::command::add;
@@ -18,7 +19,6 @@ use crate::command::handle_list;
 use crate::command::handle_snat;
 use crate::command::remap;
 use crate::command::remove;
-use crate::consts::BIN;
 use crate::consts::DAEMON_SOCK;
 use crate::consts::PKG_NAME;
 use crate::consts::STATE;
@@ -107,7 +107,10 @@ pub enum NatMapCommand {
     #[command(name = "ls")]
     List {
         /// Optional container ID or name to filter Docker mappings.
-        #[arg(value_name = "CONTAINER_ID")]
+        #[arg(
+            value_name = "CONTAINER_ID",
+            add = ArgValueCompleter::new(crate::completions::complete_container_id)
+        )]
         container_id: Option<String>,
     },
     /// Removes all managed NAT rules and resets daemon state.
@@ -145,7 +148,7 @@ pub enum NatMapCommand {
         #[arg(long, default_value = PKG_NAME)]
         group: String,
         /// Path to the binary to install.
-        #[arg(long, default_value = BIN)]
+        #[arg(long, default_value = lab_lib::consts::LABOPS_BIN)]
         binary: String,
     },
 }
@@ -157,21 +160,30 @@ pub enum DockerCommand {
     #[command(name = "add")]
     Add {
         /// Container ID.
-        #[arg(value_name = "CONTAINER_ID")]
+        #[arg(
+            value_name = "CONTAINER_ID",
+            add = ArgValueCompleter::new(crate::completions::complete_container_id)
+        )]
         container_id: String,
         /// Port mapping in the form `[HOST_IP:]HOST_PORT[:[TARGET_IP:]TARGET_PORT][/PROTO]`.
         /// Optional when --name is used (CONTAINER_ID becomes the mapping).
         #[arg(value_name = "MAPPING")]
         mapping: Option<String>,
         /// Container name (alternative to CONTAINER_ID). When set, CONTAINER_ID is treated as the mapping.
-        #[arg(long)]
+        #[arg(
+            long,
+            add = ArgValueCompleter::new(crate::completions::complete_container_id)
+        )]
         name: Option<String>,
     },
     /// Removes one or more Docker port mappings.
     #[command(name = "rm")]
     Remove {
         /// Container ID or name (required unless `--id` or `--name` is used).
-        #[arg(value_name = "CONTAINER_ID")]
+        #[arg(
+            value_name = "CONTAINER_ID",
+            add = ArgValueCompleter::new(crate::completions::complete_container_id)
+        )]
         container_id: Option<String>,
         /// Port and optional protocol (e.g., `8080/tcp`).
         #[arg(value_name = "PORT[/PROTO]")]
@@ -183,14 +195,20 @@ pub enum DockerCommand {
         #[arg(long)]
         id: Option<u64>,
         /// Container name (alternative to CONTAINER_ID).
-        #[arg(long)]
+        #[arg(
+            long,
+            add = ArgValueCompleter::new(crate::completions::complete_container_id)
+        )]
         name: Option<String>,
     },
     /// Remaps a host port for a running container without restarting it.
     #[command(name = "remap")]
     Remap {
         /// Container ID or name.
-        #[arg(value_name = "CONTAINER_ID")]
+        #[arg(
+            value_name = "CONTAINER_ID",
+            add = ArgValueCompleter::new(crate::completions::complete_container_id)
+        )]
         container_id: String,
         /// Port mapping in the form `OLD_PORT:NEW_PORT`.
         #[arg(value_name = "OLD_PORT:NEW_PORT")]
@@ -199,7 +217,7 @@ pub enum DockerCommand {
 }
 
 /// Dispatches a parsed [`Cli`] to the appropriate daemon API call.
-pub async fn run_cli(cli: Cli) -> Result<()> {
+pub async fn run_cli(cli: Cli, use_color: bool) -> Result<()> {
     let socket = cli.socket;
     let json = cli.json;
 
@@ -232,7 +250,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             handle_hairpin(ext_ip, int_ip, proto, ports, delete, &socket).await?;
         }
         NatMapCommand::List { container_id } => {
-            handle_list(&socket, container_id, json).await?;
+            handle_list(&socket, container_id, json, use_color).await?;
         }
         NatMapCommand::Clear => {
             handle_clear(&socket).await?;

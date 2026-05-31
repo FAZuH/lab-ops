@@ -148,9 +148,10 @@ All `run_cli` functions must:
 - Return `color_eyre::Result<()>`
 - NOT call `process::exit()` internally
 - Let the caller (root `main.rs`) handle the exit code
+- Accept a `use_color: bool` parameter for table styling
 
 ```rust
-pub async fn run_cli(cli: Cli) -> Result<()> { ... }
+pub async fn run_cli(cli: Cli, use_color: bool) -> Result<()> { ... }
 ```
 
 

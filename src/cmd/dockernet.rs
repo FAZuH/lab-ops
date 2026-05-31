@@ -10,6 +10,8 @@ use bollard::plugin::EndpointSettings;
 use bollard::plugin::PortBinding;
 use bollard::query_parameters::ListContainersOptionsBuilder;
 use color_eyre::eyre::Result;
+use comfy_table::Attribute;
+use comfy_table::Color;
 use comfy_table::Table;
 
 /// Displays a table of Docker containers with IPs and port bindings.
@@ -22,12 +24,31 @@ use comfy_table::Table;
 /// ```no_run
 /// use lab_ops::cmd::dockernet;
 /// let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-/// rt.block_on(dockernet::run()).unwrap();
+/// rt.block_on(dockernet::run(true)).unwrap();
 /// ```
-pub async fn run() -> Result<()> {
+pub async fn run(use_color: bool) -> Result<()> {
     let mut table = Table::new();
     let mut rows = Vec::new();
-    table.set_header(vec!["Name", "Status", "IP", "Binds"]);
+
+    let headers: Vec<comfy_table::Cell> = if use_color {
+        vec![
+            comfy_table::Cell::new("Name")
+                .fg(Color::Cyan)
+                .add_attribute(Attribute::Bold),
+            comfy_table::Cell::new("Status")
+                .fg(Color::Cyan)
+                .add_attribute(Attribute::Bold),
+            comfy_table::Cell::new("IP")
+                .fg(Color::Cyan)
+                .add_attribute(Attribute::Bold),
+            comfy_table::Cell::new("Binds")
+                .fg(Color::Cyan)
+                .add_attribute(Attribute::Bold),
+        ]
+    } else {
+        vec!["Name".into(), "Status".into(), "IP".into(), "Binds".into()]
+    };
+    table.set_header(headers);
 
     let docker = Docker::connect_with_local_defaults()?;
     let opt = Some(ListContainersOptionsBuilder::new().all(true).build());
@@ -55,7 +76,25 @@ pub async fn run() -> Result<()> {
     rows.sort_by_key(|r| r[1].clone());
     rows.sort_by_key(|r| r[3].clone());
 
-    table.add_rows(rows);
+    if use_color {
+        for row in &rows {
+            let status_cell = if row[1].contains("running") || row[1].contains("Up") {
+                comfy_table::Cell::new(&row[1]).fg(Color::Green)
+            } else if row[1].contains("Exited") || row[1].contains("Dead") {
+                comfy_table::Cell::new(&row[1]).fg(Color::Red)
+            } else {
+                comfy_table::Cell::new(&row[1])
+            };
+            table.add_row(vec![
+                comfy_table::Cell::new(&row[0]),
+                status_cell,
+                comfy_table::Cell::new(&row[2]),
+                comfy_table::Cell::new(&row[3]),
+            ]);
+        }
+    } else {
+        table.add_rows(rows);
+    }
 
     println!("{table}");
     Ok(())

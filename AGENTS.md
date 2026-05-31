@@ -1,73 +1,77 @@
-# OpenCode / Agent Instructions for lab-ops
+# lab-ops — Agent Instructions
 
-Personal homelab utility tools, built as a Rust workspace.
+Personal homelab utility tools. Rust workspace, edition **2024**.
 
-## Development Workflow
+## Dev Commands
 
 ```bash
-./dev.sh all       # format + lint (auto-fix) + test — run before committing
+./dev.sh all       # format → lint → test
 ./dev.sh format    # cargo +nightly fmt --all
-./dev.sh lint      # cargo clippy --workspace --fix --allow-dirty
+./dev.sh lint      # cargo clippy --workspace --all-targets --all-features --no-deps --fix --allow-dirty
 ./dev.sh test      # cargo test --workspace --all-targets --all-features
-./dev.sh docs      # compile Mermaid diagrams
+./dev.sh docs      # compile Mermaid .mmd to PNG via mmdc
 ```
 
-## Conventions (Canonical Source)
+- **`rustfmt` requires nightly** (`+nightly`). `rustfmt.toml` uses unstable features (`imports_granularity = "Item"`, `group_imports = "StdExternalCrate"`).
+- **`.cargo/config.toml` always enables `docker-tests`** via `--cfg feature="docker-tests"`. So `--all-features` in dev commands is redundant but harmless.
 
-All codebase conventions are defined in `docs/dev/standards.md`. Read it before adding code. Key constraints:
+## Key Conventions
 
-- **No custom error types** — `color_eyre::Result` everywhere. `bail!()` / `wrap_err()` for errors handlng.
-- **No glob imports** — `use crate::models::*` is forbidden. Import each item explicitly.
-- **No redundant module imports** — don't `use crate::foo` AND `use crate::foo::Bar`. Pick one.
-- **No `process::exit()` in library code** — only `main.rs` may exit the process.
-- **Workspace crate `run_cli` returns `Result<()>`** — caller (`main.rs`) handles the exit code.
-- **Tracing subscriber is initialized ONCE** in root `main.rs`. Workspace crates never init tracing.
-- **Root `main.rs` owns the tokio runtime.** Workspace crates are `async fn`, never `#[tokio::main]`.
-- **No `unwrap()` / `expect()`** outside `LazyLock<Regex>` statics. Prefer `?` and `bail!()`.
-- **Module-level docs** (`//!`) at the top of every `.rs` file.
-- **Public item docs** (`///`) on every `pub` item.
-- **Test naming**: `<module_or_function>_<scenario>`.
-- **File naming**: `snake_case.rs`. Root crate's inline subcommands live in `src/cmd/`.
-- **No `use clap::Parser as _`** — unused trait imports must be removed.
+From `docs/dev/standards.md`:
+
+- **No custom error types** — `color_eyre::Result`, `bail!()`, `wrap_err()`.
+- **No `unwrap()`/`expect()`** outside `LazyLock<Regex>` statics.
+- **No glob imports** (`use crate::foo::*`), no redundant module paths (`use crate::foo` + `use crate::foo::Bar`).
+- **No `process::exit()` in library code** — only `main.rs`.
+- **Workspace `run_cli`** returns `Result<()>`. `natmap::cli::run_cli(cli, use_color)` takes `use_color: bool`, `auto_discover::cli::run_cli(cli)` does not.
+- **Tracing subscriber initialized ONCE** in root `main.rs`. Workspace crates never init tracing.
+- **Root `main.rs` owns the tokio runtime** — workspace crates are `async fn`, no `#[tokio::main]`.
+- **Edition 2024** — all crates must set `edition = "2024"`.
+- **Structured logging** — no string interpolation in log messages. Message is a static label, variable data goes in fields. See `docs/dev/logging.md`.
 
 ## Architecture
 
-| Component | Path | Role |
+| Component | Path | Entrypoint |
 |---|---|---|
-| Root binary | `src/` | CLI entrypoint, dispatches subcommands |
-| natmap crate | `crates/natmap/` | iptables NAT daemon + CLI (port reservation, Docker mappings) |
-| auto-discover crate | `crates/auto-discover/` | Service discovery daemon (Docker events, Consul, nginx configs) |
+| Root CLI | `src/` → `main.rs` | `Cli::parse()`, dispatches to commands |
+| Root cmds | `src/cmd/` | `cf2ansible`, `cf2terra`, `dockernet` |
+| natmap | `crates/natmap/` → `cli.rs:run_cli()` | iptables NAT daemon + CLI over Unix socket |
+| auto-discover | `crates/auto-discover/` → `cli.rs:run_cli()` | Service discovery (Docker + Consul + nginx) |
+| lab-lib | `crates/lab-lib/` | Shared types: `TransportProtocol`, `PortAllocator`, Docker helpers |
 
-**natmap daemon** (`lab-ops natmap daemon`) — Central authority for ALL iptables NAT rules. CLI commands (`dnat`, `snat`, `hairpin`, `docker add/rm/remap`, `ls`) communicate via Unix socket (`/run/natmap.sock`). State persisted to `/var/lib/natmap/state.json`.
+- **natmap daemon**: central authority for ALL iptables NAT rules. CLI commands talk Unix socket (`/run/natmap.sock`). State in `/var/lib/natmap/state.json`. `natmap install` creates systemd service.
+- **auto-discover daemon**: runs discovery, forwarding, nginx as concurrent tokio tasks. Component flags: `--no-discovery`, `--no-forwarding`, `--no-nginx`.
 
-**auto-discover daemon** (`lab-ops auto-discover daemon`) — Unified daemon running discovery (Docker event watching + natmap + Consul registration), forwarding (kernel DNAT sync from Consul), and nginx (KV config sync) as concurrent tokio tasks. Control components with `--no-discovery`/`--no-forwarding`/`--no-nginx`.
+## Global CLI Flags
 
-**One-shot commands** (no long-lived daemon): `sync`, `check`, `forwarding-sync`, `nginx-sync`.
+`--verbose` / `-v` (repeatable: info → debug → trace). `--color auto|always|never`. Color resolution in `main.rs`: checks `NO_COLOR`, `CLICOLOR` env vars, respects `--color` flag. Both flags are `global = true`.
 
-## Testing Quirks
+## Shell Completions
 
-- **Docker integration tests** require `--test-threads=1`:
+`lab-ops completions bash|zsh|fish|powershell|elvish [--dir <path>]`. When writing to stdout (no `--dir`), zsh output gets `#compdef` stripped and `compdef` appended for safe `eval` use.
+
+## Testing
+
+- Docker integration tests **require `--test-threads=1`**:
   ```bash
   cargo test --features docker-tests -- --test-threads=1
   ```
-  Each test spins up a privileged Ubuntu container with iptables. Parallel execution causes race conditions.
-- Docker tests are included in `./dev.sh test` because it uses `--all-features`.
-- Run a single crate's tests: `cargo test -p natmap` or `cargo test -p auto-discover`.
+  Each test spins up a privileged Ubuntu container with iptables.
+- Docker tests are included in `./dev.sh test` (feature always on via `.cargo/config.toml`).
+- Run a single crate: `cargo test -p natmap` or `cargo test -p auto-discover`.
 
 ## Updating Docs
 
-When editing code, update the relevant docs in the same commit:
-
-| If you change... | Update... |
+| Changed | Update |
 |---|---|
 | natmap crate | `docs/natmap/usage.md` |
 | auto-discover crate | `docs/auto-discover/usage.md` |
-| Root CLI (dockernet, cf2ansible) | `docs/lab-ops/usage.md` |
-| Code structure / modules | `docs/dev/modules.md` |
-| Conventions / rules | `docs/dev/standards.md` |
-| Test layout or counts | `docs/dev/testing.md` |
-| Architecture / data flow | `docs/dev/architecture.md` |
-| Integration test scenarios | `docs/dev/integration-test-plan.md` |
+| Root CLI | `docs/lab-ops/usage.md` |
+| Code structure | `docs/dev/modules.md` |
+| Conventions | `docs/dev/standards.md` |
+| Logging standard | `docs/dev/logging.md` |
+| Test layout | `docs/dev/testing.md` |
+| Architecture | `docs/dev/architecture.md` |
 | User-facing commands | `README.md` |
 
-Also check `docs/dev/standards.md` §12 (backlog) — if your change resolves a listed item, remove it from the backlog.
+Check `docs/dev/standards.md` §12 (backlog) — remove resolved items.

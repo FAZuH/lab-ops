@@ -7,10 +7,13 @@ lab-ops/
 ├── src/                          # Main lab-ops binary
 │   ├── main.rs                   # CLI entrypoint, command dispatch
 │   ├── cli.rs                    # Clap CLI definitions (Command enum)
+│   ├── consts.rs                 # Command name constants
 │   ├── lib.rs                    # Library root
 │   └── cmd/
 │       ├── mod.rs                # Command module declarations
 │       ├── cf2ansible.rs         # DNS zone → Ansible converter
+│       ├── cf2terra.rs           # DNS zone → Terraform converter
+│       ├── dns_parser.rs         # Shared DNS zone parser
 │       └── dockernet.rs          # Docker network inspector
 ├── crates/
 │   ├── lab-lib/                   # Shared utilities and types
