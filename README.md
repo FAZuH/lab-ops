@@ -2,6 +2,23 @@
 
 Personal utility tools for my homelab.
 
+## Installation
+
+You can build and install the tool using Cargo:
+
+```bash
+# Install latest versoin from crates.io
+cargo install lab-ops
+
+# Install directly from git
+cargo install --git https://github.com/fazuh/lab-ops
+
+# Or build directly from project root
+cargo install --path .
+```
+
+Or download the pre-compiled binary at https://github.com/FAZuH/lab-ops/releases
+
 ## Usage
 
 ```bash
