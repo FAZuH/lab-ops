@@ -79,17 +79,19 @@ jobs:
             PREV_TAG=$(echo "$TAGS" | head -1)
             echo "Previous tag: $PREV_TAG"
 
-            # Detect members with file changes since last tag
+            # Detect members targeted by commit scopes since last tag
+            SCOPES=$(git log "$PREV_TAG..HEAD" --no-merges --format="%s" | grep -oP '(?<=\()[a-z-]+(?=\))' | sort -u)
+
             CHANGED=""
             for member in $MEMBERS; do
-              if git diff --name-only "$PREV_TAG"..HEAD -- "crates/$member/" | grep -q .; then
+              if echo "$SCOPES" | grep -qx "$member"; then
                 CHANGED="$CHANGED $member"
               fi
             done
 
-            # If nothing changed in subcrates, bump the root only
+            # If no scopes matched any member, bump the root only
             if [ -z "$CHANGED" ]; then
-              echo "No member changes detected — root only"
+              echo "No member scopes detected — root only"
               exit 0
             fi
           fi
@@ -98,13 +100,35 @@ jobs:
           echo "Patching changed members: $CHANGED"
 
           for member in $CHANGED; do
-            echo "  Patching crates/$member/Cargo.toml -> $VERSION"
-            sed -i "0,/^version = \".*\"/{s/^version = \".*\"/version = \"$VERSION\"/}" "crates/$member/Cargo.toml"
+            CURRENT=$(grep '^version = ' "crates/$member/Cargo.toml" | head -n1 | sed 's/version = "\(.*\)"/\1/')
+            BUMP="patch"
 
-            # Update workspace dependency reference in root Cargo.toml
+            if [ -n "$PREV_TAG" ]; then
+              while IFS= read -r commit; do
+                if echo "$commit" | grep -q '^chore!(major)'; then
+                  BUMP="major"; break
+                elif echo "$commit" | grep -q '^chore!(minor)'; then
+                  BUMP="minor"
+                fi
+              done < <(git log "$PREV_TAG..HEAD" --no-merges --format="%s" | grep -P "\($member\)")
+            fi
+
+            MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+            MINOR=$(echo "$CURRENT" | cut -d. -f2)
+            PATCH=$(echo "$CURRENT" | cut -d. -f3)
+            case "$BUMP" in
+              major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+              minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+              patch) PATCH=$((PATCH + 1)) ;;
+            esac
+            MEMBER_VERSION="$MAJOR.$MINOR.$PATCH"
+
+            echo "  crates/$member: $CURRENT -> $MEMBER_VERSION ($BUMP)"
+            sed -i "0,/^version = \".*\"/{s/^version = \".*\"/version = \"$MEMBER_VERSION\"/}" "crates/$member/Cargo.toml"
+
             if grep -q "^$member = {" Cargo.toml; then
-              echo "  Updating workspace dependency: $member -> $VERSION"
-              sed -i "/^$member = {/,/}/s/version = \"[^\"]*\"/version = \"$VERSION\"/" Cargo.toml
+              echo "  Updating workspace dependency: $member -> $MEMBER_VERSION"
+              sed -i "/^$member = {/,/}/s/version = \"[^\"]*\"/version = \"$MEMBER_VERSION\"/" Cargo.toml
             fi
           done
 

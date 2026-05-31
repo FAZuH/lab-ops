@@ -50,6 +50,7 @@ jobs:
           skip-on-empty: false
           git-push: false
           output-file: "CHANGELOG_PREVIEW.md"
+          release-count: 1
           github-token: ${{ secrets.GITHUB_TOKEN }}
           config-file-path: ./.github/.config.js
           version-file: ./version.json
@@ -62,7 +63,7 @@ jobs:
 
       - name: Detect changed workspace members
         run: |
-          echo '[]' > /tmp/members.json
+          : > /tmp/member_versions.txt
           if ! grep -q '^\[workspace\]' Cargo.toml; then
             exit 0
           fi
@@ -71,19 +72,39 @@ jobs:
             exit 0
           fi
           PREV_TAG=$(git tag -l 'v*' --sort=-version:refname | head -1)
-          CHANGED=""
           if [ -z "$PREV_TAG" ]; then
             CHANGED="$MEMBERS"
           else
+            SCOPES=$(git log "$PREV_TAG..HEAD" --no-merges --format="%s" | grep -oP '(?<=\()[a-z-]+(?=\))' | sort -u)
             for member in $MEMBERS; do
-              if git diff --name-only "$PREV_TAG"..HEAD -- "crates/$member/" | grep -q .; then
+              if echo "$SCOPES" | grep -qx "$member"; then
                 CHANGED="$CHANGED $member"
               fi
             done
           fi
-          if [ -n "$CHANGED" ]; then
-            echo "[$(echo $CHANGED | xargs -n1 | sed 's/.*/"&"/' | paste -sd,)]" > /tmp/members.json
-          fi
+
+          for member in $CHANGED; do
+            CURRENT=$(grep '^version = ' "crates/$member/Cargo.toml" | head -n1 | sed 's/version = "\(.*\)"/\1/')
+            BUMP="patch"
+            if [ -n "$PREV_TAG" ]; then
+              while IFS= read -r commit; do
+                if echo "$commit" | grep -q '^chore!(major)'; then
+                  BUMP="major"; break
+                elif echo "$commit" | grep -q '^chore!(minor)'; then
+                  BUMP="minor"
+                fi
+              done < <(git log "$PREV_TAG..HEAD" --no-merges --format="%s" | grep -P "\($member\)")
+            fi
+            MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+            MINOR=$(echo "$CURRENT" | cut -d. -f2)
+            PATCH=$(echo "$CURRENT" | cut -d. -f3)
+            case "$BUMP" in
+              major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+              minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+              patch) PATCH=$((PATCH + 1)) ;;
+            esac
+            echo "$member=$MAJOR.$MINOR.$PATCH" >> /tmp/member_versions.txt
+          done
 
       - name: Post PR Comment
         uses: actions/github-script@v7
@@ -91,35 +112,89 @@ jobs:
           script: |
             const fs = require('fs');
 
-            const skipped = fs.readFileSync('/tmp/skipped.txt', 'utf8').trim();
-            if (skipped === 'true') {
-              console.log('Changelog skipped — nothing to preview');
-              return;
-            }
+            const body = context.payload.pull_request.body || '';
 
-            const tag = fs.readFileSync('/tmp/next_tag.txt', 'utf8').trim();
-            if (!tag) {
-              console.log('No tag generated');
-              return;
-            }
-
-            const changelog = fs.readFileSync('CHANGELOG_PREVIEW.md', 'utf8').trim();
-            const members = JSON.parse(fs.readFileSync('/tmp/members.json', 'utf8'));
-
-            let body = '## Release Preview\n\n';
-            body += '**Next version:** `' + tag + '`\n\n';
-
-            if (members.length > 0) {
-              body += '**Crates to bump:**\n';
-              body += '| Crate | Version |\n|-------|---------|\n';
-              const ver = tag.replace(/^v/, '');
-              members.forEach(function (m) {
-                body += '| ' + m + ' | ' + ver + ' |\n';
+            // Parse ## Bump section: member: bump_type
+            const bumpOverrides = {};
+            const bumpMatch = body.match(/^## Bump\s*\n([\s\S]*?)(?=^## |\n## |\n\n## |\z)/m);
+            if (bumpMatch) {
+              bumpMatch[1].split('\n').forEach(function (line) {
+                const parts = line.trim().match(/^([a-z-]+)\s*:\s*(major|minor|patch)$/);
+                if (parts) {
+                  bumpOverrides[parts[1]] = parts[2];
+                }
               });
-              body += '\n';
             }
 
-            body += changelog;
+            // Parse ## Override Changelog section
+            let changelog = null;
+            const overrideMatch = body.match(/^## Override Changelog\s*\n([\s\S]*?)(?=^## |\n## |\z)/m);
+            if (overrideMatch) {
+              changelog = overrideMatch[1].trim();
+            }
+
+            // If no changelog override, use the auto-generated one
+            if (!changelog) {
+              const skipped = fs.readFileSync('/tmp/skipped.txt', 'utf8').trim();
+              if (skipped === 'true') {
+                console.log('Changelog skipped — nothing to preview');
+                return;
+              }
+              try {
+                changelog = fs.readFileSync('CHANGELOG_PREVIEW.md', 'utf8').trim();
+              } catch (e) {
+                changelog = '';
+              }
+            }
+
+            const tag = (function () {
+              try {
+                const t = fs.readFileSync('/tmp/next_tag.txt', 'utf8').trim();
+                return t || null;
+              } catch (e) { return null; }
+            })();
+
+            if (!tag && !changelog) {
+              console.log('No tag and no changelog override');
+              return;
+            }
+
+            // Build member versions from either override or auto-detected
+            let memberVersions = {};
+            if (Object.keys(bumpOverrides).length > 0) {
+              memberVersions = bumpOverrides;
+            } else {
+              try {
+                const lines = fs.readFileSync('/tmp/member_versions.txt', 'utf8').trim().split('\n');
+                lines.forEach(function (line) {
+                  if (!line) return;
+                  const parts = line.split('=');
+                  if (parts.length === 2) {
+                    memberVersions[parts[0]] = parts[1];
+                  }
+                });
+              } catch (e) { /* no workspace */ }
+            }
+
+            let commentBody = '## Release Preview\n\n';
+            if (tag) {
+              commentBody += '**Next version:** `' + tag + '`\n\n';
+            }
+
+            const memberNames = Object.keys(memberVersions);
+            if (memberNames.length > 0) {
+              commentBody += '**Crates to bump:**\n';
+              commentBody += '| Crate | Bump |\n|-------|------|\n';
+              memberNames.forEach(function (m) {
+                const bump = memberVersions[m];
+                commentBody += '| ' + m + ' | `' + bump + '` |\n';
+              });
+              commentBody += '\n';
+            }
+
+            if (changelog) {
+              commentBody += changelog;
+            }
 
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
@@ -136,13 +211,13 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 comment_id: botComment.id,
-                body,
+                body: commentBody,
               });
             } else {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: context.issue.number,
-                body,
+                body: commentBody,
               });
             }
