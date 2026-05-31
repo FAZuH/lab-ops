@@ -18,6 +18,12 @@ categories = ["command-line-utilities", "network-programming", "virtualization"]
 [features]
 docker-tests = []
 
+[workspace.package]
+description = "Personal utility tools for my homelab"
+license = "MIT"
+authors = ["FAZuH <mail@fazuh.com>"]
+repository = "https://github.com/FAZuH/lab-ops"
+
 [workspace]
 members = ["crates/natmap", "crates/auto-discover", "crates/lab-lib"]
 

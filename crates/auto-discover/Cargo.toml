@@ -3,6 +3,9 @@ name = "auto-discover"
 version = "0.1.0"
 edition = "2024"
 description = "Service discovery daemon with Consul registration and nginx config generation"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
 
 [features]
 docker-tests = []

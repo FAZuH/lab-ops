@@ -2,6 +2,10 @@
 name = "lab-lib"
 version = "0.1.0"
 edition = "2024"
+description = "Shared types, port allocation, and Docker helpers for the lab-ops workspace"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
 
 [dependencies]
 bollard = "0.21.0"
