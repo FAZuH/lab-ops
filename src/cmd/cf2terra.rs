@@ -135,7 +135,7 @@ api.example.com.	3600	IN	A	10.0.0.1
 "#;
 
     #[test]
-    fn test_output_produces_hcl() {
+    fn output_produces_hcl() {
         let records = dns_parser::parse_zone(SAMPLE_ZONE);
         let zone = "example.com";
         let zone_id = "var.cloudflare_zone_id";

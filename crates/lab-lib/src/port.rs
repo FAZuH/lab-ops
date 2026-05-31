@@ -240,14 +240,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_set_and_get() {
+    fn set_and_get() {
         let mut pa = PortAssignments::default();
         pa.set("example-drive-80".into(), 32000);
         assert_eq!(pa.get("example-drive-80"), Some(32000));
     }
 
     #[test]
-    fn test_remove() {
+    fn remove() {
         let mut pa = PortAssignments::default();
         pa.set("key".into(), 32000);
         assert_eq!(pa.remove("key"), Some(32000));
@@ -255,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn test_persistence() {
+    fn persistence() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("ports.json");
 
@@ -270,14 +270,14 @@ mod tests {
     }
 
     #[test]
-    fn test_get_or_allocate_returns_existing() {
+    fn get_or_allocate_returns_existing() {
         let mut pa = PortAssignments::default();
         pa.set("key".into(), 32000);
         assert_eq!(pa.get_or_allocate("key"), Some(32000));
     }
 
     #[test]
-    fn test_get_or_allocate_creates_new() {
+    fn get_or_allocate_creates_new() {
         let mut pa = PortAssignments::default();
         let p = pa.get_or_allocate("new-key").unwrap();
         assert!((PORT_RANGE_START..=PORT_RANGE_END).contains(&p));
@@ -285,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_port_free_localhost() {
+    fn is_port_free_localhost() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
@@ -294,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_port_free_occupied() {
+    fn is_port_free_occupied() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         assert!(!is_port_free(format!("127.0.0.1:{port}")));
@@ -303,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn test_allocate_port_assigns_unique() {
+    fn allocate_port_assigns_unique() {
         let mut pa = PortAssignments::default();
         let p1 = pa.allocate_port().unwrap();
         pa.set("s1".into(), p1);
