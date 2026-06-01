@@ -1,3 +1,5 @@
+## 0.1.18 (2026-06-01)
+
 ## 0.1.17 (2026-05-31)
 
 
@@ -57,11 +59,4 @@
 ### Bug Fixes
 
 * Various bug fixes ([ace88ba](https://github.com/FAZuH/lab-ops/commit/ace88bad24b4256f35bb931e1a0fc56c19301fb1))
-
-## 0.1.13 (2026-05-22)
-
-
-### New Features
-
-* Add --version ([cca7d83](https://github.com/FAZuH/lab-ops/commit/cca7d83d07d27e5d7285a0abf82fe5eb5710d375))
 
