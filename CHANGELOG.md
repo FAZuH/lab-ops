@@ -1,3 +1,5 @@
+## 0.1.19 (2026-06-01)
+
 ## 0.1.18 (2026-06-01)
 
 ## 0.1.17 (2026-05-31)
@@ -42,21 +44,4 @@
 ### New Features
 
 * Add cf2terra command ([59c3d6a](https://github.com/FAZuH/lab-ops/commit/59c3d6a760f20fa55b14a3377d1faad1ce4e103b))
-
-## 0.1.14 (2026-05-22)
-
-
-### Auto Discover
-
-* Make nginx output dirs configurable, default to sites-enabled ([9b6cd8f](https://github.com/FAZuH/lab-ops/commit/9b6cd8fd23587f7d16634b6b086ea18992ed8bc0))
-
-
-### Natmap
-
-* Add iptables rule comments, improve ls output ([7e32f20](https://github.com/FAZuH/lab-ops/commit/7e32f20e1d9a428513836acf71371c1ebb01baa9))
-
-
-### Bug Fixes
-
-* Various bug fixes ([ace88ba](https://github.com/FAZuH/lab-ops/commit/ace88bad24b4256f35bb931e1a0fc56c19301fb1))
 
