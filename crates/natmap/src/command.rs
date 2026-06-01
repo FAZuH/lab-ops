@@ -21,6 +21,8 @@ use crate::models::DockerRemapRequest;
 use crate::models::HairpinConfig;
 use crate::models::HairpinRequest;
 use crate::models::ListResponse;
+use crate::models::PolicyRouteConfig;
+use crate::models::PolicyRouteRequest;
 use crate::models::SnatConfig;
 use crate::models::SnatRequest;
 use crate::utils::request_json;
@@ -225,6 +227,7 @@ pub async fn handle_list(
 }
 
 /// Adds or removes a static DNAT rule via the daemon API.
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_dnat(
     ext_ip: String,
     int_ip: String,
@@ -232,6 +235,7 @@ pub async fn handle_dnat(
     ports: String,
     ext_if: Option<String>,
     delete: bool,
+    no_masquerade: bool,
     socket: impl AsRef<Path>,
 ) -> Result<()> {
     let req = DnatRequest {
@@ -240,6 +244,7 @@ pub async fn handle_dnat(
         ports,
         proto: proto.parse()?,
         ext_if,
+        no_masquerade,
     };
     if delete {
         let _: () = request_json(socket, Method::DELETE, "/dnat", Some(req)).await?;
@@ -295,6 +300,26 @@ pub async fn handle_hairpin(
     } else {
         let _res: HairpinConfig = request_json(socket, Method::POST, "/hairpin", Some(req)).await?;
         tracing::info!("hairpin rule added");
+    }
+    Ok(())
+}
+
+/// Adds or removes a policy routing rule via the daemon API.
+pub async fn handle_policy_route(
+    src_ip: String,
+    via: String,
+    table: u32,
+    delete: bool,
+    socket: impl AsRef<Path>,
+) -> Result<()> {
+    let req = PolicyRouteRequest { src_ip, via, table };
+    if delete {
+        let _: () = request_json(socket, Method::DELETE, "/policy-route", Some(req)).await?;
+        tracing::info!("policy route removed");
+    } else {
+        let _res: PolicyRouteConfig =
+            request_json(socket, Method::POST, "/policy-route", Some(req)).await?;
+        tracing::info!("policy route added");
     }
     Ok(())
 }

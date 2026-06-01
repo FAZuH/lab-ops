@@ -135,16 +135,18 @@ impl ConsulClient {
     pub async fn deregister_services_by_container(
         &self,
         container_id: &str,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<serde_json::Value>> {
         let filter = format!("Meta.container_id==\"{container_id}\"");
         let services = self.get_agent_services_by_filter(&filter).await?;
-        let ids: Vec<String> = services.keys().cloned().collect();
-        for id in &ids {
-            if let Err(e) = self.deregister_service(id).await {
+        let mut deregistered = Vec::new();
+        for (id, svc) in services {
+            if let Err(e) = self.deregister_service(&id).await {
                 tracing::warn!("Failed to deregister {}: {}", id, e);
+            } else {
+                deregistered.push(svc);
             }
         }
-        Ok(ids)
+        Ok(deregistered)
     }
 
     /// Deregister services for a server whose `generation_id` or
@@ -473,6 +475,9 @@ impl ConsulServiceRegistration {
                 ext_ip,
                 ext_ports,
                 hairpin,
+                preserve_src_ip,
+                preserve_src_ip_gateway,
+                preserve_src_ip_src,
                 ..
             } => {
                 meta.insert("forwarding".into(), "true".into());
@@ -488,6 +493,26 @@ impl ConsulServiceRegistration {
                 );
                 if *hairpin {
                     meta.insert("hairpin".into(), "true".into());
+                }
+                if *preserve_src_ip {
+                    meta.insert("preserve_src_ip".into(), "true".into());
+                    if let Some(gw) = preserve_src_ip_gateway {
+                        meta.insert("preserve_src_ip_gateway".into(), gw.clone());
+                    }
+                    let mut src_ip = preserve_src_ip_src.clone();
+                    if src_ip.is_none() {
+                        if let Some(ref ip) = service.bind_ip {
+                            src_ip = Some(ip.clone());
+                        } else if let Some(ref iface) = service.bind_interface {
+                            src_ip = crate::daemon::resolve_interface_ip(iface);
+                        }
+                        if src_ip.is_none() {
+                            src_ip = Some(bind_ip.to_string());
+                        }
+                    }
+                    if let Some(src) = src_ip {
+                        meta.insert("preserve_src_ip_src".into(), src);
+                    }
                 }
             }
         }
@@ -664,6 +689,9 @@ mod tests {
                 ext_ports: vec![25565],
                 hairpin: true,
                 proxy_on: None,
+                preserve_src_ip: true,
+                preserve_src_ip_gateway: None,
+                preserve_src_ip_src: None,
             },
         };
 
@@ -681,5 +709,6 @@ mod tests {
         assert_eq!(reg.meta.get("ext_ip").unwrap(), "203.0.113.43");
         assert_eq!(reg.meta.get("ext_ports").unwrap(), "25565");
         assert_eq!(reg.meta.get("hairpin").unwrap(), "true");
+        assert_eq!(reg.meta.get("preserve_src_ip").unwrap(), "true");
     }
 }

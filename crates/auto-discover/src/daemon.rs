@@ -202,6 +202,22 @@ impl DiscoveryDaemon {
                 .wrap_err("natmap command failed")?;
         }
 
+        if let ResolvedPortType::ForwardRemote {
+            preserve_src_ip: true,
+            preserve_src_ip_gateway: Some(gateway),
+            preserve_src_ip_src,
+            ..
+        } = &resolved.port_type
+        {
+            let src_ip = preserve_src_ip_src
+                .clone()
+                .unwrap_or_else(|| natmap_bind_ip.clone().unwrap_or_else(|| consul_ip.clone()));
+            self.natmap
+                .policy_route(&src_ip, gateway, 100, false)
+                .await
+                .wrap_err("policy_route command failed")?;
+        }
+
         let registration = ConsulServiceRegistration::new(
             resolved,
             host_port,
@@ -278,6 +294,25 @@ impl DiscoveryDaemon {
                 )
                 .await
                 .wrap_err("natmap command failed")?;
+        }
+
+        if let ResolvedPortType::ForwardRemote {
+            preserve_src_ip: true,
+            preserve_src_ip_gateway: Some(gateway),
+            preserve_src_ip_src,
+            ..
+        } = &resolved.port_type
+        {
+            let natmap_bind_ip = get_natmap_bind_ip(resolved);
+            let src_ip = preserve_src_ip_src.clone().unwrap_or_else(|| {
+                natmap_bind_ip
+                    .clone()
+                    .unwrap_or_else(|| local_ip.to_string())
+            });
+            self.natmap
+                .policy_route(&src_ip, gateway, 100, false)
+                .await
+                .wrap_err("policy_route command failed")?;
         }
 
         let consul_ip = local_ip.to_string();
@@ -417,20 +452,34 @@ impl DiscoveryDaemon {
     ))]
     pub async fn handle_container_die(&self, container_id: &str) -> Result<()> {
         tracing::debug!("handling container die");
-        let ids = self
+        let services = self
             .consul
             .deregister_services_by_container(container_id)
             .await
             .wrap_err("Consul API error")?;
 
-        for id in &ids {
+        for svc in &services {
+            let id = match svc.get("ID").and_then(|v| v.as_str()) {
+                Some(id) => id,
+                None => continue,
+            };
+
             if let Err(e) = self.consul.delete_nginx_config_kv(id).await {
                 tracing::warn!(service.id = %id, error = %e, "failed to delete nginx config KV");
+            }
+
+            if let Some(meta) = svc.get("Meta").and_then(|v| v.as_object())
+                && meta.get("preserve_src_ip").and_then(|v| v.as_str()) == Some("true")
+                && let Some(gateway) = meta.get("preserve_src_ip_gateway").and_then(|v| v.as_str())
+                && let Some(src_ip) = meta.get("preserve_src_ip_src").and_then(|v| v.as_str())
+                && let Err(e) = self.natmap.policy_route(src_ip, gateway, 100, true).await
+            {
+                tracing::warn!(service.id = %id, error = %e, "failed to remove policy route");
             }
         }
 
         tracing::debug!(
-            services.count = ids.len(),
+            services.count = services.len(),
             container.id = %container_id,
             "deregistered services for container"
         );
@@ -663,7 +712,7 @@ fn get_natmap_bind_ip(resolved: &ResolvedService) -> Option<String> {
 }
 
 /// Resolve the first IPv4 address on a network interface via `ip -j -4 addr show`.
-fn resolve_interface_ip(iface_name: &str) -> Option<String> {
+pub fn resolve_interface_ip(iface_name: &str) -> Option<String> {
     let output = std::process::Command::new("ip")
         .args(["-j", "-4", "addr", "show", iface_name])
         .output()
