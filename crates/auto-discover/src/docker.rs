@@ -21,7 +21,7 @@ impl From<ContainerSummary> for ContainerInfo {
             .unwrap_or_default()
             .first()
             .cloned()
-            .map(|n| lab_lib::docker::trim_container_name(&n).to_string())
+            .map(|n| lab_ops_lab_lib::docker::trim_container_name(&n).to_string())
             .unwrap_or_default();
         let compose_project = c
             .labels
@@ -41,7 +41,7 @@ impl DockerClient {
     /// Connect to the local Docker daemon via the default socket or
     /// `DOCKER_HOST` env var.
     pub fn new() -> Result<Self> {
-        let docker = lab_lib::docker::connect()?;
+        let docker = lab_ops_lab_lib::docker::connect()?;
         Ok(DockerClient { docker })
     }
 
@@ -72,7 +72,7 @@ impl DockerClient {
         let name = info
             .name
             .as_deref()
-            .map(lab_lib::docker::trim_container_name)
+            .map(lab_ops_lab_lib::docker::trim_container_name)
             .unwrap_or("")
             .to_string();
         let compose_project = info

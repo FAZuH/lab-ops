@@ -79,12 +79,12 @@ fn main() -> Result<()> {
         Command::NatMap { args } => {
             use tokio::runtime::Builder;
             let rt = Builder::new_current_thread().enable_all().build()?;
-            rt.block_on(natmap::cli::run_cli(args, use_color))?;
+            rt.block_on(lab_ops_natmap::cli::run_cli(args, use_color))?;
         }
         Command::AutoDiscover { args } => {
             use tokio::runtime::Builder;
             let rt = Builder::new_current_thread().enable_all().build()?;
-            rt.block_on(auto_discover::cli::run_cli(args))?;
+            rt.block_on(lab_ops_auto_discover::cli::run_cli(args))?;
         }
     };
 

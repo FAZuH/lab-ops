@@ -10,7 +10,7 @@ mod tests {
     use crate::daemon::AppState;
     use crate::iptables::IptablesManager;
     use crate::models::DaemonState;
-    use lab_lib::port::PortAllocator;
+    use lab_ops_lab_lib::port::PortAllocator;
     use tokio::sync::RwLock;
     use tracing_test::traced_test;
     use bollard::Docker;

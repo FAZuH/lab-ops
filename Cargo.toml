@@ -28,9 +28,9 @@ repository = "https://github.com/FAZuH/lab-ops"
 members = ["crates/natmap", "crates/auto-discover", "crates/lab-lib"]
 
 [workspace.dependencies]
-lab-lib = { path = "./crates/lab-lib", version = "0.1.0" }
-natmap = { path = "./crates/natmap", version = "0.1.0" }
-auto-discover = { path = "./crates/auto-discover", version = "0.1.0" }
+lab-ops_lab-lib = { path = "./crates/lab-lib", version = "0.1.0" }
+lab-ops_natmap = { path = "./crates/natmap", version = "0.1.0" }
+lab-ops_auto-discover = { path = "./crates/auto-discover", version = "0.1.0" }
 
 [dependencies]
 regex = "1.12.3"
@@ -41,9 +41,9 @@ color-eyre = "0.6.5"
 comfy-table = "7.2.2"
 tokio = { version = "1.52.2", features = ["rt"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-lab-lib = { workspace = true }
-natmap = { workspace = true }
-auto-discover = { workspace = true }
+lab-ops_lab-lib = { workspace = true }
+lab-ops_natmap = { workspace = true }
+lab-ops_auto-discover = { workspace = true }
 
 [lints.clippy]
 uninlined_format_args = "warn"

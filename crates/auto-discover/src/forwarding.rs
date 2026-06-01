@@ -33,7 +33,7 @@ struct ForwardingGroup {
 /// stale DNAT rules for (ext_ip, int_ip) pairs that no longer exist in Consul.
 ///
 /// Requires the natmap daemon to be running on the Unix socket at
-/// `NATMAP_SOCKET` (default: [`lab_lib::NATMAP_SOCKET`]).
+/// `NATMAP_SOCKET` (default: [`lab_ops_lab_lib::NATMAP_SOCKET`]).
 ///
 /// Span fields: `rule.count`.
 #[tracing::instrument(skip_all, fields(rule.count = tracing::field::Empty))]

@@ -1,5 +1,5 @@
-use natmap::models::DockerAddMapRequest;
-use natmap::models::TransportProtocol;
+use lab_ops_natmap::models::DockerAddMapRequest;
+use lab_ops_natmap::models::TransportProtocol;
 
 /// Helper to parse a mapping string using the same logic as command.rs::add().
 fn parse_mapping(mapping: &str) -> Result<DockerAddMapRequest, String> {

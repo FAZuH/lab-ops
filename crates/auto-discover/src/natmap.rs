@@ -1,6 +1,6 @@
 //! Client for the natmap daemon over its Unix socket API.
 //!
-//! Communicates with the natmap daemon via [`natmap::cli::run_cli`] to manage
+//! Communicates with the natmap daemon via [`lab_ops_natmap::cli::run_cli`] to manage
 //! port mappings, DNAT rules, and hairpin NAT rules.
 
 use std::net::IpAddr;
@@ -9,10 +9,10 @@ use std::process::Command;
 use color_eyre::Result;
 use color_eyre::eyre::WrapErr;
 use color_eyre::eyre::bail;
-use lab_lib::TransportProtocol;
-use natmap::cli::Cli;
-use natmap::cli::DockerCommand;
-use natmap::cli::NatMapCommand;
+use lab_ops_lab_lib::TransportProtocol;
+use lab_ops_natmap::cli::Cli;
+use lab_ops_natmap::cli::DockerCommand;
+use lab_ops_natmap::cli::NatMapCommand;
 
 /// Client for the natmap daemon over its Unix socket.
 #[derive(Debug)]
@@ -28,10 +28,10 @@ impl NatmapClient {
     }
 
     /// Create a client using the `NATMAP_SOCKET` env var, defaulting to
-    /// [`lab_lib::NATMAP_SOCKET`].
+    /// [`lab_ops_lab_lib::NATMAP_SOCKET`].
     pub fn default_socket() -> Self {
-        let socket =
-            std::env::var("NATMAP_SOCKET").unwrap_or_else(|_| lab_lib::NATMAP_SOCKET.into());
+        let socket = std::env::var("NATMAP_SOCKET")
+            .unwrap_or_else(|_| lab_ops_lab_lib::NATMAP_SOCKET.into());
         NatmapClient { socket }
     }
 
@@ -44,7 +44,7 @@ impl NatmapClient {
         proto: &str,
         delete: bool,
     ) -> Result<()> {
-        natmap::cli::run_cli(
+        lab_ops_natmap::cli::run_cli(
             Cli {
                 socket: self.socket.clone().into(),
                 json: false,
@@ -71,7 +71,7 @@ impl NatmapClient {
         proto: &str,
         delete: bool,
     ) -> Result<()> {
-        natmap::cli::run_cli(
+        lab_ops_natmap::cli::run_cli(
             Cli {
                 socket: self.socket.clone().into(),
                 json: false,
@@ -127,7 +127,7 @@ impl NatmapClient {
             },
         };
 
-        natmap::cli::run_cli(cli, false).await.or_else(|e| {
+        lab_ops_natmap::cli::run_cli(cli, false).await.or_else(|e| {
             let msg = e.to_string();
             if msg.contains("409") {
                 tracing::warn!("natmap mapping already exists (409), continuing: {msg}");
@@ -144,7 +144,7 @@ impl NatmapClient {
     /// Remove a Docker port mapping by host port.
     #[allow(dead_code)]
     pub async fn remove_docker_mapping(&self, container_id: &str, host_port: u16) -> Result<()> {
-        natmap::cli::run_cli(
+        lab_ops_natmap::cli::run_cli(
             Cli {
                 socket: self.socket.clone().into(),
                 json: false,

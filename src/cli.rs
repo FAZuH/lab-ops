@@ -72,14 +72,14 @@ pub enum Command {
     #[command(name = CMD_NATMAP)]
     NatMap {
         #[command(flatten)]
-        args: natmap::cli::Cli,
+        args: lab_ops_natmap::cli::Cli,
     },
     /// Service discovery daemon: watches Docker events, manages port forwarding,
     /// registers services with Consul, and generates nginx configs.
     #[command(name = CMD_AUTO_DISCOVER)]
     AutoDiscover {
         #[command(flatten)]
-        args: auto_discover::cli::Cli,
+        args: lab_ops_auto_discover::cli::Cli,
     },
     /// Generate shell completion scripts.
     #[command(name = CMD_COMPLETIONS)]

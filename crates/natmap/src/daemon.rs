@@ -30,7 +30,7 @@ use futures_util::stream::StreamExt;
 use hyper_util::rt::TokioExecutor;
 use hyper_util::rt::TokioIo;
 use hyper_util::server::conn::auto::Builder;
-use lab_lib::port::PortAllocator;
+use lab_ops_lab_lib::port::PortAllocator;
 use serde::Serialize;
 use tokio::process::Command;
 use tokio::sync::RwLock;
@@ -539,7 +539,7 @@ mod tests {
     use bollard::Docker;
     use bollard::models::EventActor;
     use bollard::models::EventMessage;
-    use lab_lib::port::PortAllocator;
+    use lab_ops_lab_lib::port::PortAllocator;
     use tokio::sync::RwLock;
     use tracing_test::traced_test;
 

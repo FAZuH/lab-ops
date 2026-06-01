@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use color_eyre::Result;
-use lab_lib::TransportProtocol;
+use lab_ops_lab_lib::TransportProtocol;
 use serde::Deserialize;
 use serde::Serialize;
 

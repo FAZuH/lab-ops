@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use color_eyre::Result;
 use color_eyre::eyre::WrapErr;
 use color_eyre::eyre::bail;
-use lab_lib::TransportProtocol;
+use lab_ops_lab_lib::TransportProtocol;
 use serde_json::json;
 
 use crate::config::ResolvedService;

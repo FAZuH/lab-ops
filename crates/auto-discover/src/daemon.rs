@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use color_eyre::Result;
 use color_eyre::eyre::WrapErr;
 use color_eyre::eyre::bail;
-use lab_lib::port::PortAssignments;
+use lab_ops_lab_lib::port::PortAssignments;
 use sha2::Digest;
 use sha2::Sha256;
 
@@ -242,7 +242,7 @@ impl DiscoveryDaemon {
                 let p = ext_ports[0];
                 let natmap_bind_ip = get_natmap_bind_ip(resolved);
                 let check_ip = natmap_bind_ip.as_deref().unwrap_or("0.0.0.0");
-                if lab_lib::port::is_port_free(format!("{check_ip}:{p}")) {
+                if lab_ops_lab_lib::port::is_port_free(format!("{check_ip}:{p}")) {
                     (p, false)
                 } else {
                     (p, true)
