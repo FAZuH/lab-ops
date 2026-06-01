@@ -332,7 +332,7 @@ impl IptablesManager {
             "-A",
             "POSTROUTING",
             "-s",
-            &config.int_ip,
+            "0.0.0.0/0",
             "-d",
             &config.int_ip,
             "-p",
