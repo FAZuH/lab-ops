@@ -148,7 +148,7 @@ pub enum NatMapCommand {
         #[arg(long, default_value = PKG_NAME)]
         group: String,
         /// Path to the binary to install.
-        #[arg(long, default_value = lab_lib::consts::LABOPS_BIN)]
+        #[arg(long, default_value = lab_ops_lab_lib::consts::LABOPS_BIN)]
         binary: String,
     },
 }

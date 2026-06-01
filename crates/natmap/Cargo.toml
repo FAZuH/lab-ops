@@ -1,5 +1,5 @@
 [package]
-name = "natmap"
+name = "lab-ops_natmap"
 version = "0.1.0"
 edition = "2024"
 description = "iptables NAT mapping daemon with CLI control over Unix socket"
@@ -8,7 +8,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-lab-lib = { workspace = true }
+lab-ops_lab-lib = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 color-eyre = "0.6.5"
 axum = { version = "0.7" }

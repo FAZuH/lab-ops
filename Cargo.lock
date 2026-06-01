@@ -100,33 +100,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
-name = "auto-discover"
-version = "0.1.0"
-dependencies = [
- "base64",
- "bollard",
- "clap",
- "color-eyre",
- "futures-util",
- "get_if_addrs",
- "hex",
- "hostname",
- "lab-lib",
- "natmap",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "tracing-test",
-]
-
-[[package]]
 name = "axum"
 version = "0.7.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1100,7 +1073,51 @@ dependencies = [
 ]
 
 [[package]]
-name = "lab-lib"
+name = "lab-ops"
+version = "0.1.0"
+dependencies = [
+ "bollard",
+ "clap",
+ "clap_complete",
+ "color-eyre",
+ "comfy-table",
+ "lab-ops_auto-discover",
+ "lab-ops_lab-lib",
+ "lab-ops_natmap",
+ "regex",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "lab-ops_auto-discover"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "bollard",
+ "clap",
+ "color-eyre",
+ "futures-util",
+ "get_if_addrs",
+ "hex",
+ "hostname",
+ "lab-ops_lab-lib",
+ "lab-ops_natmap",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "tracing-test",
+]
+
+[[package]]
+name = "lab-ops_lab-lib"
 version = "0.1.0"
 dependencies = [
  "bollard",
@@ -1114,20 +1131,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "lab-ops"
+name = "lab-ops_natmap"
 version = "0.1.0"
 dependencies = [
- "auto-discover",
+ "axum",
  "bollard",
  "clap",
  "clap_complete",
  "color-eyre",
  "comfy-table",
- "lab-lib",
- "natmap",
- "regex",
+ "futures-util",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "lab-ops_lab-lib",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
+ "tokio-stream",
+ "tower",
+ "tower-service",
+ "tracing",
  "tracing-subscriber",
+ "tracing-test",
 ]
 
 [[package]]
@@ -1249,34 +1277,6 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "tempfile",
-]
-
-[[package]]
-name = "natmap"
-version = "0.1.0"
-dependencies = [
- "axum",
- "bollard",
- "clap",
- "clap_complete",
- "color-eyre",
- "comfy-table",
- "futures-util",
- "http-body-util",
- "hyper",
- "hyper-util",
- "lab-lib",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-stream",
- "tower",
- "tower-service",
- "tracing",
- "tracing-subscriber",
- "tracing-test",
 ]
 
 [[package]]

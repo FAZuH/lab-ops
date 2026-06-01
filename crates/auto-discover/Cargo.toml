@@ -1,5 +1,5 @@
 [package]
-name = "auto-discover"
+name = "lab-ops_auto-discover"
 version = "0.1.0"
 edition = "2024"
 description = "Service discovery daemon with Consul registration and nginx config generation"
@@ -11,8 +11,8 @@ repository.workspace = true
 docker-tests = []
 
 [dependencies]
-lab-lib = { workspace = true }
-natmap = { workspace = true }
+lab-ops_lab-lib = { workspace = true }
+lab-ops_natmap = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"

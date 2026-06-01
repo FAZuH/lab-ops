@@ -209,7 +209,7 @@ async fn run_daemon(config_path: PathBuf, state_dir: PathBuf) {
         }
     }
 
-    let docker_api = match lab_lib::docker::connect() {
+    let docker_api = match lab_ops_lab_lib::docker::connect() {
         Ok(d) => d,
         Err(e) => {
             error!("Failed to connect to Docker: {}", e);

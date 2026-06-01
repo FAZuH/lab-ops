@@ -8,7 +8,7 @@ use axum::extract::Path;
 use axum::extract::State;
 use axum::http::StatusCode;
 use color_eyre::Result;
-use lab_lib::port::PortAllocator;
+use lab_ops_lab_lib::port::PortAllocator;
 
 use crate::daemon::AppState;
 use crate::daemon::ErrorResponse;
@@ -365,7 +365,7 @@ pub async fn add_mapping(
         let container_name = inspect
             .name
             .as_deref()
-            .map(lab_lib::docker::trim_container_name)
+            .map(lab_ops_lab_lib::docker::trim_container_name)
             .unwrap_or("unknown")
             .to_string();
         let network_settings = inspect.network_settings.ok_or_else(|| {

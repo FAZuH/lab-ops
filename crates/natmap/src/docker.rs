@@ -12,7 +12,7 @@ use crate::models::DockerPortMapRequest;
 
 /// Connects to the local Docker daemon via its default Unix socket.
 pub fn connect() -> Result<Docker> {
-    lab_lib::docker::connect()
+    lab_ops_lab_lib::docker::connect()
 }
 
 /// Discovers all published port mappings for a container.
@@ -25,7 +25,7 @@ pub async fn get_port_mappings(docker: &Docker, c_id: &str) -> Result<Vec<Docker
     let c_name = inspect
         .name
         .as_deref()
-        .map(lab_lib::docker::trim_container_name)
+        .map(lab_ops_lab_lib::docker::trim_container_name)
         .unwrap_or("unknown")
         .to_string();
 

@@ -11,7 +11,7 @@ use color_eyre::eyre::bail;
 use comfy_table::Attribute;
 use comfy_table::Color;
 use hyper::Method;
-use lab_lib::TransportProtocol;
+use lab_ops_lab_lib::TransportProtocol;
 
 use crate::models::DnatConfig;
 use crate::models::DnatRequest;

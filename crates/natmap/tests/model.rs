@@ -2,10 +2,10 @@ use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::str::FromStr;
 
-use natmap::models::DockerAddMapRequest;
-use natmap::models::DockerPortMap;
-use natmap::models::DockerPortMapRequest;
-use natmap::models::TransportProtocol;
+use lab_ops_natmap::models::DockerAddMapRequest;
+use lab_ops_natmap::models::DockerPortMap;
+use lab_ops_natmap::models::DockerPortMapRequest;
+use lab_ops_natmap::models::TransportProtocol;
 
 #[test]
 fn add_mapping_request_defaults() {
