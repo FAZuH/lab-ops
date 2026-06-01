@@ -15,6 +15,23 @@ Personal homelab utility tools. Rust workspace, edition **2024**.
 - **`rustfmt` requires nightly** (`+nightly`). `rustfmt.toml` uses unstable features (`imports_granularity = "Item"`, `group_imports = "StdExternalCrate"`).
 - **`.cargo/config.toml` always enables `docker-tests`** via `--cfg feature="docker-tests"`. So `--all-features` in dev commands is redundant but harmless.
 
+## Test Strategy ⚠️
+
+- **Run ONLY relevant tests first.** After a change, run the specific test/crate, not the full suite. E.g. `cargo test -p natmap`, `cargo test -p auto-discover`.
+- **If a test fails, fix and rerun only that test.** Use `cargo test <test_name> -p <crate>`.
+- **⚠️ `./dev.sh all` runs the FULL suite including Docker integration tests (122+ tests, ~2-3 min).** Do NOT run `./dev.sh all` or `./dev.sh test` without asking the user first. Notify the user and let them trigger it themselves.
+- **Docker tests require `--test-threads=1`** (enforced by `.cargo/config.toml`). Each test spins up a privileged Ubuntu container with iptables.
+
+### Quick Test Commands
+
+```bash
+cargo test -p natmap                              # natmap unit tests only
+cargo test -p auto-discover                       # auto-discover unit tests only
+cargo test -p lab-ops --test natmap_docker         # natmap Docker integration tests
+cargo test -p lab-ops --test auto_discover         # auto-discover Docker integration tests
+cargo test test_name -p crate_name                 # single test
+```
+
 ## Key Conventions
 
 From `docs/dev/standards.md`:
@@ -39,8 +56,12 @@ From `docs/dev/standards.md`:
 | auto-discover | `crates/auto-discover/` → `cli.rs:run_cli()` | Service discovery (Docker + Consul + nginx) |
 | lab-lib | `crates/lab-lib/` | Shared types: `TransportProtocol`, `PortAllocator`, Docker helpers |
 
+**natmap modules**: `api.rs` (HTTP handlers), `cli.rs` (CLI parsing), `command.rs` (handler functions), `daemon.rs` (state + lifecycle), `iptables.rs` (rule CRUD), `models.rs` (data types), `policy_route.rs` (ip rule/route management).
+
 - **natmap daemon**: central authority for ALL iptables NAT rules. CLI commands talk Unix socket (`/run/natmap.sock`). State in `/var/lib/natmap/state.json`. `natmap install` creates systemd service.
 - **auto-discover daemon**: runs discovery, forwarding, nginx as concurrent tokio tasks. Component flags: `--no-discovery`, `--no-forwarding`, `--no-nginx`.
+- **`policy-route` subcommand** (natmap): manages `ip rule`/`ip route` policy routing for source IP preservation. Used by auto-discover when `preserve_src_ip: true`. API: `POST/DELETE /policy-route`.
+- **`DnatConfig.no_masquerade`**: metadata flag (no iptables change) signaling intent to skip MASQUERADE. Passed through from auto-discover's forwarding sync.
 
 ## Global CLI Flags
 
@@ -49,16 +70,6 @@ From `docs/dev/standards.md`:
 ## Shell Completions
 
 `lab-ops completions bash|zsh|fish|powershell|elvish [--dir <path>]`. When writing to stdout (no `--dir`), zsh output gets `#compdef` stripped and `compdef` appended for safe `eval` use.
-
-## Testing
-
-- Docker integration tests **require `--test-threads=1`**:
-  ```bash
-  cargo test --features docker-tests -- --test-threads=1
-  ```
-  Each test spins up a privileged Ubuntu container with iptables.
-- Docker tests are included in `./dev.sh test` (feature always on via `.cargo/config.toml`).
-- Run a single crate: `cargo test -p natmap` or `cargo test -p auto-discover`.
 
 ## Updating Docs
 
