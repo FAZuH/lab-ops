@@ -2670,7 +2670,16 @@ if ! echo "$IP_ROUTE" | grep -q "default via 10.99.99.1"; then
     exit 1
 fi
 
-echo "PASS: global preserve_src_ip created policy route"
+# Local-subnet routes (e.g. dummy0) must also be cloned into table 100
+# so traffic to local networks/containers uses the correct interface
+# instead of the proxy gateway.
+if ! echo "$IP_ROUTE" | grep -q "10.99.99.0/24"; then
+    echo "FAIL: local route 10.99.99.0/24 not cloned into table 100" >&2
+    echo "$IP_ROUTE"
+    exit 1
+fi
+
+echo "PASS: global preserve_src_ip created policy route with cloned local routes"
 {teardown}
 "#,
             setup = new_format_setup_with_defaults_ext(

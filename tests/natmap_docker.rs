@@ -612,6 +612,35 @@ mod natmap_docker {
         assert!(out.contains("PASS"), "Local service mapping failed:\n{out}");
     }
 
+    /// policy-route must clone local-subnet routes from the main table into the
+    /// policy routing table, so traffic from the source IP to Docker bridges,
+    /// LAN subnets, etc. uses the correct interface instead of the proxy gateway.
+    #[test]
+    fn policy_route_clones_local_routes() {
+        run_in_docker(&[
+            // Add a dummy route to main table (simulates a Docker bridge / LAN subnet)
+            "ip route add 10.99.99.0/24 dev lo scope link",
+            "&&",
+            "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
+            "sleep 2",
+            "&&",
+            // Install policy route
+            "lab-ops natmap --socket /tmp/ns policy-route --src-ip 10.0.0.99 --via 10.99.99.1 --table 100",
+            "&&",
+            // Default route must exist (existing behavior)
+            "ip route show table 100 | grep -q 'default via 10.99.99.1' || (echo 'FAIL: default route missing in table 100' >&2 && ip route show table 100 >&2 && exit 1)",
+            "&&",
+            // Local-subnet route must be cloned into table 100 (new behavior — prevents
+            // the bug where all traffic from src_ip went through the proxy gateway)
+            "ip route show table 100 | grep -q '10.99.99.0/24' || (echo 'FAIL: local route 10.99.99.0/24 not cloned into table 100' >&2 && ip route show table 100 >&2 && exit 1)",
+            "&&",
+            // ip rule must exist
+            "ip rule show | grep -q 'from 10.0.0.99 lookup 100' || (echo 'FAIL: ip rule not found' >&2 && exit 1)",
+            "&&",
+            "echo 'PASS'",
+        ]);
+    }
+
     /// policy-route command must add ip rule and route via CLI.
     #[test]
     fn policy_route_install_remove() {
