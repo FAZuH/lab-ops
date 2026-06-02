@@ -114,6 +114,8 @@ pub struct DnatConfig {
     pub proto: TransportProtocol,
     /// Optional external network interface.
     pub ext_if: Option<String>,
+    #[serde(default)]
+    pub no_masquerade: bool,
 }
 
 impl DnatConfig {
@@ -174,6 +176,8 @@ pub struct DnatRequest {
     pub ports: String,
     pub proto: TransportProtocol,
     pub ext_if: Option<String>,
+    #[serde(default)]
+    pub no_masquerade: bool,
 }
 
 /// JSON body for creating or deleting an SNAT rule.
@@ -193,6 +197,20 @@ pub struct HairpinRequest {
     pub proto: TransportProtocol,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyRouteConfig {
+    pub src_ip: String,
+    pub via: String,
+    pub table: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyRouteRequest {
+    pub src_ip: String,
+    pub via: String,
+    pub table: u32,
+}
+
 // --- Persisted daemon state ---
 
 /// The complete persisted state of the natmap daemon.
@@ -206,6 +224,9 @@ pub struct DaemonState {
     pub snats: Vec<SnatConfig>,
     /// Static hairpin rule configurations.
     pub hairpins: Vec<HairpinConfig>,
+    /// Static policy routing configurations.
+    #[serde(default)]
+    pub policy_routes: Vec<PolicyRouteConfig>,
 }
 
 /// Response returned by the `GET /mappings` endpoint.
@@ -215,4 +236,5 @@ pub struct ListResponse {
     pub dnats: Vec<DnatConfig>,
     pub snats: Vec<SnatConfig>,
     pub hairpins: Vec<HairpinConfig>,
+    pub policy_routes: Vec<PolicyRouteConfig>,
 }

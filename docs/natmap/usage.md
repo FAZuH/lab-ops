@@ -99,6 +99,20 @@ lab-ops natmap clear
 
 The `clear` command removes all daemon-managed rules (static DNAT, SNAT, hairpin, and Docker port mappings), releases all port reservations, and resets the persisted state. It is useful for bulk cleanup without restarting the daemon.
 
+### Policy Routing
+
+Manage Linux policy routing rules for source IP preservation. When `preserve_src_ip: true` is configured in auto-discover, the service node needs a policy route so return traffic routes back through the proxy gateway instead of directly to the client. This preserves the real sender IP end-to-end.
+
+```bash
+# Add a policy route: packets from SRC_IP use table TABLE with default via GATEWAY
+lab-ops natmap policy-route --src-ip 10.10.10.101 --via 10.10.10.1 --table 100
+
+# Remove the policy route
+lab-ops natmap policy-route --src-ip 10.10.10.101 --via 10.10.10.1 --table 100 --delete
+```
+
+The `policy-route` command talks to the natmap daemon via Unix socket. It requires `CAP_NET_ADMIN` (privileged container or root).
+
 ### Static NAT Rules
 
 #### DNAT (Destination NAT)

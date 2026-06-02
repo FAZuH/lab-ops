@@ -234,6 +234,9 @@ At least one match field should be set. If `match` is absent, the service matche
 | `nginx_generator` | Default path to nginx config generator script |
 | `preprocess` | Default preprocess script |
 | `postprocess` | Default postprocess script |
+| `preserve_src_ip` | Default source IP preservation setting for all ForwardRemote services |
+| `preserve_src_ip_gateway` | Default gateway IP for policy routing |
+| `preserve_src_ip_src` | Default source IP for policy routing |
 
 **Bind IP resolution order (per service):**
 1. `services.<name>.bind_ip` (explicit IP)
@@ -266,6 +269,9 @@ Each entry in `services.<name>.forwardremote[]` defines a kernel-level NAT port 
 | `ext_ports` | Yes | Static port(s) on the public IP (not auto-allocated from ephemeral range). First port (`ext_ports[0]`) is used as the Consul registration port. No local natmap mapping or port check occurs on the service node |
 | `hairpin` | No | Create hairpin NAT rules (internal hosts can reach themselves via external IP). Defaults to `false` |
 | `proxy_on` | No | Only apply DNAT rules on this specific proxy server node name |
+| `preserve_src_ip` | No | Enable source IP preservation via policy routing. When `true`, auto-discover calls `natmap policy-route` on the service node to route return traffic through the proxy gateway, avoiding MASQUERADE on the proxy. Requires `preserve_src_ip_gateway`. Cascades from `defaults.preserve_src_ip` (default: `false`) |
+| `preserve_src_ip_gateway` | No | Gateway IP for the policy route. Typically the proxy node's LAN IP (e.g., `10.10.10.1`). Cascades from `defaults.preserve_src_ip_gateway` |
+| `preserve_src_ip_src` | No | Source IP for the policy route. Typically this host's LAN IP (e.g., `10.10.10.101`). Falls back to `bind_ip`, then `bind_interface` IP, then Consul registration IP if unset. Cascades from `defaults.preserve_src_ip_src` |
 
 **Examples:**
 
@@ -299,8 +305,9 @@ services:
 **How it works (ForwardRemote):**
 
 1. **Service server**: The daemon uses `ext_ports[0]` as the Consul registration host port value. No local natmap mapping is created — the DNAT rule lives entirely on the proxy server. The port is NOT persisted to `ports.json`. No `port_is_free` check is performed on the service node.
-2. **Service server**: Registers in Consul with forwarding meta (`forwarding=true`, `forwarding_type=remote`, `ext_ip`, `ext_ports`, `hairpin`)
-3. **Proxy server**: Runs `lab-ops auto-discover daemon --no-discovery --no-nginx` (or one-shot `forwarding-sync`), which:
+2. **Service server**: Registers in Consul with forwarding meta (`forwarding=true`, `forwarding_type=remote`, `ext_ip`, `ext_ports`, `hairpin`). If `preserve_src_ip: true`, also includes `preserve_src_ip=true`, `preserve_src_ip_gateway`, and `preserve_src_ip_src` in meta.
+3. **Service server** (preserve_src_ip only): Calls `natmap policy-route` to add an `ip rule` and `ip route` so return traffic routes back through the proxy gateway, preserving the real sender IP.
+4. **Proxy server**: Runs `lab-ops auto-discover daemon --no-discovery --no-nginx` (or one-shot `forwarding-sync`), which:
    - Queries Consul **catalog** API (`GET /v1/catalog/services` → `GET /v1/health/service/:name?passing=true`) across all agents — NOT the local agent API. Forwarding services are registered on service VMs' agents, not the proxy's agent
    - Filters services with `Meta.forwarding=="true"`
    - Groups by `(ext_ip, address, protocol)`
@@ -419,7 +426,10 @@ When forwarding is configured, additional meta fields are present:
     "forwarding_type": "remote",
     "ext_ip": "203.0.113.43",
     "ext_ports": "25565",
-    "hairpin": "true"
+    "hairpin": "true",
+    "preserve_src_ip": "true",
+    "preserve_src_ip_gateway": "10.10.10.1",
+    "preserve_src_ip_src": "10.10.10.101"
   }
 }
 ```
@@ -456,6 +466,9 @@ When forwarding is configured, additional meta fields are present:
 - `Meta.ext_ip`: Public IP on the proxy server for DNAT (ForwardRemote only)
 - `Meta.ext_ports`: Comma-separated static ports (e.g., `"25565,19132"`) (ForwardRemote only)
 - `Meta.hairpin`: `"true"` if hairpin NAT is requested (ForwardRemote only)
+- `Meta.preserve_src_ip`: `"true"` if source IP preservation is enabled (ForwardRemote only)
+- `Meta.preserve_src_ip_gateway`: Gateway IP for the policy route (ForwardRemote only)
+- `Meta.preserve_src_ip_src`: Source IP (this host's LAN IP) for the policy route (ForwardRemote only)
 
 ### UDP Checks
 
@@ -506,7 +519,8 @@ For `sync()`, containers are matched via the match config criteria. Docker event
 
 3. **On Docker event (die)**:
    - Deregister all matching Consul services by `container_id`
-   - natmap rules are cleaned up by the natmap daemon's container event watcher
+   - Cleans up any associated policy routes (reads `preserve_src_ip` meta from deregistered services and calls `natmap policy-route --delete`)
+   - natmap iptables rules are cleaned up by the natmap daemon's container event watcher
 
 4. **On config file change**: Re-parse `discovery.yaml` and sync. Stale services from previous config generations are automatically deregistered.
 

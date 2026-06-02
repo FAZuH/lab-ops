@@ -16,6 +16,7 @@ use crate::command::handle_clear;
 use crate::command::handle_dnat;
 use crate::command::handle_hairpin;
 use crate::command::handle_list;
+use crate::command::handle_policy_route;
 use crate::command::handle_snat;
 use crate::command::remap;
 use crate::command::remove;
@@ -67,6 +68,9 @@ pub enum NatMapCommand {
         /// Whether to delete the rule instead of adding it.
         #[arg(long)]
         delete: bool,
+        /// Don't masquerade
+        #[arg(long)]
+        no_masquerade: bool,
     },
     /// Adds or deletes SNAT (masquerade) rules.
     #[command(name = "snat")]
@@ -100,6 +104,22 @@ pub enum NatMapCommand {
         #[arg(long)]
         ports: String,
         /// Whether to delete the rule instead of adding it.
+        #[arg(long)]
+        delete: bool,
+    },
+    /// Adds or deletes a policy routing rule to send return traffic via a gateway.
+    #[command(name = "policy-route")]
+    PolicyRoute {
+        /// Source IP of this host (packets FROM this IP will use the policy route)
+        #[arg(long)]
+        src_ip: String,
+        /// Gateway IP to route return traffic through
+        #[arg(long)]
+        via: String,
+        /// Routing table ID (default: 100)
+        #[arg(long, default_value = "100")]
+        table: u32,
+        /// Whether to delete the rule instead of adding it
         #[arg(long)]
         delete: bool,
     },
@@ -229,8 +249,19 @@ pub async fn run_cli(cli: Cli, use_color: bool) -> Result<()> {
             ports,
             ext_if,
             delete,
+            no_masquerade,
         } => {
-            handle_dnat(ext_ip, int_ip, proto, ports, ext_if, delete, &socket).await?;
+            handle_dnat(
+                ext_ip,
+                int_ip,
+                proto,
+                ports,
+                ext_if,
+                delete,
+                no_masquerade,
+                &socket,
+            )
+            .await?;
         }
         NatMapCommand::Snat {
             int_ip,
@@ -248,6 +279,14 @@ pub async fn run_cli(cli: Cli, use_color: bool) -> Result<()> {
             delete,
         } => {
             handle_hairpin(ext_ip, int_ip, proto, ports, delete, &socket).await?;
+        }
+        NatMapCommand::PolicyRoute {
+            src_ip,
+            via,
+            table,
+            delete,
+        } => {
+            handle_policy_route(src_ip, via, table, delete, &socket).await?;
         }
         NatMapCommand::List { container_id } => {
             handle_list(&socket, container_id, json, use_color).await?;

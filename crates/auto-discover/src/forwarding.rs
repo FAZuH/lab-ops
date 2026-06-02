@@ -16,6 +16,8 @@ use color_eyre::eyre::bail;
 use crate::consul::ConsulClient;
 use crate::natmap::NatmapClient;
 
+type GroupedServices = (Vec<u16>, bool, bool);
+
 /// Internal grouping of forwarding services by key `(ext_ip, int_ip, protocol)`.
 #[derive(Debug, Clone)]
 struct ForwardingGroup {
@@ -24,6 +26,7 @@ struct ForwardingGroup {
     ports: Vec<u16>,
     proto: String,
     hairpin: bool,
+    preserve_src_ip: bool,
 }
 
 /// One-shot sync of kernel-level forwarding rules from Consul.
@@ -60,6 +63,7 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
                     &ports_csv,
                     &stale_group.proto,
                     true,
+                    stale_group.preserve_src_ip,
                 )
                 .await
                 .ok();
@@ -79,7 +83,14 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
             .join(",");
 
         natmap
-            .dnat(&group.ext_ip, &group.int_ip, &ports_csv, &group.proto, true)
+            .dnat(
+                &group.ext_ip,
+                &group.int_ip,
+                &ports_csv,
+                &group.proto,
+                true,
+                group.preserve_src_ip,
+            )
             .await
             .ok();
 
@@ -90,6 +101,7 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
                 &ports_csv,
                 &group.proto,
                 false,
+                group.preserve_src_ip,
             )
             .await
             .wrap_err_with(|| format!("dnat for {} -> {} failed", group.ext_ip, group.int_ip))?;
@@ -143,6 +155,7 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
                 &ports_csv,
                 &stale_group.proto,
                 true,
+                stale_group.preserve_src_ip,
             )
             .await
             .ok();
@@ -159,7 +172,7 @@ async fn query_forwarding_services(consul: &ConsulClient) -> Result<Vec<Forwardi
         .await
         .wrap_err("failed to query forwarding services from Consul")?;
 
-    let mut group_map: HashMap<(String, String, String), (Vec<u16>, bool)> = HashMap::new();
+    let mut group_map: HashMap<(String, String, String), GroupedServices> = HashMap::new();
 
     for svc in services {
         let Some(meta) = svc.get("Meta").and_then(|m| m.as_object()) else {
@@ -195,6 +208,12 @@ async fn query_forwarding_services(consul: &ConsulClient) -> Result<Vec<Forwardi
             .map(|s| s == "true")
             .unwrap_or(false);
 
+        let preserve_src_ip = meta
+            .get("preserve_src_ip")
+            .and_then(|v| v.as_str())
+            .map(|s| s == "true")
+            .unwrap_or(false);
+
         if ports.is_empty() {
             continue;
         }
@@ -205,25 +224,29 @@ async fn query_forwarding_services(consul: &ConsulClient) -> Result<Vec<Forwardi
                 address.to_string(),
                 protocol.to_string(),
             ))
-            .or_insert_with(|| (Vec::new(), hairpin));
+            .or_insert_with(|| (Vec::new(), hairpin, preserve_src_ip));
         entry.0.extend(ports);
         entry.1 = entry.1 || hairpin;
+        entry.2 = entry.2 || preserve_src_ip;
     }
 
     let groups: Vec<ForwardingGroup> = group_map
         .into_iter()
-        .map(|((ext_ip, int_ip, proto), (ports, hairpin))| {
-            let mut sorted = ports;
-            sorted.sort();
-            sorted.dedup();
-            ForwardingGroup {
-                ext_ip,
-                int_ip,
-                ports: sorted,
-                proto,
-                hairpin,
-            }
-        })
+        .map(
+            |((ext_ip, int_ip, proto), (ports, hairpin, preserve_src_ip))| {
+                let mut sorted = ports;
+                sorted.sort();
+                sorted.dedup();
+                ForwardingGroup {
+                    ext_ip,
+                    int_ip,
+                    ports: sorted,
+                    proto,
+                    hairpin,
+                    preserve_src_ip,
+                }
+            },
+        )
         .collect();
 
     Ok(groups)
@@ -266,7 +289,8 @@ fn find_stale_rules(current: &[ForwardingGroup]) -> Result<Vec<ForwardingGroup>>
             int_ip,
             ports,
             proto,
-            hairpin: true,
+            hairpin: true,          // conservative default for cleanup
+            preserve_src_ip: false, // conservative default for cleanup
         })
         .collect();
 
