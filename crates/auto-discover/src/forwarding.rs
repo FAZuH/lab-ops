@@ -106,7 +106,7 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
             .await
             .wrap_err_with(|| format!("dnat for {} -> {} failed", group.ext_ip, group.int_ip))?;
 
-        if group.hairpin {
+        if group.hairpin && !group.preserve_src_ip {
             natmap
                 .hairpin(&group.ext_ip, &group.int_ip, &ports_csv, &group.proto, true)
                 .await
@@ -171,7 +171,14 @@ async fn query_forwarding_services(consul: &ConsulClient) -> Result<Vec<Forwardi
         .get_catalog_services_by_meta("forwarding", "true")
         .await
         .wrap_err("failed to query forwarding services from Consul")?;
+    Ok(group_forwarding_services(services))
+}
 
+/// Parse raw Consul service JSON into grouped forwarding entries.
+///
+/// Extracted as a pure function to enable unit testing of hairpin and
+/// preserve_src_ip flag propagation without a live Consul instance.
+fn group_forwarding_services(services: Vec<serde_json::Value>) -> Vec<ForwardingGroup> {
     let mut group_map: HashMap<(String, String, String), GroupedServices> = HashMap::new();
 
     for svc in services {
@@ -230,7 +237,7 @@ async fn query_forwarding_services(consul: &ConsulClient) -> Result<Vec<Forwardi
         entry.2 = entry.2 || preserve_src_ip;
     }
 
-    let groups: Vec<ForwardingGroup> = group_map
+    group_map
         .into_iter()
         .map(
             |((ext_ip, int_ip, proto), (ports, hairpin, preserve_src_ip))| {
@@ -247,9 +254,7 @@ async fn query_forwarding_services(consul: &ConsulClient) -> Result<Vec<Forwardi
                 }
             },
         )
-        .collect();
-
-    Ok(groups)
+        .collect()
 }
 
 /// Compare existing natmap DNAT rules against the desired state and return
@@ -331,4 +336,231 @@ fn parse_dnat_rule(line: &str) -> Option<(String, String, u16, String)> {
         .to_string();
 
     Some((ext_ip, int_ip, port, proto))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn make_service(
+        ext_ip: &str,
+        address: &str,
+        ext_ports: &str,
+        protocol: &str,
+        hairpin: bool,
+        preserve_src_ip: bool,
+    ) -> serde_json::Value {
+        let mut meta = serde_json::Map::new();
+        meta.insert("ext_ip".into(), json!(ext_ip));
+        meta.insert("ext_ports".into(), json!(ext_ports));
+        meta.insert("protocol".into(), json!(protocol));
+        if hairpin {
+            meta.insert("hairpin".into(), json!("true"));
+        }
+        if preserve_src_ip {
+            meta.insert("preserve_src_ip".into(), json!("true"));
+        }
+        json!({
+            "Address": address,
+            "Meta": meta,
+        })
+    }
+
+    #[test]
+    fn hairpin_true_preserve_src_false() {
+        let services = vec![make_service(
+            "1.2.3.4", "10.0.0.1", "8080", "tcp", true, false,
+        )];
+        let groups = group_forwarding_services(services);
+        assert_eq!(groups.len(), 1);
+        assert!(groups[0].hairpin);
+        assert!(!groups[0].preserve_src_ip);
+        assert_eq!(groups[0].ext_ip, "1.2.3.4");
+        assert_eq!(groups[0].int_ip, "10.0.0.1");
+        assert_eq!(groups[0].ports, vec![8080]);
+        assert_eq!(groups[0].proto, "tcp");
+    }
+
+    #[test]
+    fn hairpin_true_preserve_src_true() {
+        let services = vec![make_service(
+            "1.2.3.4", "10.0.0.1", "25565", "tcp", true, true,
+        )];
+        let groups = group_forwarding_services(services);
+        assert_eq!(groups.len(), 1);
+        assert!(groups[0].hairpin);
+        assert!(groups[0].preserve_src_ip);
+    }
+
+    #[test]
+    fn hairpin_false_preserve_src_true() {
+        let services = vec![make_service(
+            "1.2.3.4", "10.0.0.1", "25565", "tcp", false, true,
+        )];
+        let groups = group_forwarding_services(services);
+        assert_eq!(groups.len(), 1);
+        assert!(!groups[0].hairpin);
+        assert!(groups[0].preserve_src_ip);
+    }
+
+    #[test]
+    fn both_flags_false_when_absent() {
+        let mut meta = serde_json::Map::new();
+        meta.insert("ext_ip".into(), json!("1.2.3.4"));
+        meta.insert("ext_ports".into(), json!("80"));
+        let services = vec![json!({
+            "Address": "10.0.0.1",
+            "Meta": meta,
+        })];
+        let groups = group_forwarding_services(services);
+        assert_eq!(groups.len(), 1);
+        assert!(!groups[0].hairpin);
+        assert!(!groups[0].preserve_src_ip);
+        assert_eq!(groups[0].proto, "tcp");
+    }
+
+    #[test]
+    fn merge_multiple_services_same_key() {
+        let services = vec![
+            make_service("1.2.3.4", "10.0.0.1", "80", "tcp", true, false),
+            make_service("1.2.3.4", "10.0.0.1", "443", "tcp", false, true),
+        ];
+        let groups = group_forwarding_services(services);
+        assert_eq!(groups.len(), 1);
+        assert!(groups[0].hairpin);
+        assert!(groups[0].preserve_src_ip);
+        assert_eq!(groups[0].ports, vec![80, 443]);
+    }
+
+    #[test]
+    fn different_keys_not_merged() {
+        let services = vec![
+            make_service("1.2.3.4", "10.0.0.1", "80", "tcp", true, false),
+            make_service("1.2.3.4", "10.0.0.2", "80", "tcp", false, true),
+        ];
+        let groups = group_forwarding_services(services);
+        assert_eq!(groups.len(), 2);
+        let g1 = groups.iter().find(|g| g.int_ip == "10.0.0.1").unwrap();
+        let g2 = groups.iter().find(|g| g.int_ip == "10.0.0.2").unwrap();
+        assert!(g1.hairpin);
+        assert!(!g1.preserve_src_ip);
+        assert!(!g2.hairpin);
+        assert!(g2.preserve_src_ip);
+    }
+
+    #[test]
+    fn skips_service_with_no_ports() {
+        let services = vec![make_service("1.2.3.4", "10.0.0.1", "", "tcp", true, true)];
+        let groups = group_forwarding_services(services);
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn skips_service_without_ext_ip() {
+        let services = vec![json!({
+            "Address": "10.0.0.1",
+            "Meta": { "ext_ports": "80" },
+        })];
+        let groups = group_forwarding_services(services);
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn skips_service_without_address() {
+        let services = vec![json!({
+            "Meta": { "ext_ip": "1.2.3.4", "ext_ports": "80" },
+        })];
+        let groups = group_forwarding_services(services);
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn protocol_defaults_to_tcp() {
+        let mut meta = serde_json::Map::new();
+        meta.insert("ext_ip".into(), json!("1.2.3.4"));
+        meta.insert("ext_ports".into(), json!("80"));
+        let services = vec![json!({
+            "Address": "10.0.0.1",
+            "Meta": meta,
+        })];
+        let groups = group_forwarding_services(services);
+        assert_eq!(groups[0].proto, "tcp");
+    }
+
+    #[test]
+    fn udp_protocol_preserved() {
+        let services = vec![make_service(
+            "1.2.3.4", "10.0.0.1", "19132", "udp", true, true,
+        )];
+        let groups = group_forwarding_services(services);
+        assert_eq!(groups[0].proto, "udp");
+    }
+
+    #[test]
+    fn deduplicates_ports() {
+        let services = vec![
+            make_service("1.2.3.4", "10.0.0.1", "80,443", "tcp", false, false),
+            make_service("1.2.3.4", "10.0.0.1", "80,8080", "tcp", false, false),
+        ];
+        let groups = group_forwarding_services(services);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].ports, vec![80, 443, 8080]);
+    }
+
+    #[test]
+    fn preserve_src_ip_false_even_as_string() {
+        let mut meta = serde_json::Map::new();
+        meta.insert("ext_ip".into(), json!("1.2.3.4"));
+        meta.insert("ext_ports".into(), json!("80"));
+        meta.insert("hairpin".into(), json!("true"));
+        meta.insert("preserve_src_ip".into(), json!("false"));
+        let services = vec![json!({
+            "Address": "10.0.0.1",
+            "Meta": meta,
+        })];
+        let groups = group_forwarding_services(services);
+        assert!(groups[0].hairpin);
+        assert!(!groups[0].preserve_src_ip);
+    }
+
+    // ── parse_dnat_rule tests ──
+
+    #[test]
+    fn parse_dnat_rule_tcp_basic() {
+        let line = "-A PREROUTING -d 203.0.113.50/32 -p tcp -m tcp --dport 36000 -j DNAT --to-destination 10.0.0.99:36000";
+        let (ext_ip, int_ip, port, proto) = parse_dnat_rule(line).unwrap();
+        assert_eq!(ext_ip, "203.0.113.50");
+        assert_eq!(int_ip, "10.0.0.99");
+        assert_eq!(port, 36000);
+        assert_eq!(proto, "tcp");
+    }
+
+    #[test]
+    fn parse_dnat_rule_udp() {
+        let line = "-A PREROUTING -d 10.10.10.102/32 -p udp -m udp --dport 19132 -j DNAT --to-destination 10.10.10.102:19132";
+        let (ext_ip, int_ip, port, proto) = parse_dnat_rule(line).unwrap();
+        assert_eq!(ext_ip, "10.10.10.102");
+        assert_eq!(int_ip, "10.10.10.102");
+        assert_eq!(port, 19132);
+        assert_eq!(proto, "udp");
+    }
+
+    #[test]
+    fn parse_dnat_rule_non_dnat_returns_none() {
+        assert!(parse_dnat_rule("-A POSTROUTING -s 10.0.0.0/24 -j MASQUERADE").is_none());
+        assert!(
+            parse_dnat_rule("-A PREROUTING -d 1.2.3.4/32 -p tcp --dport 80 -j ACCEPT").is_none()
+        );
+        assert!(parse_dnat_rule("").is_none());
+    }
+
+    #[test]
+    fn parse_dnat_rule_missing_fields() {
+        assert!(parse_dnat_rule("-A PREROUTING -j DNAT").is_none());
+        assert!(
+            parse_dnat_rule("-A PREROUTING -p tcp -j DNAT --to-destination 10.0.0.1:80").is_none()
+        );
+    }
 }
