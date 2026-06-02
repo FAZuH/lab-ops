@@ -79,19 +79,17 @@ jobs:
             PREV_TAG=$(echo "$TAGS" | head -1)
             echo "Previous tag: $PREV_TAG"
 
-            # Detect members targeted by commit scopes since last tag
-            SCOPES=$(git log "$PREV_TAG..HEAD" --no-merges --format="%s" | grep -oP '(?<=\()[a-z-]+(?=\))' | sort -u)
-
+            # Detect members with file changes since last tag
             CHANGED=""
             for member in $MEMBERS; do
-              if echo "$SCOPES" | grep -qx "$member"; then
+              if git diff --name-only "$PREV_TAG"..HEAD -- "crates/$member/" | grep -q .; then
                 CHANGED="$CHANGED $member"
               fi
             done
 
-            # If no scopes matched any member, bump the root only
+            # If nothing changed in subcrates, bump the root only
             if [ -z "$CHANGED" ]; then
-              echo "No member scopes detected — root only"
+              echo "No member changes detected — root only"
               exit 0
             fi
           fi
@@ -110,7 +108,7 @@ jobs:
                 elif echo "$commit" | grep -q '^chore!(minor)'; then
                   BUMP="minor"
                 fi
-              done < <(git log "$PREV_TAG..HEAD" --no-merges --format="%s" | grep -P "\($member\)")
+              done < <(git log "$PREV_TAG..HEAD" --no-merges --format="%s" -- "crates/$member/")
             fi
 
             MAJOR=$(echo "$CURRENT" | cut -d. -f1)

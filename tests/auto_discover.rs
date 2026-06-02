@@ -2898,4 +2898,82 @@ echo "PASS: policy route removed on container stop"
         let out = run(&script);
         assert_pass(&out, "Test J — preserve_src_ip stop removes route");
     }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Phase 7b — Hairpin + preserve_src_ip interaction
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn forwarding_sync_preserve_src_ip_skips_hairpin() {
+        let script = r#"
+set -e
+NATMAP_SOCKET=/tmp/natmap.sock
+CONSUL_HTTP_ADDR=http://127.0.0.1:8500
+
+consul agent -dev -http-port=8500 >/tmp/consul.log 2>&1 &
+sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: consul died"; cat /tmp/consul.log; exit 1; }
+
+rm -f /tmp/natmap_state.json
+lab-ops natmap daemon --socket $NATMAP_SOCKET --state /tmp/natmap_state.json --socket-group root >/tmp/natmap.log 2>&1 &
+sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: natmap died"; cat /tmp/natmap.log; exit 1; }
+
+curl -sf -X PUT "$CONSUL_HTTP_ADDR/v1/agent/service/register" \
+    -d '{ "ID": "fwd-hp-ps-svc", "Name": "fwd-hp-ps", "Address": "10.0.0.100", "Port": 36010, "Meta": { "forwarding": "true", "ext_ip": "203.0.113.52", "ext_ports": "36010", "hairpin": "true", "preserve_src_ip": "true" } }'
+
+lab-ops auto-discover forwarding-sync $CONSUL_HTTP_ADDR >/tmp/fwd.log 2>&1 || true
+
+# DNAT rule must exist
+if ! iptables-save -t nat | grep -q "203.0.113.52.*10.0.0.100"; then echo "FAIL: DNAT rule not found" >&2; exit 1; fi
+
+# Hairpin POSTROUTING MASQUERADE must NOT exist
+if iptables-save -t nat | grep -q "A POSTROUTING.*10.0.0.100.*MASQUERADE"; then
+    echo "FAIL: hairpin MASQUERADE should NOT exist when preserve_src_ip is true" >&2
+    iptables-save -t nat | grep "10.0.0.100" >&2
+    exit 1
+fi
+
+echo "PASS: preserve_src_ip skips hairpin MASQUERADE"
+kill %1 %2 2>/dev/null || true
+sleep 1
+"#.to_string();
+        let out = run(&script);
+        assert_pass(&out, "forwarding_sync_preserve_src_ip_skips_hairpin");
+    }
+
+    #[test]
+    fn forwarding_sync_hairpin_creates_masquerade() {
+        let script = r#"
+set -e
+NATMAP_SOCKET=/tmp/natmap.sock
+CONSUL_HTTP_ADDR=http://127.0.0.1:8500
+
+consul agent -dev -http-port=8500 >/tmp/consul.log 2>&1 &
+sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: consul died"; cat /tmp/consul.log; exit 1; }
+
+rm -f /tmp/natmap_state.json
+lab-ops natmap daemon --socket $NATMAP_SOCKET --state /tmp/natmap_state.json --socket-group root >/tmp/natmap.log 2>&1 &
+sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: natmap died"; cat /tmp/natmap.log; exit 1; }
+
+curl -sf -X PUT "$CONSUL_HTTP_ADDR/v1/agent/service/register" \
+    -d '{ "ID": "fwd-hp-svc", "Name": "fwd-hp", "Address": "10.0.0.101", "Port": 36011, "Meta": { "forwarding": "true", "ext_ip": "203.0.113.53", "ext_ports": "36011", "hairpin": "true" } }'
+
+lab-ops auto-discover forwarding-sync $CONSUL_HTTP_ADDR >/tmp/fwd.log 2>&1 || true
+
+# DNAT rule must exist
+if ! iptables-save -t nat | grep -q "203.0.113.53.*10.0.0.101"; then echo "FAIL: DNAT rule not found" >&2; exit 1; fi
+
+# Hairpin POSTROUTING MASQUERADE must exist
+if ! iptables-save -t nat | grep -q "A POSTROUTING.*10.0.0.101.*MASQUERADE"; then
+    echo "FAIL: hairpin MASQUERADE not found" >&2
+    iptables-save -t nat | grep "10.0.0.101" >&2
+    exit 1
+fi
+
+echo "PASS: hairpin creates POSTROUTING MASQUERADE"
+kill %1 %2 2>/dev/null || true
+sleep 1
+"#.to_string();
+        let out = run(&script);
+        assert_pass(&out, "forwarding_sync_hairpin_creates_masquerade");
+    }
 }
