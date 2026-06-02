@@ -1,3 +1,10 @@
+## 0.1.20 (2026-06-02)
+
+
+### New Features
+
+* Add preserve_src_ip source IP preservation for ForwardRemote ([601c796](https://github.com/FAZuH/lab-ops/commit/601c796c794ae2bc1e514c9aee21024796034f3f))
+
 ## 0.1.19 (2026-06-01)
 
 ## 0.1.18 (2026-06-01)
@@ -27,21 +34,4 @@
 ### New Features
 
 * Add --verbose, --color, completions subcommand ([1f6ecf6](https://github.com/FAZuH/lab-ops/commit/1f6ecf619568ea59e7cc253bb264c34d821efddc))
-
-## 0.1.15 (2026-05-24)
-
-
-### Logging
-
-* Improve logging ([a688885](https://github.com/FAZuH/lab-ops/commit/a688885f33faed8ca209a6bb29b827bfe9d2cc22))
-
-
-### Bug Fixes
-
-* `bind_interface` not overriding `default.bind_ip` ([819a0db](https://github.com/FAZuH/lab-ops/commit/819a0dbd310c06bf8d0dacc755067c6c049cc240))
-
-
-### New Features
-
-* Add cf2terra command ([59c3d6a](https://github.com/FAZuH/lab-ops/commit/59c3d6a760f20fa55b14a3377d1faad1ce4e103b))
 
