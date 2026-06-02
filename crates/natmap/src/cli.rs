@@ -103,6 +103,11 @@ pub enum NatMapCommand {
         /// Comma-separated list of ports.
         #[arg(long)]
         ports: String,
+        /// LAN source CIDR for MASQUERADE. When set, only traffic from this
+        /// subnet is MASQUERADEd (skips PREROUTING DNAT, uses LAN-limited
+        /// MASQUERADE). Used for preserve_src_ip hairpin.
+        #[arg(long)]
+        lan_cidr: Option<String>,
         /// Whether to delete the rule instead of adding it.
         #[arg(long)]
         delete: bool,
@@ -276,9 +281,10 @@ pub async fn run_cli(cli: Cli, use_color: bool) -> Result<()> {
             int_ip,
             proto,
             ports,
+            lan_cidr,
             delete,
         } => {
-            handle_hairpin(ext_ip, int_ip, proto, ports, delete, &socket).await?;
+            handle_hairpin(ext_ip, int_ip, proto, ports, lan_cidr, delete, &socket).await?;
         }
         NatMapCommand::PolicyRoute {
             src_ip,

@@ -77,7 +77,7 @@ Defines the `NatMapCommand` enum with clap derives. Each variant maps to a subco
 pub enum NatMapCommand {
     Dnat { ext_ip, int_ip, proto, ports, ext_if, delete },
     Snat { int_ip, ext_if, ext_ip, delete },
-    Hairpin { ext_ip, int_ip, proto, ports, delete },
+    Hairpin { ext_ip, int_ip, proto, ports, lan_cidr, delete },
     List { container_id },
     Docker { cmd: DockerCommand },
     Save,
@@ -118,9 +118,9 @@ Key types:
 
 | Type | Purpose |
 |------|---------|
-| `DnatConfig` | Persisted DNAT rule (ext_ip, int_ip, ports, proto, ext_if) |
+| `DnatConfig` | Persisted DNAT rule (ext_ip, int_ip, ports, proto, ext_if, no_masquerade) |
 | `SnatConfig` | Persisted SNAT rule (int_ip, ext_ip, ext_if) |
-| `HairpinConfig` | Persisted hairpin rule (ext_ip, int_ip, ports, proto) |
+| `HairpinConfig` | Persisted hairpin rule (ext_ip, int_ip, ports, proto, optional lan_cidr) |
 | `DnatRequest` / `SnatRequest` / `HairpinRequest` | API request bodies |
 | `DaemonState` | Top-level persisted state (docker, dnats, snats, hairpins) |
 | `ListResponse` | API response for `GET /mappings` |
@@ -142,7 +142,7 @@ Stateless manager for iptables operations. Key methods:
 | `remove_mapping()` | Remove Docker mapping by comment |
 | `install_dnat()` / `remove_dnat()` | Static DNAT rules |
 | `install_snat()` / `remove_snat()` | Static SNAT rules |
-| `install_hairpin()` / `remove_hairpin()` | Static hairpin rules |
+| `install_hairpin()` / `remove_hairpin()` | Static hairpin rules. When `lan_cidr` is set on the config, skips PREROUTING DNAT and uses the LAN subnet as the MASQUERADE source match instead of `0.0.0.0/0` |
 | `flush_container_rules()` | Remove all rules for a container |
 
 <!-- PortAllocator moved to lab_lib::port; see port.rs section in lab-lib crate above -->
@@ -236,6 +236,7 @@ Wraps bollard:
 
 Proxy-side DNAT management:
 - `sync_forwarding_rules()` — Query Consul for forwarding services, apply DNAT rules via [`IptablesManager`]
+- `get_lan_cidr(ip)` — Determine the LAN subnet CIDR containing the given IP by querying the routing table (used for LAN-limited hairpin when `preserve_src_ip` is true)
 
 ### `natmap.rs` — Natmap Client
 

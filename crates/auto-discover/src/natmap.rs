@@ -71,6 +71,7 @@ impl NatmapClient {
         int_ip: &str,
         ports: &str,
         proto: &str,
+        lan_cidr: Option<&str>,
         delete: bool,
     ) -> Result<()> {
         lab_ops_natmap::cli::run_cli(
@@ -82,6 +83,7 @@ impl NatmapClient {
                     int_ip: int_ip.to_string(),
                     proto: proto.to_string(),
                     ports: ports.to_string(),
+                    lan_cidr: lan_cidr.map(|s| s.to_string()),
                     delete,
                 },
             },

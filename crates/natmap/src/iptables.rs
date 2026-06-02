@@ -298,7 +298,16 @@ impl IptablesManager {
         Ok(())
     }
 
-    /// Installs a hairpin NAT rule (PREROUTING DNAT + POSTROUTING MASQUERADE).
+    /// Installs a hairpin NAT rule.
+    ///
+    /// When `config.lan_cidr` is set:
+    /// - Skips the PREROUTING DNAT (service node self-connections go through
+    ///   the regular DNAT rule instead).
+    /// - Uses `lan_cidr` as the MASQUERADE source match, limiting hairpin to
+    ///   LAN clients only (preserving source IP for WAN clients).
+    ///
+    /// When `lan_cidr` is `None`, creates the full hairpin (PREROUTING DNAT +
+    ///   POSTROUTING MASQUERADE with `-s 0.0.0.0/0`).
     pub fn install_hairpin(&self, config: &HairpinConfig) -> Result<()> {
         let comment = config.rule_comment();
         let multiport = config.ports.contains(',');
@@ -309,30 +318,36 @@ impl IptablesManager {
         };
         let proto = config.proto.to_lowercase();
 
-        let mut pre_args = vec![
-            "-t",
-            "nat",
-            "-A",
-            "PREROUTING",
-            "-s",
-            &config.int_ip,
-            "-d",
-            &config.ext_ip,
-            "-p",
-            proto,
-        ];
-        pre_args.extend(port_args.clone());
-        pre_args.extend(vec!["-j", "DNAT", "--to-destination", &config.int_ip]);
-        pre_args.extend(vec!["-m", "comment", "--comment", &comment]);
-        self.run_success("iptables", &pre_args)?;
+        // When lan_cidr is set, skip the PREROUTING DNAT — the regular DNAT
+        // rule already handles the forward direction. We only need the
+        // LAN-limited MASQUERADE to fix hairpin for LAN clients.
+        if config.lan_cidr.is_none() {
+            let mut pre_args = vec![
+                "-t",
+                "nat",
+                "-A",
+                "PREROUTING",
+                "-s",
+                &config.int_ip,
+                "-d",
+                &config.ext_ip,
+                "-p",
+                proto,
+            ];
+            pre_args.extend(port_args.clone());
+            pre_args.extend(vec!["-j", "DNAT", "--to-destination", &config.int_ip]);
+            pre_args.extend(vec!["-m", "comment", "--comment", &comment]);
+            self.run_success("iptables", &pre_args)?;
+        }
 
+        let src = config.lan_cidr.as_deref().unwrap_or("0.0.0.0/0");
         let mut post_args = vec![
             "-t",
             "nat",
             "-A",
             "POSTROUTING",
             "-s",
-            "0.0.0.0/0",
+            src,
             "-d",
             &config.int_ip,
             "-p",

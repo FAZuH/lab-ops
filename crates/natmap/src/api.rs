@@ -196,6 +196,7 @@ pub async fn add_hairpin(
         int_ip: req.int_ip.clone(),
         ports: req.ports.clone(),
         proto: req.proto,
+        lan_cidr: req.lan_cidr.clone(),
     };
     bind_ports(state.ports.clone(), &config.ext_ip, &config.ports).await?;
     if let Err(e) = state.iptables.install_hairpin(&config) {
@@ -242,6 +243,7 @@ pub async fn remove_hairpin(
             int_ip: req.int_ip,
             ports: req.ports,
             proto: req.proto,
+            lan_cidr: None,
         };
         let _ = state.iptables.remove_hairpin(&config);
         unbind_ports(state.ports.clone(), &config.ext_ip, &config.ports).await;
