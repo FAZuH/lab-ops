@@ -2913,7 +2913,7 @@ echo "PASS: policy route removed on container stop"
     // ══════════════════════════════════════════════════════════════════
 
     #[test]
-    fn forwarding_sync_preserve_src_ip_skips_hairpin() {
+    fn forwarding_sync_preserve_src_ip_creates_lan_hairpin() {
         let script = r#"
 set -e
 NATMAP_SOCKET=/tmp/natmap.sock
@@ -2934,19 +2934,26 @@ lab-ops auto-discover forwarding-sync $CONSUL_HTTP_ADDR >/tmp/fwd.log 2>&1 || tr
 # DNAT rule must exist
 if ! iptables-save -t nat | grep -q "203.0.113.52.*10.0.0.100"; then echo "FAIL: DNAT rule not found" >&2; exit 1; fi
 
-# Hairpin POSTROUTING MASQUERADE must NOT exist
-if iptables-save -t nat | grep -q "A POSTROUTING.*10.0.0.100.*MASQUERADE"; then
-    echo "FAIL: hairpin MASQUERADE should NOT exist when preserve_src_ip is true" >&2
+# Hairpin POSTROUTING MASQUERADE must exist (LAN-limited for preserve_src_ip)
+if ! iptables-save -t nat | grep -q "A POSTROUTING.*10.0.0.100.*MASQUERADE"; then
+    echo "FAIL: LAN hairpin MASQUERADE not found" >&2
     iptables-save -t nat | grep "10.0.0.100" >&2
     exit 1
 fi
 
-echo "PASS: preserve_src_ip skips hairpin MASQUERADE"
+# Must NOT use global 0.0.0.0/0 source (must be LAN-limited)
+if iptables-save -t nat | grep -q "A POSTROUTING -s 0.0.0.0/0.*10.0.0.100.*MASQUERADE"; then
+    echo "FAIL: hairpin MASQUERADE uses global source instead of LAN-limited" >&2
+    iptables-save -t nat | grep "10.0.0.100" >&2
+    exit 1
+fi
+
+echo "PASS: preserve_src_ip creates LAN-limited hairpin MASQUERADE"
 kill %1 %2 2>/dev/null || true
 sleep 1
 "#.to_string();
         let out = run(&script);
-        assert_pass(&out, "forwarding_sync_preserve_src_ip_skips_hairpin");
+        assert_pass(&out, "forwarding_sync_preserve_src_ip_creates_lan_hairpin");
     }
 
     #[test]

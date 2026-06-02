@@ -313,7 +313,7 @@ services:
    - Groups by `(ext_ip, address, protocol)`
    - Removes stale DNAT rules (any existing rules with no matching Consul entry)
    - Applies DNAT rules via `IptablesManager`
-   - Optionally applies hairpin rules for hairpin-enabled groups (**non-fatal**: if hairpin fails, the forwarding sync continues and logs a warning)
+   - Applies hairpin rules for hairpin-enabled groups (**non-fatal**: if hairpin fails, the forwarding sync continues and logs a warning). When `preserve_src_ip` is `true`, the hairpin is LAN-limited (MASQUERADE with `-s <lan_cidr>` derived from the int_ip's routing table) instead of global (`-s 0.0.0.0/0`). This enables LAN clients to reach the service via the public IP while preserving source IP for WAN clients.
    - Handles deregistration of stale DNAT rules
 
 > **Note**: The forwarding daemon's `remove_dnat` and `remove_hairpin` loop `iptables -D` until all copies of a rule are removed. This prevents duplicate rules from accumulating if multiple sync cycles run before a group's hairpin succeeds.

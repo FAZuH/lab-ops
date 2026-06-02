@@ -16,6 +16,44 @@ use color_eyre::eyre::bail;
 use crate::consul::ConsulClient;
 use crate::natmap::NatmapClient;
 
+/// Determine the LAN CIDR that contains the given IP by querying the routing
+/// table on the proxy host. Returns the network address in CIDR notation
+/// (e.g. `"10.10.10.0/24"`).
+fn get_lan_cidr(ip: &str) -> Result<String> {
+    // Find the interface for this IP
+    let route_out = Command::new("ip")
+        .args(["-o", "route", "get", ip])
+        .output()
+        .wrap_err("failed to run ip route get")?;
+    if !route_out.status.success() {
+        bail!("ip route get failed for {ip}");
+    }
+    let route_stdout = String::from_utf8_lossy(&route_out.stdout);
+    let dev = route_stdout
+        .split_whitespace()
+        .position(|w| w == "dev")
+        .and_then(|pos| route_stdout.split_whitespace().nth(pos + 1))
+        .ok_or_else(|| {
+            color_eyre::eyre::eyre!("could not parse interface from ip route get output")
+        })?
+        .to_string();
+
+    // Find the kernel subnet route on that interface (e.g. "10.10.10.0/24 dev vmbr1 ...")
+    let link_out = Command::new("ip")
+        .args([
+            "-o", "route", "show", "dev", &dev, "proto", "kernel", "scope", "link",
+        ])
+        .output()
+        .wrap_err("failed to run ip route show")?;
+    let link_stdout = String::from_utf8_lossy(&link_out.stdout);
+    let cidr = link_stdout
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| color_eyre::eyre::eyre!("no kernel link route found on {dev}"))?
+        .to_string();
+    Ok(cidr)
+}
+
 type GroupedServices = (Vec<u16>, bool, bool);
 
 /// Internal grouping of forwarding services by key `(ext_ip, int_ip, protocol)`.
@@ -106,9 +144,33 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
             .await
             .wrap_err_with(|| format!("dnat for {} -> {} failed", group.ext_ip, group.int_ip))?;
 
-        if group.hairpin && !group.preserve_src_ip {
+        if group.hairpin {
+            let lan_cidr = if group.preserve_src_ip {
+                match get_lan_cidr(&group.int_ip) {
+                    Ok(cidr) => Some(cidr),
+                    Err(e) => {
+                        tracing::warn!(
+                            "failed to detect LAN CIDR for {}, skipping hairpin: {}",
+                            group.int_ip,
+                            e
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            // Delete first to avoid duplicates
             natmap
-                .hairpin(&group.ext_ip, &group.int_ip, &ports_csv, &group.proto, true)
+                .hairpin(
+                    &group.ext_ip,
+                    &group.int_ip,
+                    &ports_csv,
+                    &group.proto,
+                    lan_cidr.as_deref(),
+                    true,
+                )
                 .await
                 .ok();
 
@@ -118,6 +180,7 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
                     &group.int_ip,
                     &ports_csv,
                     &group.proto,
+                    lan_cidr.as_deref(),
                     false,
                 )
                 .await

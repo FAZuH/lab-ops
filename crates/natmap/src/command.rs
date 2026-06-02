@@ -285,6 +285,7 @@ pub async fn handle_hairpin(
     int_ip: String,
     proto: String,
     ports: String,
+    lan_cidr: Option<String>,
     delete: bool,
     socket: impl AsRef<Path>,
 ) -> Result<()> {
@@ -293,6 +294,7 @@ pub async fn handle_hairpin(
         int_ip,
         ports,
         proto: proto.parse()?,
+        lan_cidr,
     };
     if delete {
         let _: () = request_json(socket, Method::DELETE, "/hairpin", Some(req)).await?;
