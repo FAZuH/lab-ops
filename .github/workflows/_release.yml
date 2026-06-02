@@ -186,6 +186,16 @@ jobs:
           skip-git-pull: true
           skip-on-empty: false
 
+      - name: Sync version bump to main
+        run: |
+          git config user.name "faz-bot"
+          git config user.email "mail@fazuh.com"
+          git remote set-url origin "https://x-access-token:${{ secrets.PRIVATE_TOKEN }}@github.com/${{ github.repository }}"
+          git fetch origin main
+          git checkout -B main origin/main
+          git merge origin/release --no-edit -m "chore(release): sync version bump to main [skip ci]"
+          git push origin main
+
   release-github:
     name: Release to GitHub
     needs: [changelog, build, publish-changelog, publish-crates]
