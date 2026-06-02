@@ -40,6 +40,12 @@ pub struct Defaults {
     pub preprocess: Option<String>,
     #[serde(default)]
     pub postprocess: Option<String>,
+    #[serde(default)]
+    pub preserve_src_ip: Option<bool>,
+    #[serde(default)]
+    pub preserve_src_ip_gateway: Option<String>,
+    #[serde(default)]
+    pub preserve_src_ip_src: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -154,6 +160,12 @@ pub struct ForwardRemoteConfig {
     pub hairpin: Option<bool>,
     #[serde(default)]
     pub proxy_on: Option<String>,
+    #[serde(default)]
+    pub preserve_src_ip: Option<bool>,
+    #[serde(default)]
+    pub preserve_src_ip_gateway: Option<String>,
+    #[serde(default)]
+    pub preserve_src_ip_src: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -184,6 +196,9 @@ pub enum ResolvedPortType {
         ext_ports: Vec<u16>,
         hairpin: bool,
         proxy_on: Option<String>,
+        preserve_src_ip: bool,
+        preserve_src_ip_gateway: Option<String>,
+        preserve_src_ip_src: Option<String>,
     },
 }
 
@@ -385,6 +400,17 @@ impl DiscoveryConfig {
                             .proxy_on
                             .clone()
                             .or_else(|| self.defaults.proxy_on.clone()),
+                        preserve_src_ip: fr
+                            .preserve_src_ip
+                            .unwrap_or_else(|| self.defaults.preserve_src_ip.unwrap_or(false)),
+                        preserve_src_ip_gateway: fr
+                            .preserve_src_ip_gateway
+                            .clone()
+                            .or_else(|| self.defaults.preserve_src_ip_gateway.clone()),
+                        preserve_src_ip_src: fr
+                            .preserve_src_ip_src
+                            .clone()
+                            .or_else(|| self.defaults.preserve_src_ip_src.clone()),
                     },
                 });
             }
@@ -413,5 +439,94 @@ impl DiscoveryConfig {
             .map(str::to_owned)
             .or_else(|| self.defaults.postprocess.clone())
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_preserve_src_ip_propagation() {
+        let mut services = HashMap::new();
+
+        let extra = HashMap::new();
+        let svc_config = ServiceConfig {
+            service_type: ServiceType::Docker,
+            match_cfg: None,
+            address: None,
+            bind_ip: None,
+            bind_interface: None,
+            rproxylocal: vec![],
+            rproxyremote: vec![],
+            forwardlocal: vec![],
+            forwardremote: vec![
+                ForwardRemoteConfig {
+                    port: 80,
+                    proto: None,
+                    ext_ip: Some("1.2.3.4".into()),
+                    ext_ports: Some(vec![80]),
+                    hairpin: None,
+                    proxy_on: None,
+                    preserve_src_ip: None,
+                    preserve_src_ip_gateway: None,
+                    preserve_src_ip_src: None,
+                },
+                ForwardRemoteConfig {
+                    port: 81,
+                    proto: None,
+                    ext_ip: Some("1.2.3.4".into()),
+                    ext_ports: Some(vec![81]),
+                    hairpin: None,
+                    proxy_on: None,
+                    preserve_src_ip: Some(false),
+                    preserve_src_ip_gateway: Some("10.10.10.1".into()),
+                    preserve_src_ip_src: Some("10.10.10.10".into()),
+                },
+            ],
+            extra,
+        };
+        services.insert("test-svc".into(), svc_config);
+
+        let config = DiscoveryConfig {
+            node: NodeConfig {
+                name: "test-node".into(),
+            },
+            config_dir: None,
+            defaults: Defaults {
+                preserve_src_ip: Some(true),
+                preserve_src_ip_gateway: Some("192.168.1.1".into()),
+                preserve_src_ip_src: None,
+                ..Default::default()
+            },
+            services,
+        };
+
+        let resolved = config.resolve_all();
+        assert_eq!(resolved.len(), 2);
+
+        for res in resolved {
+            if let ResolvedPortType::ForwardRemote {
+                preserve_src_ip,
+                preserve_src_ip_gateway,
+                preserve_src_ip_src,
+                ..
+            } = &res.port_type
+            {
+                if res.container_port == 80 {
+                    // Falls back to defaults
+                    assert!(*preserve_src_ip);
+                    assert_eq!(preserve_src_ip_gateway.as_deref(), Some("192.168.1.1"));
+                    assert_eq!(preserve_src_ip_src.as_deref(), None);
+                } else if res.container_port == 81 {
+                    // Overrides defaults
+                    assert!(!(*preserve_src_ip));
+                    assert_eq!(preserve_src_ip_gateway.as_deref(), Some("10.10.10.1"));
+                    assert_eq!(preserve_src_ip_src.as_deref(), Some("10.10.10.10"));
+                }
+            } else {
+                panic!("Expected ForwardRemote");
+            }
+        }
     }
 }

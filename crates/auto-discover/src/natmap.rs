@@ -43,6 +43,7 @@ impl NatmapClient {
         ports: &str,
         proto: &str,
         delete: bool,
+        no_masquerade: bool,
     ) -> Result<()> {
         lab_ops_natmap::cli::run_cli(
             Cli {
@@ -55,6 +56,7 @@ impl NatmapClient {
                     ports: ports.to_string(),
                     ext_if: None,
                     delete,
+                    no_masquerade,
                 },
             },
             false,
@@ -80,6 +82,30 @@ impl NatmapClient {
                     int_ip: int_ip.to_string(),
                     proto: proto.to_string(),
                     ports: ports.to_string(),
+                    delete,
+                },
+            },
+            false,
+        )
+        .await
+    }
+
+    /// Add or remove a policy routing rule for source IP preservation.
+    pub async fn policy_route(
+        &self,
+        src_ip: &str,
+        via: &str,
+        table: u32,
+        delete: bool,
+    ) -> Result<()> {
+        lab_ops_natmap::cli::run_cli(
+            Cli {
+                socket: self.socket.clone().into(),
+                json: false,
+                command: NatMapCommand::PolicyRoute {
+                    src_ip: src_ip.to_string(),
+                    via: via.to_string(),
+                    table,
                     delete,
                 },
             },

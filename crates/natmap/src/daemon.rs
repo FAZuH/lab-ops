@@ -40,6 +40,7 @@ use tracing::info;
 use crate::api::add_dnat;
 use crate::api::add_hairpin;
 use crate::api::add_mapping;
+use crate::api::add_policy_route;
 use crate::api::add_snat;
 use crate::api::clear_all;
 use crate::api::list_mappings;
@@ -48,12 +49,14 @@ use crate::api::remove_dnat;
 use crate::api::remove_hairpin;
 use crate::api::remove_mapping;
 use crate::api::remove_mapping_by_id;
+use crate::api::remove_policy_route;
 use crate::api::remove_snat;
 use crate::api::unbind_ports;
 use crate::docker;
 use crate::iptables::IptablesManager;
 use crate::models::DaemonState;
 use crate::models::DockerPortMap;
+use crate::policy_route::PolicyRouteManager;
 
 /// Shared application state held by all Axum route handlers.
 #[derive(Clone)]
@@ -62,6 +65,8 @@ pub struct AppState {
     pub daemon_state: Arc<RwLock<DaemonState>>,
     /// iptables rule manager.
     pub iptables: Arc<IptablesManager>,
+    /// Policy routing manager.
+    pub policy_route: Arc<PolicyRouteManager>,
     /// Docker client (None if Docker is unavailable).
     pub docker: Option<Docker>,
     /// Filesystem path for persisting state to JSON.
@@ -139,10 +144,12 @@ impl Daemon {
 
         let ports = Arc::new(PortAllocator::new());
         let daemon_state = Arc::new(RwLock::new(DaemonState::default()));
+        let policy_route = Arc::new(PolicyRouteManager::new());
 
         let state = AppState {
             daemon_state,
             iptables,
+            policy_route,
             docker,
             state_path,
             next_id: Arc::new(AtomicU64::new(1)),
@@ -163,6 +170,8 @@ impl Daemon {
             .route("/snat", delete(remove_snat))
             .route("/hairpin", post(add_hairpin))
             .route("/hairpin", delete(remove_hairpin))
+            .route("/policy-route", post(add_policy_route))
+            .route("/policy-route", delete(remove_policy_route))
             .route("/clear", delete(clear_all))
             .with_state(state.clone());
 
@@ -192,6 +201,9 @@ impl Daemon {
             tokio::signal::ctrl_c().await.ok();
             tracing::info!("shutting down: flushing iptables rules");
             let _ = state.iptables.flush_all_natmap();
+            let daemon_state = state.daemon_state.read().await;
+            let _ = state.policy_route.flush_all(&daemon_state.policy_routes);
+            drop(daemon_state);
             state.ports.deallocate_all().await;
             tracing::info!("shutdown complete");
             std::process::exit(0);
@@ -253,9 +265,11 @@ impl Daemon {
         let state = self.state.clone();
         let ports = self.state.ports.clone();
         let iptables = self.state.iptables.clone();
+        let policy_route = self.state.policy_route.clone();
 
         // ignore flush fail. we still have more cleanup to do independent from flush
         let _ = iptables.flush_all_natmap();
+        let _ = policy_route.flush_all(&state.daemon_state.read().await.policy_routes);
         ports.deallocate_all().await;
 
         let mut daemon_state = self.create_daemon_state();
@@ -270,6 +284,7 @@ impl Daemon {
         self.reconcile_hairpins(&mut daemon_state).await;
         self.reconcile_dnats(&mut daemon_state).await;
         self.reconcile_snats(&daemon_state).await;
+        self.reconcile_policy_routes(&mut daemon_state).await;
 
         let mappings_count: usize = daemon_state.mapping.values().map(|m| m.len()).sum();
         let dnats_count = daemon_state.dnats.len();
@@ -502,6 +517,18 @@ impl Daemon {
         }
     }
 
+    async fn reconcile_policy_routes(&self, daemon_state: &mut DaemonState) {
+        let mut keep = Vec::new();
+        for config in daemon_state.policy_routes.drain(..) {
+            if let Err(e) = self.state.policy_route.install(&config) {
+                tracing::error!(error = %e, "failed to install policy route");
+            } else {
+                keep.push(config);
+            }
+        }
+        daemon_state.policy_routes = keep;
+    }
+
     /// Check if this port can be reconciled.
     async fn should_reconcile(configs_ports: &str, ext_ip: &str, ports: &PortAllocator) -> bool {
         let ip = match ext_ip.parse() {
@@ -547,15 +574,18 @@ mod tests {
     use super::Daemon;
     use crate::iptables::IptablesManager;
     use crate::models::DaemonState;
+    use crate::policy_route::PolicyRouteManager;
 
     fn create_test_daemon(state_path: PathBuf) -> Daemon {
         let iptables = Arc::new(IptablesManager::new());
         let ports = Arc::new(PortAllocator::new());
         let daemon_state = Arc::new(RwLock::new(DaemonState::default()));
+        let policy_route = Arc::new(PolicyRouteManager::new());
 
         let state = AppState {
             daemon_state,
             iptables,
+            policy_route,
             docker: None,
             state_path,
             next_id: Arc::new(AtomicU64::new(1)),

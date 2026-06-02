@@ -21,6 +21,8 @@ use crate::models::DockerRemapRequest;
 use crate::models::HairpinConfig;
 use crate::models::HairpinRequest;
 use crate::models::ListResponse;
+use crate::models::PolicyRouteConfig;
+use crate::models::PolicyRouteRequest;
 use crate::models::SnatConfig;
 use crate::models::SnatRequest;
 use crate::models::TransportProtocol;
@@ -33,6 +35,7 @@ pub async fn list_mappings(State(state): State<AppState>) -> Json<ListResponse> 
         dnats: state.dnats.clone(),
         snats: state.snats.clone(),
         hairpins: state.hairpins.clone(),
+        policy_routes: state.policy_routes.clone(),
     })
 }
 
@@ -60,6 +63,7 @@ pub async fn add_dnat(
         ports: req.ports.clone(),
         proto: req.proto,
         ext_if: req.ext_if.clone(),
+        no_masquerade: req.no_masquerade,
     };
 
     // Check if this DNAT already exists (idempotent add).
@@ -125,6 +129,7 @@ pub async fn remove_dnat(
             ports: req.ports,
             proto: req.proto,
             ext_if: req.ext_if,
+            no_masquerade: req.no_masquerade,
         };
         let _ = state.iptables.remove_dnat(&config);
         unbind_ports(state.ports.clone(), &config.ext_ip, &config.ports).await;
@@ -240,6 +245,64 @@ pub async fn remove_hairpin(
         };
         let _ = state.iptables.remove_hairpin(&config);
         unbind_ports(state.ports.clone(), &config.ext_ip, &config.ports).await;
+        Ok(StatusCode::OK)
+    }
+}
+
+// --- Policy Route handlers ---
+
+pub async fn add_policy_route(
+    State(state): State<AppState>,
+    Json(req): Json<PolicyRouteRequest>,
+) -> Result<Json<PolicyRouteConfig>, (StatusCode, Json<ErrorResponse>)> {
+    let config = PolicyRouteConfig {
+        src_ip: req.src_ip.clone(),
+        via: req.via.clone(),
+        table: req.table,
+    };
+
+    if let Err(e) = state.policy_route.install(&config) {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        ));
+    }
+
+    state
+        .daemon_state
+        .write()
+        .await
+        .policy_routes
+        .push(config.clone());
+    state.persist().await;
+    Ok(Json(config))
+}
+
+pub async fn remove_policy_route(
+    State(state): State<AppState>,
+    Json(req): Json<PolicyRouteRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let mut lock = state.daemon_state.write().await;
+    let idx = lock
+        .policy_routes
+        .iter()
+        .position(|r| r.src_ip == req.src_ip && r.via == req.via && r.table == req.table);
+    if let Some(i) = idx {
+        let config = lock.policy_routes.remove(i);
+        let _ = state.policy_route.remove(&config);
+        drop(lock);
+        state.persist().await;
+        Ok(StatusCode::OK)
+    } else {
+        // Not in daemon state, but still try to remove to be safe
+        let config = PolicyRouteConfig {
+            src_ip: req.src_ip,
+            via: req.via,
+            table: req.table,
+        };
+        let _ = state.policy_route.remove(&config);
         Ok(StatusCode::OK)
     }
 }
@@ -550,6 +613,11 @@ pub async fn clear_all(
         unbind_ports(state.ports.clone(), &config.ext_ip, &config.ports).await;
     }
     lock.hairpins.clear();
+
+    for config in &lock.policy_routes {
+        let _ = state.policy_route.remove(config);
+    }
+    lock.policy_routes.clear();
 
     drop(lock);
     state.persist().await;

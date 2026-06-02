@@ -9,7 +9,7 @@ mod natmap_docker {
         let image_name = "lab-ops-natmap-test:latest";
         INIT.call_once(|| {
             let dockerfile =
-                "FROM ubuntu:24.04\nRUN apt-get update && apt-get install -y iptables\n";
+                "FROM ubuntu:24.04\nRUN apt-get update && apt-get install -y iptables iproute2\n";
             let mut cmd = Command::new("docker");
             cmd.args(["build", "-t", image_name, "-"]);
 
@@ -610,5 +610,31 @@ mod natmap_docker {
             "iptables -t nat -S NATMAP | grep -q 'to-destination 127.0.0.1:80' && echo 'PASS' || (iptables -t nat -S NATMAP >&2 && exit 1)",
         ]);
         assert!(out.contains("PASS"), "Local service mapping failed:\n{out}");
+    }
+
+    /// policy-route command must add ip rule and route via CLI.
+    #[test]
+    fn policy_route_install_remove() {
+        run_in_docker(&[
+            "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
+            "sleep 2",
+            "&&",
+            // Install policy route
+            "lab-ops natmap --socket /tmp/ns policy-route --src-ip 10.0.0.99 --via 10.99.99.1 --table 100",
+            "&&",
+            "ip rule show | grep -q 'from 10.0.0.99 lookup 100' || (echo 'FAIL: ip rule not found' >&2 && ip rule show >&2 && exit 1)",
+            "&&",
+            "ip route show table 100 | grep -q 'default via 10.99.99.1' || (echo 'FAIL: ip route not found' >&2 && ip route show table 100 >&2 && exit 1)",
+            "&&",
+            // Idempotent: second install should not duplicate
+            "lab-ops natmap --socket /tmp/ns policy-route --src-ip 10.0.0.99 --via 10.99.99.1 --table 100",
+            "&&",
+            "[ \"$(ip rule show | grep -c 'from 10.0.0.99 lookup 100' || true)\" = 1 ] || (echo 'FAIL: duplicate ip rule' >&2 && exit 1)",
+            "&&",
+            // Remove
+            "lab-ops natmap --socket /tmp/ns policy-route --src-ip 10.0.0.99 --via 10.99.99.1 --table 100 --delete",
+            "&&",
+            "ip rule show | grep -q 'from 10.0.0.99 lookup 100' && (echo 'FAIL: ip rule not removed' >&2 && exit 1) || echo 'PASS'",
+        ]);
     }
 }
