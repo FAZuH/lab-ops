@@ -1,4 +1,5 @@
 //! `natmap` — iptables NAT rule management for static VMs and Docker containers.
+//! Control daemon for iptables forwarding and DNAT rules via a Unix socket API.
 //!
 //! This crate provides a daemon that acts as the central authority for all
 //! iptables NAT rules. It handles:
