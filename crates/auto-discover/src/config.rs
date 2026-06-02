@@ -447,7 +447,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_preserve_src_ip_propagation() {
+    fn preserve_src_ip_propagation() {
         let mut services = HashMap::new();
 
         let extra = HashMap::new();
