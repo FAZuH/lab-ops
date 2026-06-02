@@ -103,12 +103,14 @@ The `clear` command removes all daemon-managed rules (static DNAT, SNAT, hairpin
 
 Manage Linux policy routing rules for source IP preservation. When `preserve_src_ip: true` is configured in auto-discover, the service node needs a policy route so return traffic routes back through the proxy gateway instead of directly to the client. This preserves the real sender IP end-to-end.
 
+The daemon also clones non-default, non-local routes from the main routing table into the policy table (e.g., Docker bridge subnets) so local traffic uses the correct interface instead of the proxy gateway.
+
 ```bash
 # Add a policy route: packets from SRC_IP use table TABLE with default via GATEWAY
-lab-ops natmap policy-route --src-ip 10.10.10.101 --via 10.10.10.1 --table 100
+lab-ops natmap policy-route --src-ip 10.0.0.101 --via 10.0.0.1 --table 100
 
 # Remove the policy route
-lab-ops natmap policy-route --src-ip 10.10.10.101 --via 10.10.10.1 --table 100 --delete
+lab-ops natmap policy-route --src-ip 10.0.0.101 --via 10.0.0.1 --table 100 --delete
 ```
 
 The `policy-route` command talks to the natmap daemon via Unix socket. It requires `CAP_NET_ADMIN` (privileged container or root).
@@ -173,10 +175,12 @@ SNAT does **not** reserve a port since it only modifies source addresses for out
 
 #### Hairpin NAT
 
-Allows an internal host to reach itself via the external IP. Creates PREROUTING DNAT and POSTROUTING MASQUERADE rules.
+Allows internal hosts to reach a service via the external IP. Creates POSTROUTING MASQUERADE rules, and optionally a PREROUTING DNAT rule for self-connections.
+
+**Full hairpin** (default): Creates a PREROUTING DNAT rule for the internal host's self-connection and a POSTROUTING MASQUERADE matching all sources (`-s 0.0.0.0/0`). Use when `preserve_src_ip` is `false`:
 
 ```bash
-# Add hairpin NAT
+# Add full hairpin NAT
 lab-ops natmap hairpin \
   --ext-ip 203.0.113.43 \
   --int-ip 10.0.0.101 \
@@ -188,6 +192,35 @@ lab-ops natmap hairpin \
   --int-ip 10.0.0.101 \
   --ports 25,465,587 \
   --delete
+```
+
+**LAN-limited hairpin** (`--lan-cidr`): Skips the PREROUTING DNAT (the regular DNAT rule handles forward traffic) and creates a POSTROUTING MASQUERADE matching only sources in the given LAN subnet. Use when `preserve_src_ip` is `true` — this enables LAN client hairpin without breaking source IP preservation for WAN clients:
+
+```bash
+# Add LAN-limited hairpin MASQUERADE
+lab-ops natmap hairpin \
+  --ext-ip 203.0.113.43 \
+  --int-ip 10.0.0.101 \
+  --ports 25565 \
+  --lan-cidr 10.0.0.0/24
+
+# Delete (no --lan-cidr needed, matched by comment)
+lab-ops natmap hairpin \
+  --ext-ip 203.0.113.43 \
+  --int-ip 10.0.0.101 \
+  --ports 25565 \
+  --delete
+```
+
+The `--lan-cidr` flag produces the iptables rule:
+```
+-A POSTROUTING -s 10.0.0.0/24 -d 10.0.0.101 -p tcp --dport 25565 -j MASQUERADE
+```
+
+Without `--lan-cidr` (full hairpin), it produces:
+```
+-A PREROUTING -s 10.0.0.101 -d 203.0.113.43 -p tcp --dport 25565 -j DNAT --to-destination 10.0.0.101
+-A POSTROUTING -s 0.0.0.0/0 -d 10.0.0.101 -p tcp --dport 25565 -j MASQUERADE
 ```
 
 ### Docker Container Mappings

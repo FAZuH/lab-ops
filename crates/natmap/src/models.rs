@@ -154,6 +154,11 @@ pub struct HairpinConfig {
     pub ports: String,
     /// Transport protocol.
     pub proto: TransportProtocol,
+    /// Optional LAN source CIDR. When set, only traffic from this subnet is
+    /// MASQUERADEd (instead of all sources with `0.0.0.0/0`), and the
+    /// PREROUTING DNAT rule is skipped. Used for `preserve_src_ip` hairpin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lan_cidr: Option<String>,
 }
 
 impl HairpinConfig {
@@ -195,6 +200,8 @@ pub struct HairpinRequest {
     pub int_ip: String,
     pub ports: String,
     pub proto: TransportProtocol,
+    #[serde(default)]
+    pub lan_cidr: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
