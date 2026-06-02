@@ -114,10 +114,7 @@ impl PolicyRouteManager {
         for route_line in self.get_cloneable_routes()? {
             if !self.route_line_in_table(&route_line, table)? {
                 let status = Command::new("sh")
-                    .args([
-                        "-c",
-                        &format!("ip route add {route_line} table {table}"),
-                    ])
+                    .args(["-c", &format!("ip route add {route_line} table {table}")])
                     .status()
                     .wrap_err("Failed to execute ip route add")?;
                 if !status.success() {
