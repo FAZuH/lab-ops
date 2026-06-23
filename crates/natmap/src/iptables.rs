@@ -198,6 +198,54 @@ impl IptablesManager {
             ],
         )?;
 
+        // 5. Loopback→container MASQUERADE — needed when the host binds a
+        //    loopback address (or `0.0.0.0`/`::`, whose OUTPUT DNAT destination
+        //    is the loopback address) and the container is on a routable
+        //    network (e.g. a Docker bridge like 172.18.0.0/16).
+        //
+        //    Locally-generated traffic leaves with source `127.0.0.1`/`::1`.
+        //    After the OUTPUT DNAT the destination becomes the container IP,
+        //    but the source stays loopback, so the container's SYN-ACK goes
+        //    back to its own loopback instead of the host — the connection
+        //    hangs (the Portainer CE bug). MASQUERADE rewrites the source to
+        //    the egress interface's IP (the Docker bridge) so the reply
+        //    routes back to the host.
+        //
+        //    Gate on the container not being loopback so mappings *to* a local
+        //    service (target_ip = 127.0.0.1) don't get a spurious MASQUERADE.
+        let needs_loopback_masq = (host_ip.is_loopback() || host_ip.is_unspecified())
+            && !req.container_addr.ip().is_loopback();
+        if needs_loopback_masq {
+            let loopback_src = if map.request.is_ipv6() {
+                "::1/128"
+            } else {
+                "127.0.0.0/8"
+            };
+            self.run(
+                cmd,
+                [
+                    "-t",
+                    "nat",
+                    "-A",
+                    "POSTROUTING",
+                    "-s",
+                    loopback_src,
+                    "-d",
+                    &container_ip,
+                    "-p",
+                    &proto,
+                    "--dport",
+                    &container_port,
+                    "-j",
+                    "MASQUERADE",
+                    "-m",
+                    "comment",
+                    "--comment",
+                    comment,
+                ],
+            )?;
+        }
+
         Ok(())
     }
 

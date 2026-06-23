@@ -1,0 +1,16 @@
+name: Cache Warm
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "Cargo.lock"
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  warm:
+    uses: ./.github/workflows/_cache-warm.yml

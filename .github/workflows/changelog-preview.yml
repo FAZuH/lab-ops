@@ -4,17 +4,25 @@ on:
   workflow_dispatch:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
   merge_group:
     branches: [main, development]
 
 permissions:
   pull-requests: write
+  issues: write
   contents: read
 
 jobs:
   preview:
     name: Preview Changelog
-    if: "! github.event.pull_request.draft"
+    if: |
+      (github.event_name == 'pull_request' && !github.event.pull_request.draft) ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'merge_group' ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+       (contains(github.event.comment.body, '## Override Changelog') || contains(github.event.comment.body, '## Bump')))
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -104,7 +112,7 @@ jobs:
               minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
               patch) PATCH=$((PATCH + 1)) ;;
             esac
-            echo "$member=$MAJOR.$MINOR.$PATCH" >> /tmp/member_versions.txt
+            echo "$member=$CURRENT:$MAJOR.$MINOR.$PATCH" >> /tmp/member_versions.txt
           done
 
       - name: Post PR Comment
@@ -113,25 +121,33 @@ jobs:
           script: |
             const fs = require('fs');
 
-            const body = context.payload.pull_request.body || '';
-
-            // Parse ## Bump section: member: bump_type
-            const bumpOverrides = {};
-            const bumpMatch = body.match(/^## Bump\s*\n([\s\S]*?)(?=^## |\n## |\n\n## |\z)/m);
-            if (bumpMatch) {
-              bumpMatch[1].split('\n').forEach(function (line) {
-                const parts = line.trim().match(/^([a-z-]+)\s*:\s*(major|minor|patch)$/);
-                if (parts) {
-                  bumpOverrides[parts[1]] = parts[2];
-                }
-              });
-            }
-
-            // Parse ## Override Changelog section
+            // Parse latest maintainer comment for overrides
+            let bumpOverrides = {};
             let changelog = null;
-            const overrideMatch = body.match(/^## Override Changelog\s*\n([\s\S]*?)(?=^## |\n## |\z)/m);
-            if (overrideMatch) {
-              changelog = overrideMatch[1].trim();
+            const { data: prComments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const parseSections = function (text) {
+              const bumps = {};
+              const bumpMatch = text.match(/^## Bump\s*\n([\s\S]*?)(?=(?:^|\n)\s*##(?!#)|(?![\s\S]))/m);
+              if (bumpMatch) {
+                bumpMatch[1].split('\n').forEach(function (line) {
+                  const parts = line.trim().match(/^([a-z-]+)\s*:\s*(major|minor|patch)$/);
+                  if (parts) bumps[parts[1]] = parts[2];
+                });
+              }
+              const overrideMatch = text.match(/^## Override Changelog\s*\n([\s\S]*?)(?=(?:^|\n)\s*##(?!#)|(?![\s\S]))/m);
+              const cl = overrideMatch ? overrideMatch[1].trim() : null;
+              return { bumps, cl };
+            };
+            for (const comment of prComments.reverse()) {
+              if (!['OWNER', 'MEMBER', 'COLLABORATOR'].includes(comment.author_association)) continue;
+              const { bumps, cl } = parseSections(comment.body || '');
+              if (Object.keys(bumps).length > 0) bumpOverrides = bumps;
+              if (cl) changelog = cl;
+              if (Object.keys(bumpOverrides).length > 0 || changelog) break;
             }
 
             // If no changelog override, use the auto-generated one
@@ -185,10 +201,15 @@ jobs:
             const memberNames = Object.keys(memberVersions);
             if (memberNames.length > 0) {
               commentBody += '**Crates to bump:**\n';
-              commentBody += '| Crate | Bump |\n|-------|------|\n';
+              commentBody += '| Crate | Current | Bump |\n|-------|---------|------|\n';
               memberNames.forEach(function (m) {
-                const bump = memberVersions[m];
-                commentBody += '| ' + m + ' | `' + bump + '` |\n';
+                const val = memberVersions[m];
+                if (val.includes(':')) {
+                  const [current, bumped] = val.split(':');
+                  commentBody += '| ' + m + ' | `' + current + '` | `' + bumped + '` |\n';
+                } else {
+                  commentBody += '| ' + m + ' | `-` | `' + val + '` |\n';
+                }
               });
               commentBody += '\n';
             }
