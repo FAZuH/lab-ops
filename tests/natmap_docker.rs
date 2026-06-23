@@ -612,6 +612,88 @@ mod natmap_docker {
         assert!(out.contains("PASS"), "Local service mapping failed:\n{out}");
     }
 
+    // --- Tests for loopback→container MASQUERADE in install_dockermap ---
+    //
+    // When a Docker mapping binds the host side to a loopback address (either
+    // explicitly with `127.0.0.1` or implicitly via `0.0.0.0` whose OUTPUT DNAT
+    // destination is `127.0.0.1`), locally-generated traffic is DNAT'd to the
+    // container with source IP `127.0.0.1`. The container's SYN-ACK then goes
+    // back to `127.0.0.1` (the container's own loopback), never reaching the
+    // host. natmap must install a POSTROUTING MASQUERADE rule whose source
+    // match is the loopback CIDR so the source IP is rewritten to the Docker
+    // bridge IP and return traffic routes back to the host.
+
+    /// A mapping with a loopback host IP MUST install a POSTROUTING MASQUERADE
+    /// rule with `-s 127.0.0.0/8 -d <container_ip>` when the container is on a
+    /// non-loopback network (e.g. a Docker bridge).
+    ///
+    /// Reproduces the Portainer CE timeout bug: `127.0.0.1:32771 → 172.18.0.2:9000`
+    /// hung because the loopback→container MASQUERADE was missing.
+    #[test]
+    fn docker_mapping_loopback_host_installs_loopback_masquerade() {
+        let out = run_in_docker(&[
+            "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
+            "sleep 2",
+            "&&",
+            // Match the handoff scenario: 127.0.0.1 host, 172.18.0.2 container on Docker bridge.
+            "lab-ops natmap --socket /tmp/ns docker add 127.0.0.1:32771:172.18.0.2:9000 --name portainer-ce",
+            "&&",
+            // The new loopback→container MASQUERADE must be present in POSTROUTING.
+            "iptables -t nat -S POSTROUTING | grep -- '-s 127.0.0.0/8 -d 172.18.0.2' && echo 'PASS' || (echo 'FAIL: loopback MASQUERADE missing' >&2 && iptables -t nat -S POSTROUTING >&2 && exit 1)",
+        ]);
+        assert!(
+            out.contains("PASS"),
+            "loopback→container MASQUERADE rule missing after loopback-host mapping:\n{out}"
+        );
+    }
+
+    /// A mapping with a non-loopback host IP MUST NOT install the loopback
+    /// MASQUERADE rule: with host IP on a routable interface, the kernel's
+    /// source-address selection already picks an address that routes back to
+    /// the host, so the loopback-source MASQUERADE would be both unnecessary
+    /// and misleading.
+    #[test]
+    fn docker_mapping_non_loopback_host_skips_loopback_masquerade() {
+        let out = run_in_docker(&[
+            "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
+            "sleep 2",
+            "&&",
+            "lab-ops natmap --socket /tmp/ns docker add 100.64.0.5:32771:172.18.0.2:9000 --name portainer-remote",
+            "&&",
+            // A natmap-commented POSTROUTING rule with -s 127.0.0.0/8 must NOT exist:
+            // the per-container hairpin MASQUERADE (-s 172.18.0.2 -d 172.18.0.2) is still
+            // expected, but its source is the container IP, never 127.0.0.0/8.
+            "iptables -t nat -S POSTROUTING | grep -- '-s 127.0.0.0/8' | grep -q 'natmap:' && (echo 'FAIL: unexpected loopback MASQUERADE for non-loopback host' >&2 && iptables -t nat -S POSTROUTING >&2 && exit 1) || echo 'PASS'",
+        ]);
+        assert!(
+            out.contains("PASS"),
+            "non-loopback host mapping should not install loopback MASQUERADE:\n{out}"
+        );
+    }
+
+    /// Removing a mapping MUST clean up the loopback→container MASQUERADE rule
+    /// alongside the other mapping rules. This relies on the loopback MASQUERADE
+    /// sharing the same `natmap:<id>:<host_port>` comment as the rest.
+    #[test]
+    fn docker_mapping_remove_cleans_up_loopback_masquerade() {
+        let out = run_in_docker(&[
+            "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
+            "sleep 2",
+            "&&",
+            "lab-ops natmap --socket /tmp/ns docker add 127.0.0.1:32771:172.18.0.2:9000 --name portainer-ce",
+            "&&",
+            "iptables -t nat -S POSTROUTING | grep -q -- '-s 127.0.0.0/8 -d 172.18.0.2' || (echo 'FAIL: loopback MASQUERADE not installed' >&2 && exit 1)",
+            "&&",
+            "lab-ops natmap --socket /tmp/ns docker remove --name portainer-ce --port 32771",
+            "&&",
+            "iptables -t nat -S POSTROUTING | grep -q -- '-s 127.0.0.0/8 -d 172.18.0.2' && (echo 'FAIL: loopback MASQUERADE not removed' >&2 && iptables -t nat -S POSTROUTING >&2 && exit 1) || echo 'PASS'",
+        ]);
+        assert!(
+            out.contains("PASS"),
+            "loopback MASQUERADE was not removed with the mapping:\n{out}"
+        );
+    }
+
     /// policy-route must clone local-subnet routes from the main table into the
     /// policy routing table, so traffic from the source IP to Docker bridges,
     /// LAN subnets, etc. uses the correct interface instead of the proxy gateway.
