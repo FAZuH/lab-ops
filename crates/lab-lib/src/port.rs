@@ -135,18 +135,7 @@ impl PortAllocator {
 
     /// Returns `true` if `addr` has an active reservation.
     pub async fn is_allocated(&self, addr: SocketAddr) -> bool {
-        if self.sockets.read().await.contains_key(&addr) {
-            return true;
-        }
-
-        let Ok(socket) = create_freebind_socket(&addr) else {
-            return false;
-        };
-
-        match socket.bind(&addr.into()) {
-            Err(e) => e.kind() == std::io::ErrorKind::AddrInUse,
-            Ok(_) => false,
-        }
+        self.sockets.read().await.contains_key(&addr)
     }
 
     /// Releases all active reservations.
@@ -309,5 +298,29 @@ mod tests {
         pa.set("s1".into(), p1);
         let p2 = pa.allocate_port().unwrap();
         assert_ne!(p1, p2);
+    }
+
+    #[tokio::test]
+    async fn is_allocated_returns_true_for_reserved_port() {
+        let allocator = PortAllocator::new();
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        allocator.allocate(addr).await.unwrap();
+        assert!(allocator.is_allocated(addr).await);
+    }
+
+    #[tokio::test]
+    async fn is_allocated_returns_false_after_release() {
+        let allocator = PortAllocator::new();
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        allocator.allocate(addr).await.unwrap();
+        allocator.deallocate(addr).await;
+        assert!(!allocator.is_allocated(addr).await);
+    }
+
+    #[tokio::test]
+    async fn is_allocated_returns_false_for_unreserved_port() {
+        let allocator = PortAllocator::new();
+        let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        assert!(!allocator.is_allocated(addr).await);
     }
 }
