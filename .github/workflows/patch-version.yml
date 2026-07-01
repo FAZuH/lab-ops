@@ -153,12 +153,34 @@ jobs:
             echo "  crates/$member: $CURRENT -> $MEMBER_VERSION ($BUMP)"
             sed -i "0,/^version = \".*\"/{s/^version = \".*\"/version = \"$MEMBER_VERSION\"/}" "crates/$member/Cargo.toml"
 
-            # Use actual package name for workspace dependency key lookup (bug #2 fix)
+            # Update workspace dependency in [workspace.dependencies] (section-aware)
             PKG=$(grep '^name = ' "crates/$member/Cargo.toml" | head -1 | sed 's/name = "\(.*\)"/\1/')
-            if grep -q "^$PKG = {" Cargo.toml; then
-              echo "  Updating workspace dependency: $PKG -> $MEMBER_VERSION"
-              sed -i "/^$PKG = {/,/}/s/version = \"[^\"]*\"/version = \"$MEMBER_VERSION\"/" Cargo.toml
+            echo "  Updating workspace dependency: $PKG -> $MEMBER_VERSION"
+            awk -v pkg="$PKG" -v ver="$MEMBER_VERSION" '
+              $1 == "[workspace.dependencies]" { in_ws = 1; print; next }
+              in_ws && /^\[/ { in_ws = 0 }
+              in_ws && $1 == pkg {
+                sub(/version = "[^"]*"/, "version = \"" ver "\"")
+              }
+              1
+            ' Cargo.toml > Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
+          done
+
+          # Verify workspace deps match member versions after patching
+          echo "Verifying workspace dependency consistency..."
+          for member in $CHANGED; do
+            PKG=$(grep '^name = ' "crates/$member/Cargo.toml" | head -1 | sed 's/name = "\(.*\)"/\1/')
+            MEMVER=$(grep '^version = ' "crates/$member/Cargo.toml" | head -1 | sed 's/version = "\(.*\)"/\1/')
+            WSVER=$(awk -v pkg="$PKG" '\
+              $1 == "[workspace.dependencies]" { in_ws = 1; next } \
+              in_ws && /^\[/ { in_ws = 0; next } \
+              in_ws && $1 == pkg { match($0, /version = "([^"]+)"/, a); print a[1]; exit } \
+            ' Cargo.toml)
+            if [ "$MEMVER" != "$WSVER" ]; then
+              echo "::error::Version mismatch: $PKG member=$MEMVER workspace=$WSVER"
+              exit 1
             fi
+            echo "  $PKG: $MEMVER ✓"
           done
 
       - name: Upload patched Cargo.tomls

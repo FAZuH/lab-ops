@@ -66,6 +66,43 @@ jobs:
           echo "::error::Patched Cargo.toml artifact is required but was not found. Ensure patch-version ran before this job."
           exit 1
 
+      - name: Verify workspace dependency consistency
+        run: |
+          if ! grep -q '^\[workspace\]' Cargo.toml; then
+            echo "No workspace — skipping consistency check"
+            exit 0
+          fi
+          MEMBERS=$(find crates -maxdepth 2 -name Cargo.toml -exec dirname {} \; | sed 's|^crates/||' | sort -u)
+          if [ -z "$MEMBERS" ]; then
+            echo "No workspace members — skipping consistency check"
+            exit 0
+          fi
+
+          ERRORS=0
+          for member in $MEMBERS; do
+            PKG=$(grep '^name = ' "crates/$member/Cargo.toml" | head -1 | sed 's/name = "\(.*\)"/\1/')
+            MEMVER=$(grep '^version = ' "crates/$member/Cargo.toml" | head -1 | sed 's/version = "\(.*\)"/\1/')
+            WSVER=$(awk -v pkg="$PKG" '\
+              $1 == "[workspace.dependencies]" { in_ws = 1; next } \
+              in_ws && /^\[/ { in_ws = 0; next } \
+              in_ws && $1 == pkg { match($0, /version = "([^"]+)"/, a); print a[1]; exit } \
+            ' Cargo.toml)
+
+            if [ -z "$WSVER" ]; then
+              echo "  $PKG: no workspace dep entry (external dep) — skipped"
+            elif [ "$MEMVER" != "$WSVER" ]; then
+              echo "::error::$PKG: member=$MEMVER workspace=$WSVER — MISMATCH"
+              ERRORS=$((ERRORS + 1))
+            else
+              echo "  $PKG: $MEMVER ✓"
+            fi
+          done
+
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "::error::Workspace dependency consistency check failed ($ERRORS error(s))"
+            exit 1
+          fi
+
       - name: Build
         run: cargo build ${{ inputs.cargo-build-args }}
 
