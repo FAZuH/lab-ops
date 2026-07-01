@@ -1,3 +1,10 @@
+## 0.1.25 (2026-07-01)
+
+
+### Bug Fixes
+
+* Fix port reservation failures right after container restart ([2439b66](https://github.com/FAZuH/lab-ops/commit/2439b66edb1122ecf002adbea9b8a950aba009e9))
+
 ## 0.1.24 (2026-06-23)
 
 
@@ -21,11 +28,4 @@
 ### Bug Fixes
 
 * Fix proxy node not respecting preserve_src_ip ([2cb5398](https://github.com/FAZuH/lab-ops/commit/2cb539876f739529025cc91eedf00632deb26c41))
-
-## 0.1.20 (2026-06-02)
-
-
-### New Features
-
-* Add preserve_src_ip source IP preservation for ForwardRemote ([601c796](https://github.com/FAZuH/lab-ops/commit/601c796c794ae2bc1e514c9aee21024796034f3f))
 

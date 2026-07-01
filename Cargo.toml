@@ -4,7 +4,7 @@ name = "lab-ops"
 # Avoid modifying version manually or it will break CI
 
 
-version = "0.1.24"
+version = "0.1.25"
 
 
 edition = "2024"
@@ -28,9 +28,9 @@ repository = "https://github.com/FAZuH/lab-ops"
 members = ["crates/natmap", "crates/auto-discover", "crates/lab-lib"]
 
 [workspace.dependencies]
-lab-ops_lab-lib = { path = "./crates/lab-lib", version = "0.1.1" }
-lab-ops_natmap = { path = "./crates/natmap", version = "0.1.6" }
-lab-ops_auto-discover = { path = "./crates/auto-discover", version = "0.1.5" }
+lab-ops_lab-lib = { path = "./crates/lab-lib", version = "0.1.2" }
+lab-ops_natmap = { path = "./crates/natmap", version = "0.1.7" }
+lab-ops_auto-discover = { path = "./crates/auto-discover", version = "0.1.6" }
 
 [dependencies]
 regex = "1.12.3"
