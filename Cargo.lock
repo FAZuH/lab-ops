@@ -1059,7 +1059,7 @@ dependencies = [
 
 [[package]]
 name = "lab-ops_auto-discover"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "base64",
  "bollard",
@@ -1086,7 +1086,7 @@ dependencies = [
 
 [[package]]
 name = "lab-ops_lab-lib"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bollard",
  "color-eyre",
@@ -1100,7 +1100,7 @@ dependencies = [
 
 [[package]]
 name = "lab-ops_natmap"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "axum",
  "bollard",

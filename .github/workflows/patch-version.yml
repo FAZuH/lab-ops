@@ -12,6 +12,9 @@ on:
       version:
         description: 'The version that was patched'
         value: ${{ jobs.patch.outputs.version }}
+      packages:
+        description: 'Space-separated list of package names to publish'
+        value: ${{ jobs.patch.outputs.packages }}
 
 jobs:
   patch:
@@ -19,6 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.set-version.outputs.version }}
+      packages: ${{ steps.workspace.outputs.packages }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -53,8 +57,11 @@ jobs:
       - name: Patch workspace members
         id: workspace
         run: |
+          ROOT_NAME=$(grep '^name = ' Cargo.toml | head -1 | sed 's/name = "\(.*\)"/\1/')
+
           if ! grep -q '^\[workspace\]' Cargo.toml; then
             echo "No workspace section found — skipping member patching"
+            echo "packages=$ROOT_NAME" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -65,14 +72,14 @@ jobs:
           MEMBERS=$(find crates -maxdepth 2 -name Cargo.toml -exec dirname {} \; | sed 's|^crates/||' | sort -u)
           if [ -z "$MEMBERS" ]; then
             echo "No workspace members found under crates/"
+            echo "packages=$ROOT_NAME" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # Determine previous release tag
+          # Detect changed and stale members
           TAGS=$(git tag -l 'v*' --sort=-version:refname)
           TAG_COUNT=$(echo "$TAGS" | grep -c . || true)
           if [ "$TAG_COUNT" -lt 1 ]; then
-            # First release: bump all members
             CHANGED="$MEMBERS"
             echo "No previous tag found — bumping all members"
           else
@@ -87,11 +94,33 @@ jobs:
               fi
             done
 
-            # If nothing changed in subcrates, bump the root only
-            if [ -z "$CHANGED" ]; then
-              echo "No member changes detected — root only"
-              exit 0
-            fi
+            # Detect stale members (unchanged in git but version matches crates.io)
+            for member in $MEMBERS; do
+              if echo " $CHANGED " | grep -q " $member "; then
+                continue
+              fi
+              PKG=$(grep '^name = ' "crates/$member/Cargo.toml" | head -1 | sed 's/name = "\(.*\)"/\1/')
+              CURRENT=$(grep '^version = ' "crates/$member/Cargo.toml" | head -1 | sed 's/version = "\(.*\)"/\1/')
+              PUBLISHED=$(cargo search "$PKG" 2>/dev/null | grep "^${PKG} = " | sed 's/^[^=]*= "\(.*\)".*$/\1/' || true)
+              if [ -n "$PUBLISHED" ] && [ "$CURRENT" = "$PUBLISHED" ]; then
+                echo "  $member: stale ($CURRENT matches crates.io, source differs) — forcing patch bump"
+                CHANGED="$CHANGED $member"
+              fi
+            done
+          fi
+
+          # Build packages list and output it (even when member list is empty)
+          PACKAGES="$ROOT_NAME"
+          for member in $CHANGED; do
+            PKG=$(grep '^name = ' "crates/$member/Cargo.toml" | head -1 | sed 's/name = "\(.*\)"/\1/')
+            PACKAGES="$PACKAGES $PKG"
+          done
+          echo "packages=$PACKAGES" >> "$GITHUB_OUTPUT"
+          echo "Publishing packages: $PACKAGES"
+
+          if [ -z "$CHANGED" ]; then
+            echo "No member changes detected — root only"
+            exit 0
           fi
 
           echo "members=$CHANGED" >> "$GITHUB_OUTPUT"
@@ -124,9 +153,11 @@ jobs:
             echo "  crates/$member: $CURRENT -> $MEMBER_VERSION ($BUMP)"
             sed -i "0,/^version = \".*\"/{s/^version = \".*\"/version = \"$MEMBER_VERSION\"/}" "crates/$member/Cargo.toml"
 
-            if grep -q "^$member = {" Cargo.toml; then
-              echo "  Updating workspace dependency: $member -> $MEMBER_VERSION"
-              sed -i "/^$member = {/,/}/s/version = \"[^\"]*\"/version = \"$MEMBER_VERSION\"/" Cargo.toml
+            # Use actual package name for workspace dependency key lookup (bug #2 fix)
+            PKG=$(grep '^name = ' "crates/$member/Cargo.toml" | head -1 | sed 's/name = "\(.*\)"/\1/')
+            if grep -q "^$PKG = {" Cargo.toml; then
+              echo "  Updating workspace dependency: $PKG -> $MEMBER_VERSION"
+              sed -i "/^$PKG = {/,/}/s/version = \"[^\"]*\"/version = \"$MEMBER_VERSION\"/" Cargo.toml
             fi
           done
 
