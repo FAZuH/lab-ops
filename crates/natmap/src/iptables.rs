@@ -92,27 +92,25 @@ impl IptablesManager {
         let comment = &map.rule_comment;
 
         // 1. DNAT rule via nat NATMAP
-        self.run(
-            cmd,
-            [
-                "-t",
-                "nat",
-                "-A",
-                NATMAP,
-                "-p",
-                &proto,
-                "--dport",
-                &host_port,
-                "-j",
-                "DNAT",
-                "--to-destination",
-                &container_addr,
-                "-m",
-                "comment",
-                "--comment",
-                comment,
-            ],
-        )?;
+        let mut pre_args = vec!["-t", "nat", "-A", NATMAP, "-p", &proto];
+        let host_ip_str = host_ip.to_string();
+        if !host_ip.is_unspecified() {
+            pre_args.push("-d");
+            pre_args.push(&host_ip_str);
+        }
+        pre_args.extend([
+            "--dport",
+            &host_port,
+            "-j",
+            "DNAT",
+            "--to-destination",
+            &container_addr,
+            "-m",
+            "comment",
+            "--comment",
+            comment,
+        ]);
+        self.run(cmd, pre_args)?;
 
         // 2. FORWARD ACCEPT rule in filter NATMAP
         self.run(
