@@ -1,3 +1,10 @@
+## 0.1.26 (2026-07-05)
+
+
+### Bug Fixes
+
+* Fix cross-host traffic collision when multiple nodes expose the same port via natmap (e.g. port 9000 on sg-1). DNAT rules now filter by destination host IP. ([08d371d](https://github.com/FAZuH/lab-ops/commit/08d371d...)) ([f8d5af8](https://github.com/FAZuH/lab-ops/commit/f8d5af866d67efcf4d536dcc8ee3789d0c69c15e))
+
 ## 0.1.25 (2026-07-01)
 
 
@@ -21,11 +28,4 @@
 * Fix natmap networking error on ForwardRemote with ([c539f43](https://github.com/FAZuH/lab-ops/commit/c539f43920e3e9fd6d4f9c3edfc030be0f112b7a))
 
 ## 0.1.22 (2026-06-02)
-
-## 0.1.21 (2026-06-02)
-
-
-### Bug Fixes
-
-* Fix proxy node not respecting preserve_src_ip ([2cb5398](https://github.com/FAZuH/lab-ops/commit/2cb539876f739529025cc91eedf00632deb26c41))
 
