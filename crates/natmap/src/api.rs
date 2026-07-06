@@ -27,6 +27,9 @@ use crate::models::SnatConfig;
 use crate::models::SnatRequest;
 use crate::models::TransportProtocol;
 
+// --- Read handlers ---
+
+#[tracing::instrument(skip_all)]
 /// `GET /mappings` — Returns all managed DNAT, SNAT, hairpin, and Docker mappings.
 pub async fn list_mappings(State(state): State<AppState>) -> Json<ListResponse> {
     let state = state.daemon_state.read().await;
@@ -138,6 +141,7 @@ pub async fn remove_dnat(
 }
 
 /// `POST /snat` — Adds a static SNAT rule.
+#[tracing::instrument(skip_all, fields(int.ip = %req.int_ip, ext.ip = %req.ext_ip, ext.iface = %req.ext_if))]
 pub async fn add_snat(
     State(state): State<AppState>,
     Json(req): Json<SnatRequest>,
@@ -161,6 +165,7 @@ pub async fn add_snat(
 }
 
 /// `DELETE /snat` — Removes a static SNAT rule.
+#[tracing::instrument(skip_all, fields(int.ip = %req.int_ip, ext.ip = %req.ext_ip))]
 pub async fn remove_snat(
     State(state): State<AppState>,
     Json(req): Json<SnatRequest>,
@@ -187,6 +192,7 @@ pub async fn remove_snat(
 }
 
 /// `POST /hairpin` — Adds a static hairpin NAT rule.
+#[tracing::instrument(skip_all, fields(ext.ip = %req.ext_ip, int.ip = %req.int_ip, ports = %req.ports, proto = %req.proto))]
 pub async fn add_hairpin(
     State(state): State<AppState>,
     Json(req): Json<HairpinRequest>,
@@ -219,6 +225,7 @@ pub async fn add_hairpin(
 }
 
 /// `DELETE /hairpin` — Removes a static hairpin NAT rule.
+#[tracing::instrument(skip_all, fields(ext.ip = %req.ext_ip, int.ip = %req.int_ip, ports = %req.ports))]
 pub async fn remove_hairpin(
     State(state): State<AppState>,
     Json(req): Json<HairpinRequest>,
@@ -253,6 +260,11 @@ pub async fn remove_hairpin(
 
 // --- Policy Route handlers ---
 
+/// `POST /policy-route` — Adds a policy route rule.
+///
+/// Installs an `ip rule` + `ip route` entry for source IP preservation.
+/// Idempotent if the same policy route already exists.
+#[tracing::instrument(skip_all, fields(src.ip = %req.src_ip, via = %req.via, table = req.table))]
 pub async fn add_policy_route(
     State(state): State<AppState>,
     Json(req): Json<PolicyRouteRequest>,
@@ -282,6 +294,11 @@ pub async fn add_policy_route(
     Ok(Json(config))
 }
 
+/// `DELETE /policy-route` — Removes a policy route rule.
+///
+/// Deletes the `ip rule` + `ip route` entry. Idempotent — returns OK
+/// even if the route was already removed from the kernel.
+#[tracing::instrument(skip_all, fields(src.ip = %req.src_ip, via = %req.via, table = req.table))]
 pub async fn remove_policy_route(
     State(state): State<AppState>,
     Json(req): Json<PolicyRouteRequest>,
@@ -312,6 +329,7 @@ pub async fn remove_policy_route(
 // --- Docker handlers ---
 
 /// `PUT /remap/:container_id` — Remaps a host port for a running container.
+#[tracing::instrument(skip_all, fields(container.id = %container_id, old.port = req.host_port, new.port = req.new_host_port))]
 pub async fn remap_port(
     State(state): State<AppState>,
     Path(container_id): Path<String>,
@@ -527,6 +545,7 @@ pub async fn add_mapping(
 }
 
 /// `DELETE /mapping/{container_id}/{port}` — Removes a specific port mapping by container and port.
+#[tracing::instrument(skip_all, fields(container.id = %container_id, port = %port_str))]
 pub async fn remove_mapping(
     State(state): State<AppState>,
     Path((container_id, port_str)): Path<(String, String)>,
@@ -562,6 +581,7 @@ pub async fn remove_mapping(
 }
 
 /// `DELETE /mapping/by-id/:id` — Removes a port mapping by its numeric ID.
+#[tracing::instrument(skip_all, fields(mapping.id = id))]
 pub async fn remove_mapping_by_id(
     State(state): State<AppState>,
     Path(id): Path<u64>,
@@ -586,6 +606,7 @@ pub async fn remove_mapping_by_id(
 }
 
 /// `DELETE /clear` — Removes all managed NAT rules and resets daemon state.
+#[tracing::instrument(skip_all)]
 pub async fn clear_all(
     State(state): State<AppState>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
@@ -625,6 +646,8 @@ pub async fn clear_all(
     state.persist().await;
     Ok(StatusCode::OK)
 }
+
+// --- Internal helpers ---
 
 pub async fn bind_ports(
     ports: Arc<PortAllocator>,
