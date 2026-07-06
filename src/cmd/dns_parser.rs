@@ -395,10 +395,7 @@ www.example.com. 300 IN CNAME example.com.";
 
     #[test]
     fn strip_zone_deep_subdomain() {
-        assert_eq!(
-            strip_zone("a.b.c.example.com.", "example.com."),
-            "a.b.c"
-        );
+        assert_eq!(strip_zone("a.b.c.example.com.", "example.com."), "a.b.c");
     }
 
     #[test]
@@ -408,7 +405,10 @@ www.example.com. 300 IN CNAME example.com.";
 
     #[test]
     fn strip_zone_different_zone_returns_fqdn() {
-        assert_eq!(strip_zone("www.other.com.", "example.com."), "www.other.com");
+        assert_eq!(
+            strip_zone("www.other.com.", "example.com."),
+            "www.other.com"
+        );
     }
 
     #[test]

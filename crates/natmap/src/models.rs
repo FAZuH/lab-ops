@@ -276,10 +276,11 @@ pub struct ListResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::net::IpAddr;
     use std::net::SocketAddr;
     use std::str::FromStr;
+
+    use super::*;
 
     // ── DockerPortMapRequest::is_ipv6 ──
 
