@@ -64,7 +64,7 @@ mod auto_discover {
         stdout
     }
 
-    /// Cleanup helper.
+    /// Cleanup helper. Kills all background jobs by PID and removes Docker containers.
     fn teardown(container_names: &[&str]) -> String {
         let removes: String = container_names
             .iter()
@@ -73,8 +73,14 @@ mod auto_discover {
             .join("\n");
         format!(
             r#"
-kill %3 %2 %1 2>/dev/null || true
-sleep 1
+for pid in $(jobs -p 2>/dev/null); do
+  kill $pid 2>/dev/null || true
+done
+for i in $(seq 1 10); do
+  remaining=$(jobs -p 2>/dev/null | wc -l)
+  [ "$remaining" -eq 0 ] && break
+  sleep 0.2
+done
 {removes}
 "#
         )
