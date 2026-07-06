@@ -31,6 +31,7 @@ members = ["crates/natmap", "crates/auto-discover", "crates/lab-lib"]
 lab-ops_lab-lib = { path = "./crates/lab-lib", version = "0.1.3" }
 lab-ops_natmap = { path = "./crates/natmap", version = "0.1.8" }
 lab-ops_auto-discover = { path = "./crates/auto-discover", version = "0.1.7" }
+proptest = "1"
 
 [dependencies]
 regex = "1.12.3"

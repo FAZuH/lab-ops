@@ -538,7 +538,10 @@ pub async fn remove(
             .or(container_id)
             .ok_or_else(|| color_eyre::eyre::eyre!("Missing container ID or --name"))?;
         let p = port.ok_or_else(|| color_eyre::eyre::eyre!("Missing port to remove"))?;
-        let port_num: u16 = p.split('/').next().unwrap().parse()?;
+        let port_num: u16 = match p.split('/').next() {
+            Some(s) => s.parse()?,
+            None => bail!("Invalid port format: {p}"),
+        };
         let uri = format!("/mapping/{cid}/{port_num}");
         let _res: () = request_json(socket, Method::DELETE, &uri, None::<()>).await?;
         if !json {

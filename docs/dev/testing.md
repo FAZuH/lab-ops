@@ -27,15 +27,15 @@ Located in `#[cfg(test)] mod tests { }` blocks within source files.
 | `src/cmd/cf2terra.rs` | 1 | Terraform HCL output |
 | `src/cmd/dockernet.rs` | 8 | IP formatting and port bind parsing |
 | `crates/lab-lib/src/port.rs` | 11 | Port allocation, persistence, free-port checks |
-| `crates/natmap/src/api.rs` | 20 | HTTP handlers: state transitions, input validation, parse helpers |
+| `crates/natmap/src/api.rs` | 22 | HTTP handlers, `parse_socket_addrs` boundary/edge cases |
 | `crates/natmap/src/daemon.rs` | 2 | Tracing span fields on daemon ops |
 | `crates/auto-discover/src/config.rs` | 2 | preserve_src_ip config propagation (defaults, overrides) |
 | `crates/auto-discover/src/consul.rs` | 5 | Consul service registration, metadata, URL encoding |
 | `crates/auto-discover/src/daemon.rs` | 2 | Tracing span fields on container events |
-| `crates/auto-discover/src/forwarding.rs` | 17 | `group_forwarding_services`, `parse_dnat_rule` |
+| `crates/auto-discover/src/forwarding.rs` | 27 | `group_forwarding_services`, `parse_dnat_rule`, 5 proptest invariants, edge cases |
 | `crates/auto-discover/src/nginx_daemon.rs` | 5 | `extract_service_id` |
 
-**Total: 78 inline unit tests**
+**Total: 88 inline unit tests**
 
 ### Doc Tests
 
@@ -48,6 +48,17 @@ Located in `/// ```rust` documentation blocks.
 
 **Total: 5 doc tests**
 
+### Property-Based Tests
+
+Documented inline with their parent modules. Proptest invariants live alongside the code they test (e.g., `forwarding.rs`), using the `proptest!` macro with `#[test] fn` syntax.
+
+| Location | Tests | Covers |
+|---|---|---|
+| `crates/auto-discover/src/forwarding.rs` | 5 | `group_forwarding_services`: dedup keys, sorted ports, all ports in group, hairpin/preserve_src_ip OR |
+| `crates/natmap/tests/cli.rs` | 8 | `parse_docker_mapping`: 1- to 5-part format roundtrips |
+
+`service_matches_group` helper is defined outside the `proptest!` block (the macro doesn't support mixing regular functions with test functions).
+
 ### Integration Tests (External)
 
 Located in `tests/` or `crates/*/tests/` directories.
@@ -55,14 +66,14 @@ Located in `tests/` or `crates/*/tests/` directories.
 | File | Tests | Covers |
 |---|---|---|
 | `tests/cf2ansible.rs` | 6 | cf2ansible end-to-end (zone file → YAML output) |
-| `crates/natmap/tests/cli.rs` | 12 | Port mapping string parsing via `parse_docker_mapping` |
+| `crates/natmap/tests/cli.rs` | 27 | Port mapping string parsing via `parse_docker_mapping`, 8 proptest roundtrips, edge cases |
 | `crates/natmap/tests/model.rs` | 12 | Model serialization, rule comment, `output_dnat_destination` |
 
-**Total: 30 integration tests**
+**Total: 45 integration tests**
 
 ### Docker Integration Tests
 
-Located in `tests/natmap_docker.rs` (34 tests) and `tests/auto_discover.rs` (60 tests), behind `#[cfg(feature = "docker-tests")]`.
+Located in `tests/natmap_docker.rs` (34 tests) and `tests/auto_discover/` (60 tests across 7 modules), behind `#[cfg(feature = "docker-tests")]`.
 
 **natmap Docker tests** (`tests/natmap_docker.rs`, 34 tests):
 Spins up a privileged Ubuntu container with iptables, runs the natmap daemon, and verifies iptables NAT rule creation/removal, startup flush, graceful shutdown, policy routing, and port allocation via CLI commands over the Unix socket.
@@ -77,8 +88,18 @@ Spins up a privileged Ubuntu container with iptables, runs the natmap daemon, an
 | Policy routing | 2 |
 | Other | 9 |
 
-**auto-discover Docker tests** (`tests/auto_discover.rs`, 60 tests):
+**auto-discover Docker tests** (`tests/auto_discover/`, 60 tests across 7 modules):
 Spins up a privileged Docker container running Consul, natmap, and auto-discover daemons. Verifies Consul registration, port binding, nginx config generation, forwarding metadata, crash recovery, config change handling, nginx config pipeline, registration metadata, forwarding sync (DNAT rules), nginx daemon (file/symlink operations), concurrency, and large configs.
+
+| Module | Tests | Covers |
+|---|---|---|
+| `forwarding.rs` | 9 | DNAT sync, duplicate/stale rules, multi-port, hairpin, preserve_src_ip hairpin |
+| `nginx.rs` | 11 | KV → file, symlinks, postproc, stale cleanup, template prefixes, generator failures |
+| `port_binding.rs` | 7 | Static/ephemeral ports, bind_ip, bind_interface, local forwarding |
+| `registration.rs` | 12 | Consul registrations, container events, domain slug, extra fields, concurrent starts |
+| `recovery.rs` | 11 | Config changes, crash recovery, YAML validation, pre/postprocess, config sync |
+| `local_services.rs` | 4 | Local service type, forwarding remote, reachability, combined rproxy+forwarding |
+| `preserve_src_ip.rs` | 6 | Global/per-service preserve_src_ip, policy route, idempotency, cleanup |
 
 **Total: 94 Docker tests**
 
@@ -128,6 +149,6 @@ Add a `#[test]` function to `tests/` or `crates/*/tests/`. Use `env!("CARGO_BIN_
 
 ### Docker Integration Test
 
-1. Add a `#[test]` function to `tests/natmap_docker.rs` or `tests/auto_discover.rs`
+1. Add a `#[test]` function to `tests/natmap_docker.rs` or the appropriate module in `tests/auto_discover/`
 2. Use `run_in_docker(&[...])` for shell commands
 3. Pattern: start daemon → wait → run command → verify output

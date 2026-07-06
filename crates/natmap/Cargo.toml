@@ -32,5 +32,6 @@ http-body-util = "0.1.3"
 uninlined_format_args = "warn"
 new_without_default = "allow"
 [dev-dependencies]
+proptest = { workspace = true }
 tracing-test = "0.2"
 tempfile = "3"

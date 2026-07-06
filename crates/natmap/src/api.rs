@@ -744,6 +744,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_socket_addrs_empty_ports_returns_error() {
+        let err = parse_socket_addrs("1.2.3.4", "").unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn parse_socket_addrs_port_65535_boundary() {
+        let addrs = parse_socket_addrs("1.2.3.4", "65535").unwrap();
+        assert_eq!(addrs[0].port(), 65535);
+    }
+
+    #[test]
     fn parse_socket_addrs_ipv6_works() {
         let addrs = parse_socket_addrs("::1", "443").unwrap();
         assert_eq!(

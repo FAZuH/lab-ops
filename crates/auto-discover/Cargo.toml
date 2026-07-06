@@ -32,6 +32,7 @@ color-eyre = "0.6"
 regex = "1"
 
 [dev-dependencies]
+proptest = { workspace = true }
 tracing-test = "0.2"
 tempfile = "3"
 
