@@ -24,11 +24,11 @@ use crate::nginx_daemon::NginxDaemon;
 #[command(about = "Service discovery daemon with Consul integration and nginx config generation")]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Command,
 }
 
 #[derive(Subcommand)]
-pub enum Commands {
+pub enum Command {
     /// Run all enabled daemon components (discovery, forwarding, nginx)
     Daemon {
         /// Path to discovery.yaml
@@ -91,9 +91,10 @@ pub enum Commands {
     },
 }
 
+/// Dispatch the CLI subcommand to the appropriate handler.
 pub async fn run_cli(cli: Cli) -> Result<()> {
     match cli.command {
-        Commands::Daemon {
+        Command::Daemon {
             config,
             state_dir,
             consul_addr,
@@ -115,10 +116,10 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             )
             .await
         }
-        Commands::Sync { config, state_dir } => run_sync(config, state_dir).await,
-        Commands::Check { config } => check_config(config),
-        Commands::ForwardingSync { consul_addr } => run_forwarding_sync(&consul_addr).await,
-        Commands::NginxSync {
+        Command::Sync { config, state_dir } => run_sync(config, state_dir).await,
+        Command::Check { config } => check_config(config),
+        Command::ForwardingSync { consul_addr } => run_forwarding_sync(&consul_addr).await,
+        Command::NginxSync {
             consul_addr,
             nginx_sites_dir,
             nginx_streams_dir,
@@ -126,6 +127,11 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
     }
 }
 
+/// Start the long-running auto-discover daemon.
+///
+/// Spawns tokio tasks for discovery, forwarding sync, and nginx config sync,
+/// then blocks on Ctrl-C until shutdown. Individual components can be
+/// disabled via the `no_*` flags.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_unified_daemon(
     config_path: PathBuf,
@@ -286,6 +292,7 @@ async fn run_daemon(config_path: PathBuf, state_dir: PathBuf) {
     .await;
 }
 
+/// Run a single discovery + forwarding sync pass, then exit.
 pub async fn run_sync(config_path: PathBuf, state_dir: PathBuf) -> Result<()> {
     info!("Running sync...");
     let daemon = DiscoveryDaemon::new(config_path, state_dir);
@@ -296,6 +303,7 @@ pub async fn run_sync(config_path: PathBuf, state_dir: PathBuf) -> Result<()> {
     Ok(())
 }
 
+/// Validate the discovery config file and print resolved services.
 pub fn check_config(config_path: PathBuf) -> Result<()> {
     let config = DiscoveryConfig::load(&config_path)
         .map_err(|e| color_eyre::eyre::eyre!("configuration error: {e}"))?;
@@ -322,6 +330,7 @@ pub fn check_config(config_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
+/// Run a single forwarding DNAT rule sync from Consul, then exit.
 pub async fn run_forwarding_sync(consul_addr: &str) -> Result<()> {
     info!("Running forwarding sync...");
     crate::forwarding::sync_forwarding_rules(consul_addr).await?;
@@ -340,6 +349,7 @@ async fn run_forwarding_daemon(consul_addr: String) {
     }
 }
 
+/// Run a single nginx config sync from Consul KV, then exit.
 pub async fn run_nginx_sync(
     consul_addr: &str,
     nginx_sites_dir: PathBuf,

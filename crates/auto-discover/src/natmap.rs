@@ -4,15 +4,15 @@
 //! port mappings, DNAT rules, and hairpin NAT rules.
 
 use std::net::IpAddr;
-use std::process::Command;
+use std::process::Command as ProcessCommand;
 
 use color_eyre::Result;
 use color_eyre::eyre::WrapErr;
 use color_eyre::eyre::bail;
 use lab_ops_lab_lib::TransportProtocol;
 use lab_ops_natmap::cli::Cli;
-use lab_ops_natmap::cli::DockerCommand;
-use lab_ops_natmap::cli::NatMapCommand;
+use lab_ops_natmap::cli::Command as NatmapCommand;
+use lab_ops_natmap::cli::Docker;
 
 /// Client for the natmap daemon over its Unix socket.
 #[derive(Debug)]
@@ -49,7 +49,7 @@ impl NatmapClient {
             Cli {
                 socket: self.socket.clone().into(),
                 json: false,
-                command: NatMapCommand::Dnat {
+                command: NatmapCommand::Dnat {
                     ext_ip: ext_ip.to_string(),
                     int_ip: int_ip.to_string(),
                     proto: proto.to_string(),
@@ -78,7 +78,7 @@ impl NatmapClient {
             Cli {
                 socket: self.socket.clone().into(),
                 json: false,
-                command: NatMapCommand::Hairpin {
+                command: NatmapCommand::Hairpin {
                     ext_ip: ext_ip.to_string(),
                     int_ip: int_ip.to_string(),
                     proto: proto.to_string(),
@@ -104,7 +104,7 @@ impl NatmapClient {
             Cli {
                 socket: self.socket.clone().into(),
                 json: false,
-                command: NatMapCommand::PolicyRoute {
+                command: NatmapCommand::PolicyRoute {
                     src_ip: src_ip.to_string(),
                     via: via.to_string(),
                     table,
@@ -146,8 +146,8 @@ impl NatmapClient {
         let cli = Cli {
             socket: self.socket.clone().into(),
             json: false,
-            command: NatMapCommand::Docker {
-                cmd: DockerCommand::Add {
+            command: NatmapCommand::Docker {
+                cmd: Docker::Add {
                     container_id: container_id.to_string(),
                     mapping: Some(spec),
                     name: None,
@@ -176,8 +176,8 @@ impl NatmapClient {
             Cli {
                 socket: self.socket.clone().into(),
                 json: false,
-                command: NatMapCommand::Docker {
-                    cmd: DockerCommand::Remove {
+                command: NatmapCommand::Docker {
+                    cmd: Docker::Remove {
                         container_id: Some(container_id.to_string()),
                         port: Some(host_port.to_string()),
                         all: false,
@@ -196,7 +196,7 @@ impl NatmapClient {
     /// network IP address. Used as a fallback when no `bind_ip` or
     /// `bind_interface` is configured.
     pub fn get_container_ip(&self, container_id: &str) -> Result<IpAddr> {
-        let output = Command::new("docker")
+        let output = ProcessCommand::new("docker")
             .args([
                 "inspect",
                 "-f",

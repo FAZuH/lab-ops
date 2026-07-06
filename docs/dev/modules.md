@@ -71,15 +71,15 @@ pub mod utils;
 
 ### `cli.rs` — CLI Definitions
 
-Defines the `NatMapCommand` enum with clap derives. Each variant maps to a subcommand:
+Defines the `Command` enum with clap derives. Each variant maps to a subcommand:
 
 ```rust
-pub enum NatMapCommand {
+pub enum Command {
     Dnat { ext_ip, int_ip, proto, ports, ext_if, delete },
     Snat { int_ip, ext_if, ext_ip, delete },
     Hairpin { ext_ip, int_ip, proto, ports, lan_cidr, delete },
     List { container_id },
-    Docker { cmd: DockerCommand },
+    Docker { cmd: Docker },
     Save,
     Fwd,
     Daemon { state_dir, socket, socket_group },

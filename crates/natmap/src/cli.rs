@@ -1,10 +1,10 @@
 //! CLI argument parsing for the `natmap` subcommands.
 //!
-//! Defines the [`Cli`] struct and [`NatMapCommand`] / [`DockerCommand`] enums
+//! Defines the [`Cli`] struct and [`Command`] / [`Docker`] enums
 //! that are flattened into the top-level `lab-ops` CLI via clap.
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::Command as ProcessCommand;
 
 use clap::Parser;
 use clap::Subcommand;
@@ -41,12 +41,12 @@ pub struct Cli {
     pub json: bool,
 
     #[command(subcommand)]
-    pub command: NatMapCommand,
+    pub command: Command,
 }
 
 /// Top-level natmap subcommands.
 #[derive(Subcommand, Debug)]
-pub enum NatMapCommand {
+pub enum Command {
     /// Adds or deletes DNAT port forwarding rules.
     #[command(name = "dnat")]
     Dnat {
@@ -145,7 +145,7 @@ pub enum NatMapCommand {
     #[command(name = "docker")]
     Docker {
         #[command(subcommand)]
-        cmd: DockerCommand,
+        cmd: Docker,
     },
     /// Saves current iptables rules to `/etc/iptables/rules.v4`.
     #[command(name = "save")]
@@ -180,7 +180,7 @@ pub enum NatMapCommand {
 
 /// Docker-specific subcommands for port mapping management.
 #[derive(Subcommand, Debug)]
-pub enum DockerCommand {
+pub enum Docker {
     /// Adds a new port mapping to a running container.
     #[command(name = "add")]
     Add {
@@ -247,7 +247,7 @@ pub async fn run_cli(cli: Cli, use_color: bool) -> Result<()> {
     let json = cli.json;
 
     match cli.command {
-        NatMapCommand::Dnat {
+        Command::Dnat {
             ext_ip,
             int_ip,
             proto,
@@ -268,7 +268,7 @@ pub async fn run_cli(cli: Cli, use_color: bool) -> Result<()> {
             )
             .await?;
         }
-        NatMapCommand::Snat {
+        Command::Snat {
             int_ip,
             ext_if,
             ext_ip,
@@ -276,7 +276,7 @@ pub async fn run_cli(cli: Cli, use_color: bool) -> Result<()> {
         } => {
             handle_snat(int_ip, ext_if, ext_ip, delete, &socket).await?;
         }
-        NatMapCommand::Hairpin {
+        Command::Hairpin {
             ext_ip,
             int_ip,
             proto,
@@ -286,7 +286,7 @@ pub async fn run_cli(cli: Cli, use_color: bool) -> Result<()> {
         } => {
             handle_hairpin(ext_ip, int_ip, proto, ports, lan_cidr, delete, &socket).await?;
         }
-        NatMapCommand::PolicyRoute {
+        Command::PolicyRoute {
             src_ip,
             via,
             table,
@@ -294,21 +294,21 @@ pub async fn run_cli(cli: Cli, use_color: bool) -> Result<()> {
         } => {
             handle_policy_route(src_ip, via, table, delete, &socket).await?;
         }
-        NatMapCommand::List { container_id } => {
+        Command::List { container_id } => {
             handle_list(&socket, container_id, json, use_color).await?;
         }
-        NatMapCommand::Clear => {
+        Command::Clear => {
             handle_clear(&socket).await?;
         }
-        NatMapCommand::Docker { cmd } => match cmd {
-            DockerCommand::Add {
+        Command::Docker { cmd } => match cmd {
+            Docker::Add {
                 container_id,
                 mapping,
                 name,
             } => {
                 add(container_id, mapping, name, &socket, json).await?;
             }
-            DockerCommand::Remove {
+            Docker::Remove {
                 container_id,
                 port,
                 all,
@@ -317,21 +317,21 @@ pub async fn run_cli(cli: Cli, use_color: bool) -> Result<()> {
             } => {
                 remove(container_id, port, all, id, name, &socket, json).await?;
             }
-            DockerCommand::Remap {
+            Docker::Remap {
                 container_id,
                 mapping,
             } => {
                 remap(container_id, mapping, &socket, json).await?;
             }
         },
-        NatMapCommand::Save => {
-            Command::new("sh")
+        Command::Save => {
+            ProcessCommand::new("sh")
                 .arg("-c")
                 .arg("iptables-save > /etc/iptables/rules.v4")
                 .status()?;
         }
-        NatMapCommand::Fwd => {
-            let status = Command::new("sysctl")
+        Command::Fwd => {
+            let status = ProcessCommand::new("sysctl")
                 .arg("-w")
                 .arg("net.ipv4.ip_forward=1")
                 .status()?;
@@ -339,7 +339,7 @@ pub async fn run_cli(cli: Cli, use_color: bool) -> Result<()> {
                 color_eyre::eyre::bail!("Failed to enable IP forwarding");
             }
         }
-        NatMapCommand::Daemon {
+        Command::Daemon {
             state,
             socket,
             socket_group,
@@ -349,7 +349,7 @@ pub async fn run_cli(cli: Cli, use_color: bool) -> Result<()> {
                 .run()
                 .await?;
         }
-        NatMapCommand::Install { binary, group } => {
+        Command::Install { binary, group } => {
             crate::install::install_systemd(&binary, &group)?;
         }
     }

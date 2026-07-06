@@ -26,7 +26,7 @@ lab-ops/
 │   ├── natmap/                   # NAT management crate
 │   │   └── src/
 │   │       ├── lib.rs            # Module declarations
-│   │       ├── cli.rs            # NatMapCommand enum + CLI dispatch
+│   │       ├── cli.rs            # Command enum + CLI dispatch
 │   │       ├── command.rs        # Handler functions for all subcommands
 │   │       ├── daemon.rs         # Axum API server, state management
 │   │       ├── models.rs         # Data types (configs, requests, state)
