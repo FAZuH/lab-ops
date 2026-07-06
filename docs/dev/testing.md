@@ -7,11 +7,14 @@ See [standards.md §7](standards.md#7-testing) for naming conventions, test loca
 ### Run Commands
 
 ```bash
-cargo test --workspace                           # All tests (excl. Docker)
-cargo test -p lab-lib                            # lab-lib crate only
-cargo test -p natmap                             # natmap crate only
-cargo test -p auto-discover                      # auto-discover crate only
-cargo test --features docker-tests -- --test-threads=1  # Docker integration tests
+cargo test --workspace                              # All tests (excl. Docker)
+cargo test -p lab-ops_lab-lib                       # lab-lib crate only
+cargo test -p lab-ops_natmap                        # natmap crate only
+cargo test -p lab-ops_auto-discover                 # auto-discover crate only
+cargo test -p lab-ops --test natmap_docker          # natmap Docker integration tests
+cargo test -p lab-ops --test auto_discover          # auto-discover Docker integration tests
+cargo test -p lab-ops_natmap --test model           # natmap model integration tests
+cargo test --doc -p lab-ops_natmap -p lab-ops_lab-lib  # Doc tests only
 ```
 
 ### Unit Tests (Inline)
@@ -20,16 +23,30 @@ Located in `#[cfg(test)] mod tests { }` blocks within source files.
 
 | File | Tests | Covers |
 |---|---|---|
-| `src/cmd/cf2ansible.rs` | 20 | DNS zone parsing, record extraction, YAML output |
+| `src/cmd/cf2ansible.rs` | 4 | DNS zone parsing, record extraction, YAML output |
+| `src/cmd/cf2terra.rs` | 1 | Terraform HCL output |
 | `src/cmd/dockernet.rs` | 8 | IP formatting and port bind parsing |
-| `crates/auto-discover/src/config.rs` | 18 | YAML config parsing, resolution, forwarding |
-| `crates/auto-discover/src/consul.rs` | 5 | Consul service registration, metadata encoding |
-| `crates/auto-discover/src/port.rs` | 6 | Port allocation, persistence, free-port checks |
+| `crates/lab-lib/src/port.rs` | 11 | Port allocation, persistence, free-port checks |
+| `crates/natmap/src/api.rs` | 20 | HTTP handlers: state transitions, input validation, parse helpers |
+| `crates/natmap/src/daemon.rs` | 2 | Tracing span fields on daemon ops |
+| `crates/auto-discover/src/config.rs` | 2 | preserve_src_ip config propagation (defaults, overrides) |
+| `crates/auto-discover/src/consul.rs` | 5 | Consul service registration, metadata, URL encoding |
+| `crates/auto-discover/src/daemon.rs` | 2 | Tracing span fields on container events |
+| `crates/auto-discover/src/forwarding.rs` | 17 | `group_forwarding_services`, `parse_dnat_rule` |
+| `crates/auto-discover/src/nginx_daemon.rs` | 5 | `extract_service_id` |
 
-**Total: 83 inline unit tests** (+ 0 in `lab-lib`, currently only re-exports)
+**Total: 78 inline unit tests**
 
-| `crates/auto-discover/src/config.rs` | 18 | YAML config parsing, resolution, forwarding |
-| `crates/auto-discover/src/port.rs` | 6 | Port allocation, persistence, free-port checks |
+### Doc Tests
+
+Located in `/// ```rust` documentation blocks.
+
+| Crate | Tests | Covers |
+|---|---|---|
+| `lab-ops_lab-lib` | 1 | TransportProtocol parse/display round-trip |
+| `lab-ops_natmap` | 4 | `output_dnat_destination`, `DockerPortMapRequest`, `DockerPortMap::new`, `parse_docker_mapping` |
+
+**Total: 5 doc tests**
 
 ### Integration Tests (External)
 
@@ -37,18 +54,18 @@ Located in `tests/` or `crates/*/tests/` directories.
 
 | File | Tests | Covers |
 |---|---|---|
-| `tests/integration.rs` | 6 | cf2ansible end-to-end (zone file → YAML output) |
-| `crates/natmap/tests/cli.rs` | 11 | Port mapping string parsing |
-| `crates/natmap/tests/model.rs` | 10 | Model serialization, rule comment generation |
+| `tests/cf2ansible.rs` | 6 | cf2ansible end-to-end (zone file → YAML output) |
+| `crates/natmap/tests/cli.rs` | 12 | Port mapping string parsing via `parse_docker_mapping` |
+| `crates/natmap/tests/model.rs` | 12 | Model serialization, rule comment, `output_dnat_destination` |
 
-**Total: 25 integration tests**
+**Total: 30 integration tests**
 
 ### Docker Integration Tests
 
-Located in `tests/natmap_docker.rs` and `tests/auto_discover.rs`, behind `#[cfg(feature = "docker-tests")]`.
+Located in `tests/natmap_docker.rs` (34 tests) and `tests/auto_discover.rs` (60 tests), behind `#[cfg(feature = "docker-tests")]`.
 
-**auto-discover Docker tests** (`tests/auto_discover.rs`, 49 tests):
-Spins up a privileged Docker container (Ubuntu 24.04 + Consul + iptables) running Consul, natmap, and auto-discover daemons. Verifies Consul registration, port binding, nginx config generation, forwarding metadata, crash recovery, config change handling, nginx config pipeline, registration metadata, forwarding sync (DNAT rules), nginx daemon (file/symlink operations), concurrency, and large configs.
+**natmap Docker tests** (`tests/natmap_docker.rs`, 34 tests):
+Spins up a privileged Ubuntu container with iptables, runs the natmap daemon, and verifies iptables NAT rule creation/removal, startup flush, graceful shutdown, policy routing, and port allocation via CLI commands over the Unix socket.
 
 | Category | Count |
 |---|---|
@@ -57,15 +74,19 @@ Spins up a privileged Docker container (Ubuntu 24.04 + Consul + iptables) runnin
 | Startup flush (natmap chains, postrouting, output) | 6 |
 | Port management (freebind, release, conflict) | 3 |
 | Graceful shutdown | 3 |
-| Other | 5 |
+| Policy routing | 2 |
+| Other | 9 |
 
-**Total: 28 natmap Docker tests + 49 auto-discover Docker tests = 77 Docker tests**
+**auto-discover Docker tests** (`tests/auto_discover.rs`, 60 tests):
+Spins up a privileged Docker container running Consul, natmap, and auto-discover daemons. Verifies Consul registration, port binding, nginx config generation, forwarding metadata, crash recovery, config change handling, nginx config pipeline, registration metadata, forwarding sync (DNAT rules), nginx daemon (file/symlink operations), concurrency, and large configs.
+
+**Total: 94 Docker tests**
 
 The Docker image is built once via `Once` from `ubuntu:24.04` with `iptables` installed.
 
 ## How Tests Run
 
-`./dev.sh test` executes `cargo test --workspace --all-targets --all-features`. Note that `--all-features` enables `docker-tests` in the root crate and the auto-discover crate, so the Docker tests listed below are included in `./dev.sh test`.
+`./dev.sh test` executes `cargo test --workspace --all-targets --all-features`. Note that `--all-features` enables `docker-tests` in the root crate and the auto-discover crate, so all test categories are included.
 
 ### Docker Test Requirements
 
@@ -101,8 +122,12 @@ mod tests {
 }
 ```
 
+### Integration Test (Non-Docker)
+
+Add a `#[test]` function to `tests/` or `crates/*/tests/`. Use `env!("CARGO_BIN_EXE_lab-ops")` for binary tests.
+
 ### Docker Integration Test
 
-1. Add a `#[test]` function to `tests/natmap_docker.rs`
+1. Add a `#[test]` function to `tests/natmap_docker.rs` or `tests/auto_discover.rs`
 2. Use `run_in_docker(&[...])` for shell commands
 3. Pattern: start daemon → wait → run command → verify output

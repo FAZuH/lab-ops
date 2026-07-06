@@ -18,6 +18,33 @@ use crate::models::SnatConfig;
 
 const NATMAP: &str = "NATMAP";
 
+/// Determines the destination IP for the OUTPUT DNAT rule.
+///
+/// When the host IP is unspecified (`0.0.0.0` or `::`), the loopback
+/// address (`127.0.0.1` / `::1`) is used so localhost-sourced traffic
+/// is also DNATed. For specific host IPs, the IP itself is used.
+///
+/// ```
+/// use std::net::IpAddr;
+/// use std::str::FromStr;
+/// use lab_ops_natmap::iptables::output_dnat_destination;
+///
+/// assert_eq!(output_dnat_destination(IpAddr::from_str("0.0.0.0").unwrap(), false), "127.0.0.1");
+/// assert_eq!(output_dnat_destination(IpAddr::from_str("::").unwrap(), true), "::1");
+/// assert_eq!(output_dnat_destination(IpAddr::from_str("100.64.0.10").unwrap(), false), "100.64.0.10");
+/// ```
+pub fn output_dnat_destination(host_ip: std::net::IpAddr, is_ipv6: bool) -> String {
+    if host_ip.is_unspecified() {
+        if is_ipv6 {
+            "::1".to_string()
+        } else {
+            "127.0.0.1".to_string()
+        }
+    } else {
+        host_ip.to_string()
+    }
+}
+
 /// Manages the lifecycle of iptables rules used by natmap.
 ///
 /// Creates the `NATMAP` chain in both the `nat` and `filter` tables,
@@ -163,15 +190,7 @@ impl IptablesManager {
         // 4. OUTPUT DNAT rule — always needed for locally-generated traffic.
         //    PREROUTING only catches forwarded/ingress traffic; locally-generated
         //    packets (curl localhost, curl <host-ip>) go through OUTPUT.
-        let output_dst = if host_ip.is_unspecified() {
-            if map.request.is_ipv6() {
-                "::1"
-            } else {
-                "127.0.0.1"
-            }
-        } else {
-            &map.request.host_addr.ip().to_string()
-        };
+        let output_dst = output_dnat_destination(host_ip, map.request.is_ipv6());
         self.run(
             cmd,
             [
@@ -180,7 +199,7 @@ impl IptablesManager {
                 "-A",
                 "OUTPUT",
                 "-d",
-                output_dst,
+                output_dst.as_str(),
                 "-p",
                 &proto,
                 "--dport",
