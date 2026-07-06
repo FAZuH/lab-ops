@@ -273,3 +273,203 @@ pub struct ListResponse {
     pub hairpins: Vec<HairpinConfig>,
     pub policy_routes: Vec<PolicyRouteConfig>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::IpAddr;
+    use std::net::SocketAddr;
+    use std::str::FromStr;
+
+    // ── DockerPortMapRequest::is_ipv6 ──
+
+    #[test]
+    fn is_ipv6_ipv4_returns_false() {
+        let req = DockerPortMapRequest {
+            host_addr: SocketAddr::new(IpAddr::from_str("192.168.1.1").unwrap(), 80),
+            container_addr: SocketAddr::new(IpAddr::from_str("10.0.0.1").unwrap(), 80),
+            proto: TransportProtocol::Tcp,
+        };
+        assert!(!req.is_ipv6());
+    }
+
+    #[test]
+    fn is_ipv6_ipv6_returns_true() {
+        let req = DockerPortMapRequest {
+            host_addr: SocketAddr::new(IpAddr::from_str("2001:db8::1").unwrap(), 80),
+            container_addr: SocketAddr::new(IpAddr::from_str("::1").unwrap(), 80),
+            proto: TransportProtocol::Tcp,
+        };
+        assert!(req.is_ipv6());
+    }
+
+    #[test]
+    fn is_ipv6_unspecified_ipv4_returns_false() {
+        let req = DockerPortMapRequest {
+            host_addr: SocketAddr::new(IpAddr::from_str("0.0.0.0").unwrap(), 80),
+            container_addr: SocketAddr::new(IpAddr::from_str("10.0.0.1").unwrap(), 80),
+            proto: TransportProtocol::Udp,
+        };
+        assert!(!req.is_ipv6());
+    }
+
+    #[test]
+    fn is_ipv6_unspecified_ipv6_returns_true() {
+        let req = DockerPortMapRequest {
+            host_addr: SocketAddr::new(IpAddr::from_str("::").unwrap(), 80),
+            container_addr: SocketAddr::new(IpAddr::from_str("::1").unwrap(), 80),
+            proto: TransportProtocol::Tcp,
+        };
+        assert!(req.is_ipv6());
+    }
+
+    // ── DockerPortMap::new ──
+
+    #[test]
+    fn new_docker_port_map_comment_format() {
+        let req = DockerPortMapRequest {
+            host_addr: SocketAddr::new(IpAddr::from_str("0.0.0.0").unwrap(), 8080),
+            container_addr: SocketAddr::new(IpAddr::from_str("172.17.0.2").unwrap(), 80),
+            proto: TransportProtocol::Tcp,
+        };
+        let m = DockerPortMap::new(1, req, "abc123".into(), "my-nginx".into());
+        assert_eq!(m.id, 1);
+        assert_eq!(m.rule_comment, "natmap:abc123:8080");
+        assert_eq!(m.container_id, "abc123");
+        assert_eq!(m.container_name, "my-nginx");
+    }
+
+    #[test]
+    fn new_docker_port_map_ipv6_comment() {
+        let req = DockerPortMapRequest {
+            host_addr: SocketAddr::new(IpAddr::from_str("::").unwrap(), 443),
+            container_addr: SocketAddr::new(IpAddr::from_str("::1").unwrap(), 443),
+            proto: TransportProtocol::Tcp,
+        };
+        let m = DockerPortMap::new(42, req, "container-1".into(), "test-svc".into());
+        assert_eq!(m.id, 42);
+        assert_eq!(m.rule_comment, "natmap:container-1:443");
+    }
+
+    #[test]
+    fn new_docker_port_map_zero_id() {
+        let req = DockerPortMapRequest {
+            host_addr: SocketAddr::new(IpAddr::from_str("10.0.0.1").unwrap(), 0),
+            container_addr: SocketAddr::new(IpAddr::from_str("10.0.0.2").unwrap(), 0),
+            proto: TransportProtocol::Tcp,
+        };
+        let m = DockerPortMap::new(0, req, "id-zero".into(), "zero-port".into());
+        assert_eq!(m.id, 0);
+        assert_eq!(m.rule_comment, "natmap:id-zero:0");
+    }
+
+    // ── DnatConfig::rule_comment ──
+
+    #[test]
+    fn dnat_rule_comment_basic() {
+        let cfg = DnatConfig {
+            ext_ip: "203.0.113.50".into(),
+            int_ip: "10.0.0.99".into(),
+            ports: "80".into(),
+            proto: TransportProtocol::Tcp,
+            ext_if: None,
+            no_masquerade: false,
+        };
+        assert_eq!(cfg.rule_comment(), "natmap:dnat:203.0.113.50:80");
+    }
+
+    #[test]
+    fn dnat_rule_comment_multiport() {
+        let cfg = DnatConfig {
+            ext_ip: "203.0.113.50".into(),
+            int_ip: "10.0.0.99".into(),
+            ports: "80,443,8080".into(),
+            proto: TransportProtocol::Tcp,
+            ext_if: None,
+            no_masquerade: false,
+        };
+        assert_eq!(cfg.rule_comment(), "natmap:dnat:203.0.113.50:80,443,8080");
+    }
+
+    #[test]
+    fn dnat_rule_comment_with_ext_if() {
+        let cfg = DnatConfig {
+            ext_ip: "198.51.100.10".into(),
+            int_ip: "10.0.0.1".into(),
+            ports: "53".into(),
+            proto: TransportProtocol::Udp,
+            ext_if: Some("eth0".into()),
+            no_masquerade: true,
+        };
+        assert_eq!(cfg.rule_comment(), "natmap:dnat:198.51.100.10:53");
+    }
+
+    // ── SnatConfig::rule_comment ──
+
+    #[test]
+    fn snat_rule_comment_basic() {
+        let cfg = SnatConfig {
+            int_ip: "10.0.0.1".into(),
+            ext_ip: "203.0.113.50".into(),
+            ext_if: "eth0".into(),
+        };
+        assert_eq!(cfg.rule_comment(), "natmap:snat:10.0.0.1:203.0.113.50");
+    }
+
+    #[test]
+    fn snat_rule_comment_ipv6() {
+        let cfg = SnatConfig {
+            int_ip: "2001:db8::1".into(),
+            ext_ip: "2001:db8::ff".into(),
+            ext_if: "eth0".into(),
+        };
+        assert_eq!(cfg.rule_comment(), "natmap:snat:2001:db8::1:2001:db8::ff");
+    }
+
+    // ── HairpinConfig::rule_comment ──
+
+    #[test]
+    fn hairpin_rule_comment_basic() {
+        let cfg = HairpinConfig {
+            ext_ip: "203.0.113.50".into(),
+            int_ip: "10.0.0.99".into(),
+            ports: "80".into(),
+            proto: TransportProtocol::Tcp,
+            lan_cidr: None,
+        };
+        assert_eq!(
+            cfg.rule_comment(),
+            "natmap:hairpin:203.0.113.50:10.0.0.99:80"
+        );
+    }
+
+    #[test]
+    fn hairpin_rule_comment_with_lan_cidr() {
+        let cfg = HairpinConfig {
+            ext_ip: "203.0.113.50".into(),
+            int_ip: "10.0.0.99".into(),
+            ports: "80,443".into(),
+            proto: TransportProtocol::Udp,
+            lan_cidr: Some("10.0.0.0/24".into()),
+        };
+        assert_eq!(
+            cfg.rule_comment(),
+            "natmap:hairpin:203.0.113.50:10.0.0.99:80,443"
+        );
+    }
+
+    #[test]
+    fn hairpin_rule_comment_multiport() {
+        let cfg = HairpinConfig {
+            ext_ip: "198.51.100.10".into(),
+            int_ip: "10.0.0.1".into(),
+            ports: "3000,3001,3002".into(),
+            proto: TransportProtocol::Tcp,
+            lan_cidr: None,
+        };
+        assert_eq!(
+            cfg.rule_comment(),
+            "natmap:hairpin:198.51.100.10:10.0.0.1:3000,3001,3002"
+        );
+    }
+}
