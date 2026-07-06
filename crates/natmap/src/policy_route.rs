@@ -98,7 +98,12 @@ fn build_route_del_args(config: &PolicyRouteConfig) -> Vec<String> {
 
 /// Builds `ip route show table <table>` args.
 fn build_route_show_args(table: u32) -> Vec<String> {
-    vec!["route".into(), "show".into(), "table".into(), table.to_string()]
+    vec![
+        "route".into(),
+        "show".into(),
+        "table".into(),
+        table.to_string(),
+    ]
 }
 
 impl PolicyRouteManager {
@@ -117,7 +122,7 @@ impl PolicyRouteManager {
 
     fn check_route_exists(&self, config: &PolicyRouteConfig) -> Result<bool> {
         let output = Command::new("ip")
-            .args(&build_route_show_args(config.table))
+            .args(build_route_show_args(config.table))
             .output()
             .wrap_err("Failed to execute ip route show")?;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -126,7 +131,7 @@ impl PolicyRouteManager {
 
     fn route_line_in_table(&self, route_line: &str, table: u32) -> Result<bool> {
         let output = Command::new("ip")
-            .args(&build_route_show_args(table))
+            .args(build_route_show_args(table))
             .output()?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         Ok(route_line_matches_table(&stdout, route_line))
@@ -143,7 +148,7 @@ impl PolicyRouteManager {
     pub fn install(&self, config: &PolicyRouteConfig) -> Result<()> {
         if !self.check_route_exists(config)? {
             let status = Command::new("ip")
-                .args(&build_route_add_args(config))
+                .args(build_route_add_args(config))
                 .status()
                 .wrap_err("Failed to execute ip route add")?;
             if !status.success() {
@@ -153,7 +158,7 @@ impl PolicyRouteManager {
 
         if !self.check_rule_exists(config)? {
             let status = Command::new("ip")
-                .args(&build_rule_add_args(config))
+                .args(build_rule_add_args(config))
                 .status()
                 .wrap_err("Failed to execute ip rule add")?;
             if !status.success() {
@@ -178,8 +183,12 @@ impl PolicyRouteManager {
     }
 
     pub fn remove(&self, config: &PolicyRouteConfig) -> Result<()> {
-        let _ = Command::new("ip").args(&build_rule_del_args(config)).status();
-        let _ = Command::new("ip").args(&build_route_del_args(config)).status();
+        let _ = Command::new("ip")
+            .args(build_rule_del_args(config))
+            .status();
+        let _ = Command::new("ip")
+            .args(build_route_del_args(config))
+            .status();
         Ok(())
     }
 
@@ -261,19 +270,28 @@ mod tests {
     #[test]
     fn route_line_matches_table_exact_match() {
         let output = "10.10.10.0/24 dev vmbr1 proto kernel scope link src 10.10.10.1\n";
-        assert!(route_line_matches_table(output, "10.10.10.0/24 dev vmbr1 proto kernel scope link src 10.10.10.1"));
+        assert!(route_line_matches_table(
+            output,
+            "10.10.10.0/24 dev vmbr1 proto kernel scope link src 10.10.10.1"
+        ));
     }
 
     #[test]
     fn route_line_matches_table_trimmed_match() {
         let output = "  10.10.10.0/24 dev vmbr1 proto kernel scope link src 10.10.10.1  \n";
-        assert!(route_line_matches_table(output, "10.10.10.0/24 dev vmbr1 proto kernel scope link src 10.10.10.1"));
+        assert!(route_line_matches_table(
+            output,
+            "10.10.10.0/24 dev vmbr1 proto kernel scope link src 10.10.10.1"
+        ));
     }
 
     #[test]
     fn route_line_matches_table_no_match() {
         let output = "10.10.20.0/24 dev vmbr2 proto kernel scope link src 10.10.20.1\n";
-        assert!(!route_line_matches_table(output, "10.10.10.0/24 dev vmbr1 proto kernel scope link src 10.10.10.1"));
+        assert!(!route_line_matches_table(
+            output,
+            "10.10.10.0/24 dev vmbr1 proto kernel scope link src 10.10.10.1"
+        ));
     }
 
     // ── filter_cloneable_routes ──
@@ -319,7 +337,18 @@ mod tests {
     fn route_add_args_format() {
         let cfg = test_config();
         let args = build_route_add_args(&cfg);
-        assert_eq!(args, vec!["route", "add", "default", "via", "192.168.1.1", "table", "100"]);
+        assert_eq!(
+            args,
+            vec![
+                "route",
+                "add",
+                "default",
+                "via",
+                "192.168.1.1",
+                "table",
+                "100"
+            ]
+        );
     }
 
     // ── build_rule_add_args ──
@@ -328,7 +357,10 @@ mod tests {
     fn rule_add_args_format() {
         let cfg = test_config();
         let args = build_rule_add_args(&cfg);
-        assert_eq!(args, vec!["rule", "add", "from", "10.0.0.1", "table", "100"]);
+        assert_eq!(
+            args,
+            vec!["rule", "add", "from", "10.0.0.1", "table", "100"]
+        );
     }
 
     // ── build_rule_del_args ──
@@ -337,7 +369,10 @@ mod tests {
     fn rule_del_args_format() {
         let cfg = test_config();
         let args = build_rule_del_args(&cfg);
-        assert_eq!(args, vec!["rule", "del", "from", "10.0.0.1", "table", "100"]);
+        assert_eq!(
+            args,
+            vec!["rule", "del", "from", "10.0.0.1", "table", "100"]
+        );
     }
 
     // ── build_route_del_args ──
@@ -346,7 +381,18 @@ mod tests {
     fn route_del_args_format() {
         let cfg = test_config();
         let args = build_route_del_args(&cfg);
-        assert_eq!(args, vec!["route", "del", "default", "via", "192.168.1.1", "table", "100"]);
+        assert_eq!(
+            args,
+            vec![
+                "route",
+                "del",
+                "default",
+                "via",
+                "192.168.1.1",
+                "table",
+                "100"
+            ]
+        );
     }
 
     // ── build_route_show_args ──

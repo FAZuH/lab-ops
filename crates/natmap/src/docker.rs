@@ -30,9 +30,8 @@ fn resolve_host_ips(host_ip: &str) -> Vec<&str> {
 
 /// Parses a Docker container port/protocol string (e.g. `"80/tcp"`).
 fn parse_container_port_proto(s: &str) -> Option<(u16, TransportProtocol)> {
-    let mut parts = s.splitn(2, '/');
-    let port_str = parts.next()?;
-    let proto_str = parts.next()?;
+    let (port_str, proto_str) = s.split_once('/')?;
+
     let port = port_str.parse().ok()?;
     let proto = proto_str.to_lowercase().parse().ok()?;
     Some((port, proto))
@@ -92,11 +91,7 @@ pub async fn get_port_mappings(docker: &Docker, c_id: &str) -> Result<Vec<Docker
         let container_addr = SocketAddr::new(c_ip, c_port);
 
         for bind in bindings {
-            let Some(host_port) = bind
-                .host_port
-                .as_deref()
-                .and_then(parse_host_port)
-            else {
+            let Some(host_port) = bind.host_port.as_deref().and_then(parse_host_port) else {
                 continue;
             };
 

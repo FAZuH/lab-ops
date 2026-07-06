@@ -245,8 +245,9 @@ impl NatmapClient {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::str::FromStr;
+
+    use super::*;
 
     // ── build_mapping_spec ──
 
@@ -264,14 +265,24 @@ mod tests {
 
     #[test]
     fn mapping_spec_no_host_ip_with_target() {
-        let spec = build_mapping_spec(None, 8080, 80, TransportProtocol::Udp, Some("192.168.1.100"));
+        let spec = build_mapping_spec(
+            None,
+            8080,
+            80,
+            TransportProtocol::Udp,
+            Some("192.168.1.100"),
+        );
         assert_eq!(spec, "8080:192.168.1.100:80/udp");
     }
 
     #[test]
     fn mapping_spec_with_host_ip_and_target() {
         let spec = build_mapping_spec(
-            Some("10.0.0.1"), 8443, 443, TransportProtocol::Tcp, Some("10.0.0.2"),
+            Some("10.0.0.1"),
+            8443,
+            443,
+            TransportProtocol::Tcp,
+            Some("10.0.0.2"),
         );
         assert_eq!(spec, "10.0.0.1:8443:10.0.0.2:443/tcp");
     }
