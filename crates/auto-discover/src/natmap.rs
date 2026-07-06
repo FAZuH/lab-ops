@@ -14,6 +14,40 @@ use lab_ops_natmap::cli::Cli;
 use lab_ops_natmap::cli::Command as NatmapCommand;
 use lab_ops_natmap::cli::Docker;
 
+// ── Pure helpers (testable without natmap daemon) ──
+
+/// Builds a Docker mapping spec string from its components.
+///
+/// Format follows Docker's `-p` syntax:
+/// - 4 parts: `host_ip:host_port:target_ip:container_port/proto`
+/// - 3 parts: `host_ip:host_port:container_port/proto` or `host_port:target_ip:container_port/proto`
+/// - 2 parts: `host_port:container_port/proto`
+fn build_mapping_spec(
+    host_ip: Option<&str>,
+    host_port: u16,
+    container_port: u16,
+    proto: TransportProtocol,
+    target_ip: Option<&str>,
+) -> String {
+    match (host_ip, target_ip) {
+        (Some(ip), Some(tip)) => format!("{ip}:{host_port}:{tip}:{container_port}/{proto}"),
+        (Some(ip), None) => format!("{ip}:{host_port}:{container_port}/{proto}"),
+        (None, Some(tip)) => format!("{host_port}:{tip}:{container_port}/{proto}"),
+        (None, None) => format!("{host_port}:{container_port}/{proto}"),
+    }
+}
+
+/// Parses `docker inspect` output to extract a container's first network IP.
+fn parse_docker_inspect_output(output: &str) -> Result<IpAddr> {
+    let ip_str = output.trim();
+    if ip_str.is_empty() {
+        bail!("no IP address found for container");
+    }
+    ip_str
+        .parse()
+        .wrap_err_with(|| format!("invalid IP from docker inspect: {ip_str}"))
+}
+
 /// Client for the natmap daemon over its Unix socket.
 #[derive(Debug)]
 pub struct NatmapClient {
@@ -135,14 +169,7 @@ impl NatmapClient {
         proto: TransportProtocol,
         target_ip: Option<&str>,
     ) -> Result<()> {
-        let spec = match (host_ip, target_ip) {
-            (Some(ip), Some(tip)) => {
-                format!("{ip}:{host_port}:{tip}:{container_port}/{proto}")
-            }
-            (Some(ip), None) => format!("{ip}:{host_port}:{container_port}/{proto}"),
-            (None, Some(tip)) => format!("{host_port}:{tip}:{container_port}/{proto}"),
-            (None, None) => format!("{host_port}:{container_port}/{proto}"),
-        };
+        let spec = build_mapping_spec(host_ip, host_port, container_port, proto, target_ip);
         let cli = Cli {
             socket: self.socket.clone().into(),
             json: false,
@@ -212,14 +239,87 @@ impl NatmapClient {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let ip_str = stdout.trim();
+        parse_docker_inspect_output(&stdout)
+    }
+}
 
-        if ip_str.is_empty() {
-            bail!("no IP address found for container");
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
 
-        ip_str
-            .parse()
-            .wrap_err_with(|| format!("invalid IP from docker inspect: {ip_str}"))
+    // ── build_mapping_spec ──
+
+    #[test]
+    fn mapping_spec_no_host_ip_no_target() {
+        let spec = build_mapping_spec(None, 8080, 80, TransportProtocol::Tcp, None);
+        assert_eq!(spec, "8080:80/tcp");
+    }
+
+    #[test]
+    fn mapping_spec_with_host_ip_no_target() {
+        let spec = build_mapping_spec(Some("10.0.0.1"), 8080, 80, TransportProtocol::Tcp, None);
+        assert_eq!(spec, "10.0.0.1:8080:80/tcp");
+    }
+
+    #[test]
+    fn mapping_spec_no_host_ip_with_target() {
+        let spec = build_mapping_spec(None, 8080, 80, TransportProtocol::Udp, Some("192.168.1.100"));
+        assert_eq!(spec, "8080:192.168.1.100:80/udp");
+    }
+
+    #[test]
+    fn mapping_spec_with_host_ip_and_target() {
+        let spec = build_mapping_spec(
+            Some("10.0.0.1"), 8443, 443, TransportProtocol::Tcp, Some("10.0.0.2"),
+        );
+        assert_eq!(spec, "10.0.0.1:8443:10.0.0.2:443/tcp");
+    }
+
+    #[test]
+    fn mapping_spec_ipv6_host() {
+        let spec = build_mapping_spec(Some("2001:db8::1"), 53, 53, TransportProtocol::Udp, None);
+        assert_eq!(spec, "2001:db8::1:53:53/udp");
+    }
+
+    #[test]
+    fn mapping_spec_port_zero() {
+        let spec = build_mapping_spec(None, 0, 0, TransportProtocol::Tcp, None);
+        assert_eq!(spec, "0:0/tcp");
+    }
+
+    // ── parse_docker_inspect_output ──
+
+    #[test]
+    fn inspect_output_valid_ipv4() {
+        let ip = parse_docker_inspect_output("172.17.0.2\n").unwrap();
+        assert_eq!(ip, IpAddr::from_str("172.17.0.2").unwrap());
+    }
+
+    #[test]
+    fn inspect_output_valid_ipv6() {
+        let ip = parse_docker_inspect_output("2001:db8::1\n").unwrap();
+        assert_eq!(ip, IpAddr::from_str("2001:db8::1").unwrap());
+    }
+
+    #[test]
+    fn inspect_output_trimmed() {
+        let ip = parse_docker_inspect_output("  10.0.0.5  \n").unwrap();
+        assert_eq!(ip, IpAddr::from_str("10.0.0.5").unwrap());
+    }
+
+    #[test]
+    fn inspect_output_empty_errors() {
+        assert!(parse_docker_inspect_output("").is_err());
+    }
+
+    #[test]
+    fn inspect_output_whitespace_only_errors() {
+        assert!(parse_docker_inspect_output("  \n  ").is_err());
+    }
+
+    #[test]
+    fn inspect_output_invalid_ip_errors() {
+        assert!(parse_docker_inspect_output("not-an-ip").is_err());
     }
 }

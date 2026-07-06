@@ -59,8 +59,12 @@ fn build_dnat_rule_args(map: &DockerPortMap) -> Vec<String> {
     let req = &map.request;
     let host_ip = req.host_addr.ip();
     let mut args = vec![
-        "-t".into(), "nat".into(), "-A".into(), NATMAP.into(),
-        "-p".into(), req.proto.to_string(),
+        "-t".into(),
+        "nat".into(),
+        "-A".into(),
+        NATMAP.into(),
+        "-p".into(),
+        req.proto.to_string(),
     ];
     if !host_ip.is_unspecified() {
         args.push("-d".into());
@@ -69,10 +73,13 @@ fn build_dnat_rule_args(map: &DockerPortMap) -> Vec<String> {
     args.extend([
         "--dport".into(),
         req.host_addr.port().to_string(),
-        "-j".into(), "DNAT".into(),
+        "-j".into(),
+        "DNAT".into(),
         "--to-destination".into(),
         req.container_addr.to_string(),
-        "-m".into(), "comment".into(), "--comment".into(),
+        "-m".into(),
+        "comment".into(),
+        "--comment".into(),
         map.rule_comment.clone(),
     ]);
     args
@@ -82,12 +89,21 @@ fn build_dnat_rule_args(map: &DockerPortMap) -> Vec<String> {
 fn build_forward_accept_args(map: &DockerPortMap) -> Vec<String> {
     let req = &map.request;
     vec![
-        "-t".into(), "filter".into(), "-A".into(), NATMAP.into(),
-        "-d".into(), req.container_addr.ip().to_string(),
-        "-p".into(), req.proto.to_string(),
-        "--dport".into(), req.container_addr.port().to_string(),
-        "-j".into(), "ACCEPT".into(),
-        "-m".into(), "comment".into(), "--comment".into(),
+        "-t".into(),
+        "filter".into(),
+        "-A".into(),
+        NATMAP.into(),
+        "-d".into(),
+        req.container_addr.ip().to_string(),
+        "-p".into(),
+        req.proto.to_string(),
+        "--dport".into(),
+        req.container_addr.port().to_string(),
+        "-j".into(),
+        "ACCEPT".into(),
+        "-m".into(),
+        "comment".into(),
+        "--comment".into(),
         map.rule_comment.clone(),
     ]
 }
@@ -96,13 +112,23 @@ fn build_forward_accept_args(map: &DockerPortMap) -> Vec<String> {
 fn build_masquerade_args(map: &DockerPortMap) -> Vec<String> {
     let req = &map.request;
     vec![
-        "-t".into(), "nat".into(), "-A".into(), "POSTROUTING".into(),
-        "-s".into(), req.container_addr.ip().to_string(),
-        "-d".into(), req.container_addr.ip().to_string(),
-        "-p".into(), req.proto.to_string(),
-        "--dport".into(), req.container_addr.port().to_string(),
-        "-j".into(), "MASQUERADE".into(),
-        "-m".into(), "comment".into(), "--comment".into(),
+        "-t".into(),
+        "nat".into(),
+        "-A".into(),
+        "POSTROUTING".into(),
+        "-s".into(),
+        req.container_addr.ip().to_string(),
+        "-d".into(),
+        req.container_addr.ip().to_string(),
+        "-p".into(),
+        req.proto.to_string(),
+        "--dport".into(),
+        req.container_addr.port().to_string(),
+        "-j".into(),
+        "MASQUERADE".into(),
+        "-m".into(),
+        "comment".into(),
+        "--comment".into(),
         map.rule_comment.clone(),
     ]
 }
@@ -111,13 +137,23 @@ fn build_masquerade_args(map: &DockerPortMap) -> Vec<String> {
 fn build_output_dnat_args(map: &DockerPortMap, output_dst: &str) -> Vec<String> {
     let req = &map.request;
     vec![
-        "-t".into(), "nat".into(), "-A".into(), "OUTPUT".into(),
-        "-d".into(), output_dst.into(),
-        "-p".into(), req.proto.to_string(),
-        "--dport".into(), req.host_addr.port().to_string(),
-        "-j".into(), "DNAT".into(),
-        "--to-destination".into(), req.container_addr.to_string(),
-        "-m".into(), "comment".into(), "--comment".into(),
+        "-t".into(),
+        "nat".into(),
+        "-A".into(),
+        "OUTPUT".into(),
+        "-d".into(),
+        output_dst.into(),
+        "-p".into(),
+        req.proto.to_string(),
+        "--dport".into(),
+        req.host_addr.port().to_string(),
+        "-j".into(),
+        "DNAT".into(),
+        "--to-destination".into(),
+        req.container_addr.to_string(),
+        "-m".into(),
+        "comment".into(),
+        "--comment".into(),
         map.rule_comment.clone(),
     ]
 }
@@ -132,15 +168,29 @@ fn build_loopback_masq_args(map: &DockerPortMap) -> Option<Vec<String>> {
     if !needs_loopback_masq {
         return None;
     }
-    let loopback_src = if map.request.is_ipv6() { "::1/128" } else { "127.0.0.0/8" };
+    let loopback_src = if map.request.is_ipv6() {
+        "::1/128"
+    } else {
+        "127.0.0.0/8"
+    };
     Some(vec![
-        "-t".into(), "nat".into(), "-A".into(), "POSTROUTING".into(),
-        "-s".into(), loopback_src.into(),
-        "-d".into(), req.container_addr.ip().to_string(),
-        "-p".into(), req.proto.to_string(),
-        "--dport".into(), req.container_addr.port().to_string(),
-        "-j".into(), "MASQUERADE".into(),
-        "-m".into(), "comment".into(), "--comment".into(),
+        "-t".into(),
+        "nat".into(),
+        "-A".into(),
+        "POSTROUTING".into(),
+        "-s".into(),
+        loopback_src.into(),
+        "-d".into(),
+        req.container_addr.ip().to_string(),
+        "-p".into(),
+        req.proto.to_string(),
+        "--dport".into(),
+        req.container_addr.port().to_string(),
+        "-j".into(),
+        "MASQUERADE".into(),
+        "-m".into(),
+        "comment".into(),
+        "--comment".into(),
         map.rule_comment.clone(),
     ])
 }
@@ -158,7 +208,12 @@ fn build_static_dnat_prerouting_args(config: &DnatConfig) -> Vec<String> {
     args.push("-p".into());
     args.push(config.proto.to_lowercase().into());
     if config.ports.contains(',') {
-        args.extend(["-m".into(), "multiport".into(), "--dports".into(), config.ports.clone()]);
+        args.extend([
+            "-m".into(),
+            "multiport".into(),
+            "--dports".into(),
+            config.ports.clone(),
+        ]);
     } else {
         args.extend(["--dport".into(), config.ports.clone()]);
     }
@@ -181,7 +236,12 @@ fn build_static_dnat_forward_args(config: &DnatConfig) -> Vec<String> {
     args.push("-d".into());
     args.push(config.int_ip.clone());
     if config.ports.contains(',') {
-        args.extend(["-m".into(), "multiport".into(), "--dports".into(), config.ports.clone()]);
+        args.extend([
+            "-m".into(),
+            "multiport".into(),
+            "--dports".into(),
+            config.ports.clone(),
+        ]);
     } else {
         args.extend(["--dport".into(), config.ports.clone()]);
     }
@@ -194,12 +254,22 @@ fn build_static_dnat_forward_args(config: &DnatConfig) -> Vec<String> {
 fn build_snat_args(config: &SnatConfig) -> Vec<String> {
     let comment = config.rule_comment();
     vec![
-        "-t".into(), "nat".into(), "-A".into(), "POSTROUTING".into(),
-        "-s".into(), config.int_ip.clone(),
-        "-o".into(), config.ext_if.clone(),
-        "-j".into(), "SNAT".into(),
-        "--to-source".into(), config.ext_ip.clone(),
-        "-m".into(), "comment".into(), "--comment".into(), comment,
+        "-t".into(),
+        "nat".into(),
+        "-A".into(),
+        "POSTROUTING".into(),
+        "-s".into(),
+        config.int_ip.clone(),
+        "-o".into(),
+        config.ext_if.clone(),
+        "-j".into(),
+        "SNAT".into(),
+        "--to-source".into(),
+        config.ext_ip.clone(),
+        "-m".into(),
+        "comment".into(),
+        "--comment".into(),
+        comment,
     ]
 }
 
@@ -211,18 +281,33 @@ fn build_hairpin_prerouting_args(config: &HairpinConfig) -> Option<Vec<String>> 
     }
     let comment = config.rule_comment();
     let mut args: Vec<String> = vec![
-        "-t".into(), "nat".into(), "-A".into(), "PREROUTING".into(),
-        "-s".into(), config.int_ip.clone(),
-        "-d".into(), config.ext_ip.clone(),
+        "-t".into(),
+        "nat".into(),
+        "-A".into(),
+        "PREROUTING".into(),
+        "-s".into(),
+        config.int_ip.clone(),
+        "-d".into(),
+        config.ext_ip.clone(),
     ];
     args.push("-p".into());
     args.push(config.proto.to_lowercase().into());
     if config.ports.contains(',') {
-        args.extend(["-m".into(), "multiport".into(), "--dports".into(), config.ports.clone()]);
+        args.extend([
+            "-m".into(),
+            "multiport".into(),
+            "--dports".into(),
+            config.ports.clone(),
+        ]);
     } else {
         args.extend(["--dport".into(), config.ports.clone()]);
     }
-    args.extend(["-j".into(), "DNAT".into(), "--to-destination".into(), config.int_ip.clone()]);
+    args.extend([
+        "-j".into(),
+        "DNAT".into(),
+        "--to-destination".into(),
+        config.int_ip.clone(),
+    ]);
     args.extend(["-m".into(), "comment".into(), "--comment".into(), comment]);
     Some(args)
 }
@@ -232,14 +317,24 @@ fn build_hairpin_postrouting_args(config: &HairpinConfig) -> Vec<String> {
     let comment = config.rule_comment();
     let src = config.lan_cidr.as_deref().unwrap_or("0.0.0.0/0");
     let mut args: Vec<String> = vec![
-        "-t".into(), "nat".into(), "-A".into(), "POSTROUTING".into(),
-        "-s".into(), src.into(),
-        "-d".into(), config.int_ip.clone(),
+        "-t".into(),
+        "nat".into(),
+        "-A".into(),
+        "POSTROUTING".into(),
+        "-s".into(),
+        src.into(),
+        "-d".into(),
+        config.int_ip.clone(),
     ];
     args.push("-p".into());
     args.push(config.proto.to_lowercase().into());
     if config.ports.contains(',') {
-        args.extend(["-m".into(), "multiport".into(), "--dports".into(), config.ports.clone()]);
+        args.extend([
+            "-m".into(),
+            "multiport".into(),
+            "--dports".into(),
+            config.ports.clone(),
+        ]);
     } else {
         args.extend(["--dport".into(), config.ports.clone()]);
     }
@@ -305,12 +400,12 @@ impl IptablesManager {
         tracing::debug!(mapping = ?map, "installing mapping");
         let cmd = self.cmd_for(map.request.is_ipv6());
 
-        self.run(cmd, &build_dnat_rule_args(map))?;
-        self.run(cmd, &build_forward_accept_args(map))?;
-        self.run(cmd, &build_masquerade_args(map))?;
+        self.run(cmd, build_dnat_rule_args(map))?;
+        self.run(cmd, build_forward_accept_args(map))?;
+        self.run(cmd, build_masquerade_args(map))?;
 
         let output_dst = output_dnat_destination(map.request.host_addr.ip(), map.request.is_ipv6());
-        self.run(cmd, &build_output_dnat_args(map, &output_dst))?;
+        self.run(cmd, build_output_dnat_args(map, &output_dst))?;
 
         if let Some(args) = build_loopback_masq_args(map) {
             self.run(cmd, &args)?;
@@ -340,8 +435,8 @@ impl IptablesManager {
 
     /// Installs a static DNAT rule (PREROUTING + FORWARD ACCEPT).
     pub fn install_dnat(&self, config: &DnatConfig) -> Result<()> {
-        self.run_success("iptables", &build_static_dnat_prerouting_args(config))?;
-        self.run_success("iptables", &build_static_dnat_forward_args(config))?;
+        self.run_success("iptables", build_static_dnat_prerouting_args(config))?;
+        self.run_success("iptables", build_static_dnat_forward_args(config))?;
         Ok(())
     }
 
@@ -357,7 +452,7 @@ impl IptablesManager {
 
     /// Installs a static SNAT (source NAT) rule in the POSTROUTING chain.
     pub fn install_snat(&self, config: &SnatConfig) -> Result<()> {
-        self.run_success("iptables", &build_snat_args(config))?;
+        self.run_success("iptables", build_snat_args(config))?;
         Ok(())
     }
 
@@ -384,7 +479,7 @@ impl IptablesManager {
         if let Some(args) = build_hairpin_prerouting_args(config) {
             self.run_success("iptables", &args)?;
         }
-        self.run_success("iptables", &build_hairpin_postrouting_args(config))?;
+        self.run_success("iptables", build_hairpin_postrouting_args(config))?;
         Ok(())
     }
 
@@ -560,13 +655,22 @@ impl IptablesManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::models::{DockerPortMapRequest, TransportProtocol};
     use std::net::IpAddr;
     use std::net::SocketAddr;
     use std::str::FromStr;
 
-    fn test_dockermap(host_ip: &str, host_port: u16, ctn_ip: &str, ctn_port: u16, proto: TransportProtocol, id: u64) -> DockerPortMap {
+    use super::*;
+    use crate::models::DockerPortMapRequest;
+    use crate::models::TransportProtocol;
+
+    fn test_dockermap(
+        host_ip: &str,
+        host_port: u16,
+        ctn_ip: &str,
+        ctn_port: u16,
+        proto: TransportProtocol,
+        id: u64,
+    ) -> DockerPortMap {
         let req = DockerPortMapRequest {
             host_addr: SocketAddr::new(IpAddr::from_str(host_ip).unwrap(), host_port),
             container_addr: SocketAddr::new(IpAddr::from_str(ctn_ip).unwrap(), ctn_port),
@@ -592,7 +696,14 @@ mod tests {
 
     #[test]
     fn dnat_args_specified_ip_includes_d() {
-        let m = test_dockermap("192.168.1.100", 443, "10.0.0.2", 443, TransportProtocol::Tcp, 2);
+        let m = test_dockermap(
+            "192.168.1.100",
+            443,
+            "10.0.0.2",
+            443,
+            TransportProtocol::Tcp,
+            2,
+        );
         let args = build_dnat_rule_args(&m);
         assert!(args.contains(&"-d".into()));
         assert!(args.contains(&"192.168.1.100".into()));
@@ -610,7 +721,14 @@ mod tests {
 
     #[test]
     fn dnat_args_includes_comment() {
-        let m = test_dockermap("10.0.0.1", 3000, "10.0.0.2", 3000, TransportProtocol::Tcp, 4);
+        let m = test_dockermap(
+            "10.0.0.1",
+            3000,
+            "10.0.0.2",
+            3000,
+            TransportProtocol::Tcp,
+            4,
+        );
         let args = build_dnat_rule_args(&m);
         assert!(args.contains(&"--comment".into()));
         assert!(args.contains(&m.rule_comment));
@@ -632,13 +750,24 @@ mod tests {
 
     #[test]
     fn masquerade_args_matches_ctn_ip() {
-        let m = test_dockermap("0.0.0.0", 80, "172.17.0.4", 25565, TransportProtocol::Udp, 6);
+        let m = test_dockermap(
+            "0.0.0.0",
+            80,
+            "172.17.0.4",
+            25565,
+            TransportProtocol::Udp,
+            6,
+        );
         let args = build_masquerade_args(&m);
         assert!(args.contains(&"MASQUERADE".into()));
         // Both -s and -d should match container IP
         let s_idx = args.iter().position(|a| a == "-s").unwrap();
         let d_idx = args.iter().position(|a| a == "-d").unwrap();
-        assert_eq!(args[s_idx + 1], args[d_idx + 1], "-s and -d should have same IP");
+        assert_eq!(
+            args[s_idx + 1],
+            args[d_idx + 1],
+            "-s and -d should have same IP"
+        );
     }
 
     // ── build_output_dnat_args ──
