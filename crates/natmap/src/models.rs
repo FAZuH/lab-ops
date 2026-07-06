@@ -11,6 +11,19 @@ use serde::Deserialize;
 use serde::Serialize;
 
 /// Describes the desired port mapping between a host and a container.
+///
+/// ```
+/// use std::net::{IpAddr, SocketAddr};
+/// use std::str::FromStr;
+/// use lab_ops_natmap::models::{DockerPortMapRequest, TransportProtocol};
+///
+/// let req = DockerPortMapRequest {
+///     host_addr: SocketAddr::new(IpAddr::from_str("::").unwrap(), 80),
+///     container_addr: SocketAddr::new(IpAddr::from_str("::1").unwrap(), 80),
+///     proto: TransportProtocol::Tcp,
+/// };
+/// assert!(req.is_ipv6());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DockerPortMapRequest {
     pub host_addr: SocketAddr,
@@ -44,6 +57,21 @@ impl DockerPortMap {
     /// Creates a new [`DockerPortMap`] with a generated rule comment.
     ///
     /// The comment format is `natmap:<container_id>:<host_port>`.
+    ///
+    /// ```
+    /// use std::net::{IpAddr, SocketAddr};
+    /// use std::str::FromStr;
+    /// use lab_ops_natmap::models::{DockerPortMap, DockerPortMapRequest, TransportProtocol};
+    ///
+    /// let req = DockerPortMapRequest {
+    ///     host_addr: SocketAddr::new(IpAddr::from_str("0.0.0.0").unwrap(), 8080),
+    ///     container_addr: SocketAddr::new(IpAddr::from_str("172.17.0.2").unwrap(), 80),
+    ///     proto: TransportProtocol::Tcp,
+    /// };
+    /// let m = DockerPortMap::new(1, req, "abc123".into(), "my-nginx".into());
+    /// assert_eq!(m.rule_comment, "natmap:abc123:8080");
+    /// assert_eq!(m.container_id, "abc123");
+    /// ```
     pub fn new(
         id: u64,
         request: DockerPortMapRequest,

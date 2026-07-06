@@ -101,7 +101,7 @@ impl AppState {
 }
 
 /// JSON error response returned by the daemon API on failures.
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct ErrorResponse {
     pub error: String,
 }
