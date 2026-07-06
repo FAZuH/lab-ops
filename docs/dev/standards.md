@@ -468,13 +468,4 @@ These inconsistencies exist in the codebase and should be addressed in future re
 
 | Item | Priority | Effort |
 |---|---|---|
-| Rename `NatMapCommand` → `Command`, `Commands` → `Command` | Low | Medium |
-| Add `// --- Section ---` delimiters to `natmap/src/api.rs` | Low | Small |
 | Add `#[cfg(test)] mod tests` to every untested module | Medium | Large |
-| Standardize dependency version specifiers across crates | Low | Small |
-| Move shared deps to `[workspace.dependencies]` | Low | Medium |
-
-| Add doc comments to `natmap/src/api.rs` route handlers | Medium | Medium |
-| Add doc comments to `auto-discover/src/cli.rs` public fns | Low | Small |
-| Convert `auto-discover/tests/integration.sh` to Rust integration tests | Low | Large |
-| Fix `natmap/tests/cli.rs` parse_mapping duplication | Low | Small |
