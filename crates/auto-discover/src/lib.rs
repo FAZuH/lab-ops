@@ -1,7 +1,7 @@
 //! Service discovery daemon for homelab clusters.
 //!
 //! Watches Docker container events, manages port forwarding via `lab-ops natmap`,
-//! registers services with Consul, and generates nginx configs stored in Consul KV.
+//! registers services with Consul.
 //!
 //! # Subcommands
 //!
@@ -16,11 +16,9 @@
 
 pub mod cli;
 mod config;
-mod consts;
 mod consul;
 mod daemon;
 mod docker;
 mod forwarding;
 mod model;
 mod natmap;
-mod nginx_daemon;

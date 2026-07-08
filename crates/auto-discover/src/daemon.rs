@@ -1,9 +1,7 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use color_eyre::Result;
 use color_eyre::eyre::WrapErr;
-use color_eyre::eyre::bail;
 use lab_ops_lab_lib::port::PortAssignments;
 use sha2::Digest;
 use sha2::Sha256;
@@ -128,22 +126,10 @@ impl DiscoveryDaemon {
             .map_err(|e| tracing::warn!(error = %e, "failed to save port assignments"))
             .ok();
 
-        let stale_ids = self
+        let _ = self
             .consul
             .deregister_stale_services(&server_name, &current_service_ids)
-            .await
-            .unwrap_or_default();
-        for id in &stale_ids {
-            if let Err(e) = self.consul.delete_nginx_config_kv(id).await {
-                tracing::warn!(service.id = %id, error = %e, "failed to delete nginx config KV");
-            }
-        }
-        if !stale_ids.is_empty() {
-            tracing::info!(
-                services.count = stale_ids.len(),
-                "deregistered stale services"
-            );
-        }
+            .await;
 
         tracing::info!(
             services.active = current_service_ids.len(),
@@ -231,14 +217,6 @@ impl DiscoveryDaemon {
             .register_service(&registration)
             .await
             .wrap_err("Consul API error")?;
-
-        if is_rproxy_or_forwarding_with_template(&resolved.port_type)
-            && let Err(e) = self
-                .store_nginx_config(resolved, &registration.id, host_port, &consul_ip)
-                .await
-        {
-            tracing::warn!(error = %e, "failed to store nginx config");
-        }
 
         Ok(Some(registration.id))
     }
@@ -329,14 +307,6 @@ impl DiscoveryDaemon {
             .register_service(&registration)
             .await
             .wrap_err("Consul API error")?;
-
-        if is_rproxy_or_forwarding_with_template(&resolved.port_type)
-            && let Err(e) = self
-                .store_nginx_config(resolved, &registration.id, host_port, &consul_ip)
-                .await
-        {
-            tracing::warn!(error = %e, "failed to store nginx config");
-        }
 
         Ok(Some(registration.id))
     }
@@ -459,22 +429,13 @@ impl DiscoveryDaemon {
             .wrap_err("Consul API error")?;
 
         for svc in &services {
-            let id = match svc.get("ID").and_then(|v| v.as_str()) {
-                Some(id) => id,
-                None => continue,
-            };
-
-            if let Err(e) = self.consul.delete_nginx_config_kv(id).await {
-                tracing::warn!(service.id = %id, error = %e, "failed to delete nginx config KV");
-            }
-
             if let Some(meta) = svc.get("Meta").and_then(|v| v.as_object())
                 && meta.get("preserve_src_ip").and_then(|v| v.as_str()) == Some("true")
                 && let Some(gateway) = meta.get("preserve_src_ip_gateway").and_then(|v| v.as_str())
                 && let Some(src_ip) = meta.get("preserve_src_ip_src").and_then(|v| v.as_str())
                 && let Err(e) = self.natmap.policy_route(src_ip, gateway, 100, true).await
             {
-                tracing::warn!(service.id = %id, error = %e, "failed to remove policy route");
+                tracing::warn!(error = %e, "failed to remove policy route");
             }
         }
 
@@ -512,144 +473,6 @@ impl DiscoveryDaemon {
         let result = hasher.finalize();
         hex::encode(&result[..16])
     }
-
-    async fn store_nginx_config(
-        &self,
-        service: &ResolvedService,
-        service_id: &str,
-        host_port: u16,
-        consul_ip: &str,
-    ) -> Result<()> {
-        let (template, proxy_ip, nginx_generator, preprocess, postprocess) =
-            match &service.port_type {
-                ResolvedPortType::RProxyLocal {
-                    template,
-                    proxy_ip,
-                    nginx_generator,
-                    preprocess,
-                    postprocess,
-                    ..
-                }
-                | ResolvedPortType::RProxyRemote {
-                    template,
-                    proxy_ip,
-                    nginx_generator,
-                    preprocess,
-                    postprocess,
-                    ..
-                } => (template, proxy_ip, nginx_generator, preprocess, postprocess),
-                _ => {
-                    tracing::warn!(
-                        "store_nginx_config called for non-rproxy type {:?}, skipping",
-                        std::mem::discriminant(&service.port_type)
-                    );
-                    return Ok(());
-                }
-            };
-
-        let kv_prefix = if template.starts_with("TCP") {
-            "nginx-configs/streams"
-        } else {
-            "nginx-configs/sites"
-        };
-
-        let mut envs: HashMap<String, String> = HashMap::new();
-        envs.insert(
-            "AUTO_DISCOVER_SERVICE_NAME".into(),
-            service.service_name.clone(),
-        );
-        envs.insert("AUTO_DISCOVER_SERVICE_ID".into(), service_id.to_string());
-        envs.insert(
-            "AUTO_DISCOVER_DOMAIN".into(),
-            service.primary_domain().to_string(),
-        );
-
-        let domains = match &service.port_type {
-            ResolvedPortType::RProxyLocal { domains, .. }
-            | ResolvedPortType::RProxyRemote { domains, .. } => domains,
-            _ => {
-                tracing::warn!("store_nginx_config called for non-rproxy type, skipping");
-                return Ok(());
-            }
-        };
-        envs.insert("AUTO_DISCOVER_ALL_DOMAINS".into(), domains.join(" "));
-
-        if let Some(proxy_ip) = proxy_ip {
-            envs.insert("AUTO_DISCOVER_PROXY_IP".into(), proxy_ip.clone());
-        }
-        envs.insert("AUTO_DISCOVER_BIND_IP".into(), consul_ip.to_string());
-        envs.insert("AUTO_DISCOVER_HOST_PORT".into(), host_port.to_string());
-        envs.insert(
-            "AUTO_DISCOVER_CONTAINER_PORT".into(),
-            service.container_port.to_string(),
-        );
-        envs.insert("AUTO_DISCOVER_TEMPLATE".into(), template.clone());
-        envs.insert(
-            "AUTO_DISCOVER_PROTOCOL".into(),
-            service.protocol.to_string(),
-        );
-
-        for (k, v) in &service.extra {
-            envs.insert(format!("AUTO_DISCOVER_EXTRA_{k}"), v.clone());
-        }
-
-        let output = std::process::Command::new(nginx_generator)
-            .envs(&envs)
-            .output()?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::error!("Generator {} failed: stderr={}", nginx_generator, stderr);
-            bail!(
-                "generator {} failed for {}",
-                nginx_generator,
-                service.service_name
-            );
-        }
-
-        let mut config = String::from_utf8_lossy(&output.stdout).to_string();
-
-        if !preprocess.is_empty() {
-            let mut child = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(preprocess)
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::inherit())
-                .spawn()?;
-            let mut stdin = child
-                .stdin
-                .take()
-                .ok_or_else(|| color_eyre::eyre::eyre!("failed to take stdin"))?;
-            use std::io::Write;
-            stdin.write_all(config.as_bytes())?;
-            drop(stdin);
-            let result = child.wait_with_output()?;
-            if result.status.success() {
-                config = String::from_utf8_lossy(&result.stdout).to_string();
-            } else {
-                let stderr = String::from_utf8_lossy(&result.stderr);
-                tracing::warn!("Preprocess failed, using base config: {}", stderr);
-            }
-        }
-
-        let conf_key = format!("{kv_prefix}/{service_id}.conf");
-        self.consul
-            .put_kv(&conf_key, &config)
-            .await
-            .wrap_err("Consul API error")?;
-
-        if !postprocess.is_empty() {
-            let postproc_key = format!("{kv_prefix}/{service_id}.postproc");
-            self.consul
-                .put_kv(&postproc_key, postprocess)
-                .await
-                .wrap_err("Consul API error")?;
-        }
-
-        tracing::info!("Stored nginx config at {}", conf_key);
-        Ok(())
-    }
 }
 
 /// Match a container against a resolved service definition.
@@ -683,15 +506,6 @@ fn container_matches(container: &ContainerInfo, resolved: &ResolvedService) -> b
     }
 
     true
-}
-
-/// Check if the port type should trigger nginx config generation.
-fn is_rproxy_or_forwarding_with_template(port_type: &ResolvedPortType) -> bool {
-    match port_type {
-        ResolvedPortType::RProxyLocal { template, .. }
-        | ResolvedPortType::RProxyRemote { template, .. } => !template.is_empty(),
-        _ => false,
-    }
 }
 
 /// Resolve natmap bind IP from config.

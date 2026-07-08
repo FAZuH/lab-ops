@@ -2,7 +2,6 @@
 
 mod forwarding;
 mod local_services;
-mod nginx;
 mod port_binding;
 mod preserve_src_ip;
 mod recovery;
@@ -108,7 +107,7 @@ done
         services_yaml,
         "",
         extra_setup,
-        "--no-forwarding --no-nginx",
+        "--no-forwarding",
     )
 }
 
@@ -121,8 +120,6 @@ done
     let full_yaml = format!(
         r#"node:
   name: int-test-node
-defaults:
-  nginx_generator: /tmp/gen-nginx
 {defaults_yaml}
 {services_yaml}"#
     );
@@ -148,28 +145,6 @@ if ! kill -0 $! 2>/dev/null; then echo "FAIL: natmap daemon died" >&2; cat /tmp/
 cat > /tmp/discovery.yaml <<'YAMLEOF'
 {full_yaml}
 YAMLEOF
-
-cat > /tmp/gen-nginx <<'GENEOF'
-#!/bin/bash
-if [ -n "${{LAB_DISCOVERY_SERVICE_NAME:-}}" ]; then
-    echo "FAIL: LAB_DISCOVERY_ environment variables are set!" >&2
-    exit 1
-fi
-if [ -z "${{AUTO_DISCOVER_SERVICE_NAME:-}}" ]; then
-    echo "FAIL: AUTO_DISCOVER_ environment variables are NOT set!" >&2
-    exit 1
-fi
-cat <<EOF
-# Service: ${{AUTO_DISCOVER_SERVICE_NAME:-unknown}}
-server {{
-    server_name ${{AUTO_DISCOVER_DOMAIN:-_}};
-    listen ${{AUTO_DISCOVER_PROXY_IP:-127.0.0.1}}:80;
-    proxy_pass http://${{AUTO_DISCOVER_BIND_IP}}:${{AUTO_DISCOVER_HOST_PORT}}/;
-}}
-EOF
-GENEOF
-chmod +x /tmp/gen-nginx
-
 {extra_setup}
 
 lab-ops auto-discover daemon /tmp/discovery.yaml \

@@ -30,10 +30,6 @@ if [ "$FORWARDING" != "true" ]; then echo "FAIL: missing forwarding meta" >&2; e
 FWD_TYPE=$(echo "$SVC" | jq -r '.Meta.forwarding_type')
 if [ "$FWD_TYPE" != "local" ]; then echo "FAIL: expected forwarding_type=local, got $FWD_TYPE" >&2; exit 1; fi
 
-KEYS=$(curl -sf "$CONSUL_HTTP_ADDR/v1/kv/nginx-configs/?recurse=true" | jq -r '.[].Key // empty')
-MATCH=$(echo "$KEYS" | grep "it-svc-fwd-local" || true)
-if [ -n "$MATCH" ]; then echo "FAIL: forwarding-local should have no nginx KV config, got $MATCH" >&2; exit 1; fi
-
 echo "PASS: forwarding local bind_port=36000 with forwarding_type=local"
 {teardown}
 "#,
@@ -102,12 +98,6 @@ if [ "$RPROXY_TEMPLATE" != "HTTP_PROXY" ]; then echo "FAIL: expected template=HT
 RPROXY_FWD=$(echo "$RPROXY_META" | jq -r '.forwarding // "empty"')
 if [ "$RPROXY_FWD" != "empty" ]; then echo "FAIL: rproxylocal should not have forwarding meta" >&2; exit 1; fi
 
-# Verify nginx KV config exists (from rproxylocal, not forwardlocal)
-# KV keys use domain slug "fwd-local-tpl-test-local" in the service ID
-KEYS=$(curl -sf "$CONSUL_HTTP_ADDR/v1/kv/nginx-configs/?recurse=true" | jq -r '.[].Key // empty')
-MATCH=$(echo "$KEYS" | grep "fwd-local-tpl-test-local" || true)
-if [ -z "$MATCH" ]; then echo "FAIL: rproxylocal should have nginx KV config" >&2; exit 1; fi
-
 echo "PASS: forwardlocal + rproxylocal separate entries"
 {teardown}
 "#,
@@ -148,11 +138,6 @@ if [ "$FORWARDING" != "true" ]; then echo "FAIL: missing forwarding meta" >&2; e
 
 FWD_TYPE=$(echo "$META" | jq -r '.forwarding_type')
 if [ "$FWD_TYPE" != "local" ]; then echo "FAIL: expected forwarding_type=local, got $FWD_TYPE" >&2; exit 1; fi
-
-# Verify no nginx KV config (empty template)
-KEYS=$(curl -sf "$CONSUL_HTTP_ADDR/v1/kv/nginx-configs/?recurse=true" | jq -r '.[].Key // empty')
-MATCH=$(echo "$KEYS" | grep "it-local-fwd-local" || true)
-if [ -n "$MATCH" ]; then echo "FAIL: forwarding-local should have no nginx KV config, got $MATCH" >&2; exit 1; fi
 
 echo "PASS: local forwarding local at 10.99.99.99:50000 with forwarding_type=local"
 kill %3 %2 %1 2>/dev/null || true
@@ -328,7 +313,7 @@ echo "PASS: bound to $EXPECTED, ignored default 1.2.3.4"
             services_yaml,
             defaults_yaml,
             "",
-            "--no-forwarding --no-nginx"
+            "--no-forwarding"
         ),
         teardown = teardown(&[cname]),
         cname = cname,

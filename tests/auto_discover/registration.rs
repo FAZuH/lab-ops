@@ -20,20 +20,8 @@ services:
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-i" nginx:alpine
 sleep 4
 
-SVC_ID=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-i") | .key')
-KV_KEY="nginx-configs/sites/${{SVC_ID}}.conf"
-
-INITIAL=$(curl -sf "$CONSUL_HTTP_ADDR/v1/kv/${{KV_KEY}}?raw=true")
-if [ -z "$INITIAL" ] || [ "$INITIAL" = "null" ]; then echo "FAIL: config not written" >&2; exit 1; fi
-
 docker stop {cname}
 sleep 5
-
-AFTER=$(curl -sf "$CONSUL_HTTP_ADDR/v1/kv/${{KV_KEY}}?raw=true" || true)
-if [ -n "$AFTER" ] && [ "$AFTER" != "null" ]; then
-    echo "FAIL: KV key not deleted after stop" >&2
-    exit 1
-fi
 
 PORT_AFTER=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-i") | .value.Port // empty')
 if [ -n "$PORT_AFTER" ]; then
@@ -41,7 +29,7 @@ if [ -n "$PORT_AFTER" ]; then
     exit 1
 fi
 
-echo "PASS: KV deleted and service deregistered"
+echo "PASS: service deregistered on stop"
 docker rm -f {cname} 2>/dev/null || true
 kill %3 %2 %1 2>/dev/null || true
 sleep 1
@@ -51,7 +39,7 @@ sleep 1
     );
 
     let out = run(&script);
-    assert_pass(&out, "Test I — KV delete + deregister on stop");
+    assert_pass(&out, "Test I — deregister on stop");
 }
 
 #[test]
@@ -456,7 +444,7 @@ kill %3 2>/dev/null || true
 sleep 1
 NO_COLOR=1 RUST_LOG_STYLE=never RUST_LOG="info,auto_discover=debug" lab-ops auto-discover daemon /tmp/discovery.yaml \
     --state-dir /tmp/state \
-    --no-forwarding --no-nginx \
+    --no-forwarding \
     --consul-addr http://127.0.0.1:8500 \
     >/tmp/discovery-debug.log 2>&1 &
 sleep 3

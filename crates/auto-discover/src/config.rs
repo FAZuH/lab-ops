@@ -6,8 +6,6 @@ use lab_ops_lab_lib::TransportProtocol;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::consts::AD_NGINX_GEN;
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DiscoveryConfig {
     pub node: NodeConfig,
@@ -34,12 +32,6 @@ pub struct Defaults {
     pub bind_interface: Option<String>,
     #[serde(default)]
     pub bind_ip: Option<String>,
-    #[serde(default)]
-    pub nginx_generator: Option<String>,
-    #[serde(default)]
-    pub preprocess: Option<String>,
-    #[serde(default)]
-    pub postprocess: Option<String>,
     #[serde(default)]
     pub preserve_src_ip: Option<bool>,
     #[serde(default)]
@@ -106,12 +98,6 @@ pub struct RProxyLocalConfig {
     pub proxy_on: Option<String>,
     #[serde(default)]
     pub proxy_ip: Option<String>,
-    #[serde(default)]
-    pub nginx_generator: Option<String>,
-    #[serde(default)]
-    pub preprocess: Option<String>,
-    #[serde(default)]
-    pub postprocess: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -124,12 +110,6 @@ pub struct RProxyRemoteConfig {
     pub proxy_on: Option<String>,
     #[serde(default)]
     pub proxy_ip: Option<String>,
-    #[serde(default)]
-    pub nginx_generator: Option<String>,
-    #[serde(default)]
-    pub preprocess: Option<String>,
-    #[serde(default)]
-    pub postprocess: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -175,18 +155,12 @@ pub enum ResolvedPortType {
         domains: Vec<String>,
         proxy_on: Option<String>,
         proxy_ip: Option<String>,
-        nginx_generator: String,
-        preprocess: String,
-        postprocess: String,
     },
     RProxyRemote {
         template: String,
         domains: Vec<String>,
         proxy_on: String,
         proxy_ip: Option<String>,
-        nginx_generator: String,
-        preprocess: String,
-        postprocess: String,
     },
     ForwardLocal {
         bind_port: Option<u16>,
@@ -309,10 +283,6 @@ impl DiscoveryConfig {
                             .proxy_ip
                             .clone()
                             .or_else(|| self.defaults.proxy_ip.clone()),
-                        nginx_generator: self
-                            .resolve_nginx_generator(rp.nginx_generator.as_deref()),
-                        preprocess: self.resolve_preprocess(rp.preprocess.as_deref()),
-                        postprocess: self.resolve_postprocess(rp.postprocess.as_deref()),
                     },
                 });
             }
@@ -350,10 +320,6 @@ impl DiscoveryConfig {
                             .proxy_ip
                             .clone()
                             .or_else(|| self.defaults.proxy_ip.clone()),
-                        nginx_generator: self
-                            .resolve_nginx_generator(rp.nginx_generator.as_deref()),
-                        preprocess: self.resolve_preprocess(rp.preprocess.as_deref()),
-                        postprocess: self.resolve_postprocess(rp.postprocess.as_deref()),
                     },
                 });
             }
@@ -428,27 +394,6 @@ impl DiscoveryConfig {
 
         resolved.sort_by_key(|r| format!("{}-{}", r.service_id_prefix, r.container_port));
         resolved
-    }
-
-    fn resolve_nginx_generator(&self, override_val: Option<&str>) -> String {
-        override_val
-            .map(str::to_owned)
-            .or_else(|| self.defaults.nginx_generator.clone())
-            .unwrap_or_else(|| AD_NGINX_GEN.to_string())
-    }
-
-    fn resolve_preprocess(&self, override_val: Option<&str>) -> String {
-        override_val
-            .map(str::to_owned)
-            .or_else(|| self.defaults.preprocess.clone())
-            .unwrap_or_default()
-    }
-
-    fn resolve_postprocess(&self, override_val: Option<&str>) -> String {
-        override_val
-            .map(str::to_owned)
-            .or_else(|| self.defaults.postprocess.clone())
-            .unwrap_or_default()
     }
 }
 
