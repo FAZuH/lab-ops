@@ -232,6 +232,16 @@ impl ResolvedService {
     pub fn domain_slug(&self) -> String {
         self.primary_domain().replace('.', "-")
     }
+
+    pub fn domains(&self) -> Vec<&str> {
+        match &self.port_type {
+            ResolvedPortType::RProxyLocal { domains, .. }
+            | ResolvedPortType::RProxyRemote { domains, .. } => {
+                domains.iter().map(|s| s.as_str()).collect()
+            }
+            _ => vec![],
+        }
+    }
 }
 
 impl DiscoveryConfig {

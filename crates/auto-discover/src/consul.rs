@@ -439,6 +439,9 @@ impl ConsulServiceRegistration {
 
         let mut meta = HashMap::new();
         meta.insert("domain".into(), domain);
+        if service.domains().len() > 1 {
+            meta.insert("domains".into(), service.domains().join(","));
+        }
         meta.insert("protocol".into(), protocol.to_string());
         meta.insert("server_name".into(), server_name.to_string());
         meta.insert("generation_id".into(), generation_id.to_string());
