@@ -10,8 +10,6 @@
 //! - `check` — Validate the discovery configuration file
 //! - `forwarding-daemon` — Proxy-side daemon for kernel-level DNAT rules (30s polling)
 //! - `forwarding-sync` — One-shot proxy-side DNAT rule sync
-//! - `nginx-daemon` — Proxy-side daemon for nginx configs (Consul blocking queries)
-//! - `nginx-sync` — One-shot proxy-side nginx config sync
 //!
 //! The CLI is exposed through [`cli::run_cli`] and integrated as the
 //! `lab-ops auto-discover` subcommand.

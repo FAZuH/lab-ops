@@ -195,7 +195,6 @@ Defines `Cli` struct and `Commands` enum with clap derives. The `run_cli(cli, _u
 | `Sync` | One-shot discovery sync pass |
 | `Check` | Validate `discovery.yaml` |
 | `ForwardingSync` | One-shot proxy-side DNAT rule sync |
-| `NginxSync` | One-shot proxy-side nginx config sync |
 
 ### `config.rs` — DiscoveryConfig
 

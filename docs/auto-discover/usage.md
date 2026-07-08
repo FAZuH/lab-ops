@@ -565,9 +565,6 @@ lab-ops auto-discover check
 # Run on proxy server: one-shot sync of DNAT rules from Consul
 lab-ops auto-discover forwarding-sync [--consul-addr http://127.0.0.1:8500]
 
-# Run on proxy server: one-shot sync of nginx configs from Consul KV
-lab-ops auto-discover nginx-sync [--consul-addr http://127.0.0.1:8500]
-
 # Show version
 lab-ops auto-discover --version
 ```

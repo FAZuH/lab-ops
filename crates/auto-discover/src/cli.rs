@@ -77,18 +77,6 @@ pub enum Command {
         #[arg(default_value = "http://127.0.0.1:8500")]
         consul_addr: String,
     },
-    /// Run on proxy server: sync nginx configs from Consul KV (one-shot)
-    NginxSync {
-        /// Consul HTTP address
-        #[arg(default_value = "http://127.0.0.1:8500")]
-        consul_addr: String,
-        /// Directory for generated nginx site configs
-        #[arg(long, default_value = crate::consts::NGINX_SITEENABLED)]
-        nginx_sites_dir: PathBuf,
-        /// Directory for generated nginx stream configs
-        #[arg(long, default_value = crate::consts::NGINX_STREAMENABLED)]
-        nginx_streams_dir: PathBuf,
-    },
 }
 
 /// Dispatch the CLI subcommand to the appropriate handler.
@@ -119,11 +107,6 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
         Command::Sync { config, state_dir } => run_sync(config, state_dir).await,
         Command::Check { config } => check_config(config),
         Command::ForwardingSync { consul_addr } => run_forwarding_sync(&consul_addr).await,
-        Command::NginxSync {
-            consul_addr,
-            nginx_sites_dir,
-            nginx_streams_dir,
-        } => run_nginx_sync(&consul_addr, nginx_sites_dir, nginx_streams_dir).await,
     }
 }
 
@@ -347,25 +330,6 @@ async fn run_forwarding_daemon(consul_addr: String) {
         }
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
     }
-}
-
-/// Run a single nginx config sync from Consul KV, then exit.
-pub async fn run_nginx_sync(
-    consul_addr: &str,
-    nginx_sites_dir: PathBuf,
-    nginx_streams_dir: PathBuf,
-) -> Result<()> {
-    info!("Running nginx sync...");
-    let daemon = NginxDaemon::new(
-        consul_addr.to_string(),
-        PathBuf::from(crate::consts::AD_NGINX),
-        nginx_sites_dir,
-        nginx_streams_dir,
-        PathBuf::from(crate::consts::AD_POSTPROC),
-    );
-    let changed = daemon.sync().await?;
-    info!("Nginx sync completed, changed={}", changed);
-    Ok(())
 }
 
 async fn run_nginx_daemon(

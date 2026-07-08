@@ -61,7 +61,6 @@ lab-ops auto-discover daemon --no-discovery                  # Forwarding + ngin
 lab-ops auto-discover sync                                   # Single-sync pass
 lab-ops auto-discover check                                  # Validate config
 lab-ops auto-discover forwarding-sync [--consul-addr URL]    # One-shot DNAT sync
-lab-ops auto-discover nginx-sync [--consul-addr URL]         # One-shot nginx config sync
 ```
 
 ## Global Options
