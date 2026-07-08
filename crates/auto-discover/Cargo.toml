@@ -2,7 +2,7 @@
 name = "lab-ops_auto-discover"
 version = "0.1.7"
 edition = "2024"
-description = "Service discovery daemon with Consul registration and nginx config generation"
+description = "Service discovery daemon with Consul registration"
 license.workspace = true
 authors.workspace = true
 repository.workspace = true

@@ -13,15 +13,14 @@ use tracing::warn;
 
 use crate::config::DiscoveryConfig;
 use crate::daemon::DiscoveryDaemon;
-use crate::nginx_daemon::NginxDaemon;
 
 /// Service discovery daemon: watches Docker events, manages port forwarding
-/// via `lab-ops natmap`, registers services with Consul, generates nginx
-/// configs, and syncs forwarding/KV rules on the proxy server.
+/// via `lab-ops natmap`, registers services with Consul,
+/// and syncs DNAT rules on the proxy server.
 #[derive(Parser)]
 #[command(name = "auto-discover")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
-#[command(about = "Service discovery daemon with Consul integration and nginx config generation")]
+#[command(about = "Service discovery daemon with Consul integration")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -29,7 +28,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Run all enabled daemon components (discovery, forwarding, nginx)
+    /// Run all enabled daemon components (discovery, forwarding)
     Daemon {
         /// Path to discovery.yaml
         #[arg(default_value = "/etc/auto-discover/discovery.yaml")]
@@ -46,15 +45,6 @@ pub enum Command {
         /// Disable the forwarding component (kernel DNAT sync)
         #[arg(long)]
         no_forwarding: bool,
-        /// Disable the nginx component (KV config sync)
-        #[arg(long)]
-        no_nginx: bool,
-        /// Directory for generated nginx site configs
-        #[arg(long, default_value = crate::consts::NGINX_SITEENABLED)]
-        nginx_sites_dir: PathBuf,
-        /// Directory for generated nginx stream configs
-        #[arg(long, default_value = crate::consts::NGINX_STREAMENABLED)]
-        nginx_streams_dir: PathBuf,
     },
     /// Run a single sync pass and exit
     Sync {
@@ -77,18 +67,6 @@ pub enum Command {
         #[arg(default_value = "http://127.0.0.1:8500")]
         consul_addr: String,
     },
-    /// Run on proxy server: sync nginx configs from Consul KV (one-shot)
-    NginxSync {
-        /// Consul HTTP address
-        #[arg(default_value = "http://127.0.0.1:8500")]
-        consul_addr: String,
-        /// Directory for generated nginx site configs
-        #[arg(long, default_value = crate::consts::NGINX_SITEENABLED)]
-        nginx_sites_dir: PathBuf,
-        /// Directory for generated nginx stream configs
-        #[arg(long, default_value = crate::consts::NGINX_STREAMENABLED)]
-        nginx_streams_dir: PathBuf,
-    },
 }
 
 /// Dispatch the CLI subcommand to the appropriate handler.
@@ -100,50 +78,26 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             consul_addr,
             no_discovery,
             no_forwarding,
-            no_nginx,
-            nginx_sites_dir,
-            nginx_streams_dir,
-        } => {
-            run_unified_daemon(
-                config,
-                state_dir,
-                consul_addr,
-                no_discovery,
-                no_forwarding,
-                no_nginx,
-                nginx_sites_dir,
-                nginx_streams_dir,
-            )
-            .await
-        }
+        } => run_unified_daemon(config, state_dir, consul_addr, no_discovery, no_forwarding).await,
         Command::Sync { config, state_dir } => run_sync(config, state_dir).await,
         Command::Check { config } => check_config(config),
         Command::ForwardingSync { consul_addr } => run_forwarding_sync(&consul_addr).await,
-        Command::NginxSync {
-            consul_addr,
-            nginx_sites_dir,
-            nginx_streams_dir,
-        } => run_nginx_sync(&consul_addr, nginx_sites_dir, nginx_streams_dir).await,
     }
 }
 
 /// Start the long-running auto-discover daemon.
 ///
-/// Spawns tokio tasks for discovery, forwarding sync, and nginx config sync,
+/// Spawns tokio tasks for discovery and forwarding sync,
 /// then blocks on Ctrl-C until shutdown. Individual components can be
 /// disabled via the `no_*` flags.
-#[allow(clippy::too_many_arguments)]
 pub async fn run_unified_daemon(
     config_path: PathBuf,
     state_dir: PathBuf,
     consul_addr: String,
     no_discovery: bool,
     no_forwarding: bool,
-    no_nginx: bool,
-    nginx_sites_dir: PathBuf,
-    nginx_streams_dir: PathBuf,
 ) -> Result<()> {
-    if no_discovery && no_forwarding && no_nginx {
+    if no_discovery && no_forwarding {
         bail!("All components disabled, nothing to do");
     }
 
@@ -165,17 +119,6 @@ pub async fn run_unified_daemon(
             info!("Forwarding component started");
             run_forwarding_daemon(addr).await;
             info!("Forwarding component exited");
-        });
-    }
-
-    if !no_nginx {
-        let addr = consul_addr.clone();
-        let sites = nginx_sites_dir.clone();
-        let streams = nginx_streams_dir.clone();
-        tokio::spawn(async move {
-            info!("Nginx component started");
-            run_nginx_daemon(addr, sites, streams).await;
-            info!("Nginx component exited");
         });
     }
 
@@ -316,15 +259,9 @@ pub fn check_config(config_path: PathBuf) -> Result<()> {
         } else {
             "docker".into()
         };
-        let template = match &svc.port_type {
-            crate::config::ResolvedPortType::RProxyLocal { template, .. }
-            | crate::config::ResolvedPortType::RProxyRemote { template, .. } => template.clone(),
-            crate::config::ResolvedPortType::ForwardLocal { .. } => "forwardlocal".into(),
-            crate::config::ResolvedPortType::ForwardRemote { .. } => "forwardremote".into(),
-        };
         println!(
-            "  - {} (port {}, protocol {}, template {}, type {})",
-            svc.service_name, svc.container_port, svc.protocol, template, kind
+            "  - {} (port {}, protocol {}, type {})",
+            svc.service_name, svc.container_port, svc.protocol, kind
         );
     }
     Ok(())
@@ -347,39 +284,4 @@ async fn run_forwarding_daemon(consul_addr: String) {
         }
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
     }
-}
-
-/// Run a single nginx config sync from Consul KV, then exit.
-pub async fn run_nginx_sync(
-    consul_addr: &str,
-    nginx_sites_dir: PathBuf,
-    nginx_streams_dir: PathBuf,
-) -> Result<()> {
-    info!("Running nginx sync...");
-    let daemon = NginxDaemon::new(
-        consul_addr.to_string(),
-        PathBuf::from(crate::consts::AD_NGINX),
-        nginx_sites_dir,
-        nginx_streams_dir,
-        PathBuf::from(crate::consts::AD_POSTPROC),
-    );
-    let changed = daemon.sync().await?;
-    info!("Nginx sync completed, changed={}", changed);
-    Ok(())
-}
-
-async fn run_nginx_daemon(
-    consul_addr: String,
-    nginx_sites_dir: PathBuf,
-    nginx_streams_dir: PathBuf,
-) {
-    info!("Nginx daemon started");
-    let daemon = NginxDaemon::new(
-        consul_addr,
-        PathBuf::from(crate::consts::AD_NGINX),
-        nginx_sites_dir,
-        nginx_streams_dir,
-        PathBuf::from(crate::consts::AD_POSTPROC),
-    );
-    daemon.run_loop().await;
 }

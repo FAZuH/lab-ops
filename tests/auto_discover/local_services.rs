@@ -23,18 +23,7 @@ if [ "$PORT" != "3000" ]; then echo "FAIL: expected port 3000, got $PORT" >&2; e
 ADDR=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-local-app") | .value.Address')
 if [ "$ADDR" != "10.99.99.99" ]; then echo "FAIL: expected address 10.99.99.99, got $ADDR" >&2; exit 1; fi
 
-# Verify nginx config was generated in Consul KV (local services bypass NAT, proxy directly to local_ip:local_port)
-SVC_ID="int-test-node-app-local-test-3000"
-NGINX_CONFIG=$(curl -sf "$CONSUL_HTTP_ADDR/v1/kv/nginx-configs/sites/${{SVC_ID}}.conf?raw" 2>/dev/null || echo "")
-if [ -z "$NGINX_CONFIG" ]; then echo "FAIL: no nginx config in Consul KV" >&2; curl -sf "$CONSUL_HTTP_ADDR/v1/kv/nginx-configs/sites?keys" 2>/dev/null || true; exit 1; fi
-
-echo "$NGINX_CONFIG" | grep -q "server_name app.local.test" || \
-    {{ echo "FAIL: nginx config missing server_name" >&2; echo "$NGINX_CONFIG"; exit 1; }}
-
-echo "$NGINX_CONFIG" | grep -q "proxy_pass http://10.99.99.99:3000/;" || \
-    {{ echo "FAIL: nginx config missing proxy_pass to local IP" >&2; echo "$NGINX_CONFIG"; exit 1; }}
-
-echo "PASS: local service registered at $ADDR:$PORT, NAT bypassed, nginx config verified"
+echo "PASS: local service registered at $ADDR:$PORT, NAT bypassed"
 kill %3 %2 %1 2>/dev/null || true
 sleep 1
 "#,
@@ -77,11 +66,6 @@ if [ "$EXT_IP" != "203.0.113.43" ]; then echo "FAIL: missing ext_ip meta" >&2; e
 
 EXT_PORTS=$(echo "$SVC" | jq -r '.ext_ports')
 if [ "$EXT_PORTS" != "40000" ]; then echo "FAIL: missing ext_ports meta" >&2; exit 1; fi
-
-# Verify no nginx KV config (local forwarding remote has empty template)
-KEYS=$(curl -sf "$CONSUL_HTTP_ADDR/v1/kv/nginx-configs/?recurse=true" | jq -r '.[].Key // empty')
-MATCH=$(echo "$KEYS" | grep "it-local-fwd" || true)
-if [ -n "$MATCH" ]; then echo "FAIL: forwarding-only service should have no nginx KV config, got $MATCH" >&2; exit 1; fi
 
 echo "PASS: local forwarding remote at 10.99.99.99:40000 with forwarding meta"
 kill %3 %2 %1 2>/dev/null || true

@@ -52,16 +52,15 @@ lab-ops natmap clear                    # Remove all managed rules
 
 ### auto-discover
 
-`crates/auto-discover/` — Service discovery daemon that watches Docker events, manages port forwarding via `lab-ops natmap`, registers services with Consul, and generates nginx configs stored in Consul KV. See [docs/auto-discover/usage.md](docs/auto-discover/usage.md) for full documentation.
+`crates/auto-discover/` — Service discovery daemon that watches Docker events, manages port forwarding via `lab-ops natmap`, and registers services with Consul. See [docs/auto-discover/usage.md](docs/auto-discover/usage.md) for full documentation.
 
 ```bash
 lab-ops auto-discover daemon                                 # Run unified daemon
-lab-ops auto-discover daemon --no-forwarding --no-nginx      # Discovery only
-lab-ops auto-discover daemon --no-discovery                  # Forwarding + nginx only
+lab-ops auto-discover daemon --no-forwarding      # Discovery only
+lab-ops auto-discover daemon --no-discovery       # Forwarding only
 lab-ops auto-discover sync                                   # Single-sync pass
 lab-ops auto-discover check                                  # Validate config
 lab-ops auto-discover forwarding-sync [--consul-addr URL]    # One-shot DNAT sync
-lab-ops auto-discover nginx-sync [--consul-addr URL]         # One-shot nginx config sync
 ```
 
 ## Global Options

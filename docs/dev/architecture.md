@@ -46,7 +46,7 @@ lab-ops/
 │           ├── forwarding.rs     # Proxy-side DNAT rule sync
 │           ├── model.rs          # ContainerInfo data type
 │           ├── natmap.rs         # Natmap client (CLI subprocess + HTTP)
-│           ├── nginx_daemon.rs   # Nginx config generation watcher
+
 │           └── port.rs           # Port assignment persistence + allocation
 ├── tests/                        # Integration tests
 │   ├── integration.rs            # cf2ansible integration tests
