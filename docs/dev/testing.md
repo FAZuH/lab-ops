@@ -33,7 +33,7 @@ Located in `#[cfg(test)] mod tests { }` blocks within source files.
 | `crates/auto-discover/src/consul.rs` | 5 | Consul service registration, metadata, URL encoding |
 | `crates/auto-discover/src/daemon.rs` | 2 | Tracing span fields on container events |
 | `crates/auto-discover/src/forwarding.rs` | 27 | `group_forwarding_services`, `parse_dnat_rule`, 5 proptest invariants, edge cases |
-| `crates/auto-discover/src/nginx_daemon.rs` | 5 | `extract_service_id` |
+
 
 **Total: 88 inline unit tests**
 
@@ -89,12 +89,12 @@ Spins up a privileged Ubuntu container with iptables, runs the natmap daemon, an
 | Other | 9 |
 
 **auto-discover Docker tests** (`tests/auto_discover/`, 60 tests across 7 modules):
-Spins up a privileged Docker container running Consul, natmap, and auto-discover daemons. Verifies Consul registration, port binding, nginx config generation, forwarding metadata, crash recovery, config change handling, nginx config pipeline, registration metadata, forwarding sync (DNAT rules), nginx daemon (file/symlink operations), concurrency, and large configs.
+Spins up a privileged Docker container running Consul, natmap, and auto-discover daemons. Verifies Consul registration, port binding, forwarding metadata, crash recovery, config change handling, registration metadata, forwarding sync (DNAT rules), concurrency, and large configs.
 
 | Module | Tests | Covers |
 |---|---|---|
 | `forwarding.rs` | 9 | DNAT sync, duplicate/stale rules, multi-port, hairpin, preserve_src_ip hairpin |
-| `nginx.rs` | 11 | KV → file, symlinks, postproc, stale cleanup, template prefixes, generator failures |
+
 | `port_binding.rs` | 7 | Static/ephemeral ports, bind_ip, bind_interface, local forwarding |
 | `registration.rs` | 12 | Consul registrations, container events, domain slug, extra fields, concurrent starts |
 | `recovery.rs` | 11 | Config changes, crash recovery, YAML validation, pre/postprocess, config sync |
