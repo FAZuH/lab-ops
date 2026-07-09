@@ -45,6 +45,16 @@ impl TestOutput {
         assert!(self.contains("state: present"));
         assert!(self.contains("tags: [\"dns\"]"));
         assert!(!self.contains("data:"), "Should not use data block");
+        self.assert_api_token_in_every_task();
+    }
+
+    fn assert_api_token_in_every_task(&self) {
+        let task_count = self.count("- name:");
+        let token_count = self.count("api_token:");
+        assert_eq!(
+            token_count, task_count,
+            "expected api_token in every task ({task_count} tasks, {token_count} tokens)"
+        );
     }
 
     fn assert_type_count(&self, rtype: &str, expected: usize) {
@@ -148,35 +158,4 @@ fn domain3() {
     assert!(t.contains("selector: 1"));
     assert!(t.contains("hash_type: 1"));
     assert!(t.contains("record: \"@\""));
-}
-
-#[test]
-fn all_files_no_data_block() {
-    for file in &[
-        "domain0.com.txt",
-        "domain1.id.txt",
-        "domain2.com.txt",
-        "domain3.com.txt",
-    ] {
-        let t = TestOutput::new(file);
-        assert!(!t.contains("data:"), "{file} should not contain data block");
-    }
-}
-
-#[test]
-fn all_files_api_token_in_every_task() {
-    for file in &[
-        "domain0.com.txt",
-        "domain1.id.txt",
-        "domain2.com.txt",
-        "domain3.com.txt",
-    ] {
-        let t = TestOutput::new(file);
-        let task_count = t.count("- name:");
-        let token_count = t.count("api_token:");
-        assert_eq!(
-            token_count, task_count,
-            "{file} should have api_token in every task ({task_count} tasks, {token_count} tokens)"
-        );
-    }
 }

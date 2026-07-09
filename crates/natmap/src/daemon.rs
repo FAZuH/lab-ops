@@ -56,6 +56,7 @@ use crate::docker;
 use crate::iptables::IptablesManager;
 use crate::models::DaemonState;
 use crate::models::DockerPortMap;
+use crate::models::DockerPortMapRequest;
 use crate::policy_route::PolicyRouteManager;
 
 /// Shared application state held by all Axum route handlers.
@@ -101,7 +102,7 @@ impl AppState {
 }
 
 /// JSON error response returned by the daemon API on failures.
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct ErrorResponse {
     pub error: String,
 }
@@ -393,8 +394,16 @@ impl Daemon {
             m.id = state.allocate_id();
             let host_addr = m.request.host_addr;
             if state.ports.is_allocated(host_addr).await {
-                tracing::warn!(host.addr = %host_addr, "address already allocated, skipping");
-                continue;
+                if let Some(stale_id) =
+                    resolve_stale_container(&state.daemon_state, host_addr, &container_id).await
+                {
+                    tracing::info!(host.addr = %host_addr, stale.container.id = %stale_id,
+                        "port held by stale container, removing old mapping");
+                    self.on_container_stop(stale_id).await;
+                } else {
+                    tracing::warn!(host.addr = %host_addr, "address already allocated, skipping");
+                    continue;
+                }
             }
             if let Err(e) = state.ports.allocate(host_addr).await {
                 tracing::warn!(host.addr = %host_addr, error = %e, "failed allocating, skipping");
@@ -454,9 +463,43 @@ impl Daemon {
                     continue;
                 }
                 let mut kept = Vec::new();
+
+                // Re-inspect container to get current IPs (may have changed if
+                // Docker network was recreated while daemon was down)
+                let current_addrs: HashMap<SocketAddr, SocketAddr> =
+                    docker::get_port_mappings(docker, &id)
+                        .await
+                        .ok()
+                        .into_iter()
+                        .flat_map(|mappings| {
+                            mappings
+                                .into_iter()
+                                .map(|m| (m.request.host_addr, m.request.container_addr))
+                        })
+                        .collect();
+
                 // iter port mappings for this container
-                for m in maps {
+                for mut m in maps {
                     let host_addr = m.request.host_addr;
+
+                    // Update container_addr from live Docker inspect if changed
+                    // (silently falls back to stored IP if inspect failed above)
+                    if let Some(&current_ctn_addr) = current_addrs.get(&host_addr) {
+                        let proto = m.request.proto;
+                        if reconcile_container_addr(
+                            &mut m.request,
+                            &DockerPortMapRequest {
+                                host_addr,
+                                container_addr: current_ctn_addr,
+                                proto,
+                            },
+                        ) {
+                            tracing::info!(
+                                container.id = %id, host.port = %host_addr.port(),
+                                "container IP changed on reload"
+                            );
+                        }
+                    }
 
                     // check this map
                     if ports.is_allocated(host_addr).await {
@@ -477,6 +520,37 @@ impl Daemon {
                     new_docker.insert(id, kept);
                 }
             }
+
+            // Discover untracked containers (started while daemon was down)
+            let tracked: HashSet<String> = new_docker.keys().cloned().collect();
+            for id in untracked_container_ids(&running_ids, &tracked) {
+                tracing::info!(container.id = %id, "discovering untracked container");
+                let Ok(discovered) = docker::get_port_mappings(docker, id).await else {
+                    continue;
+                };
+                let mut installed = Vec::new();
+                for mut m in discovered {
+                    m.id = state.allocate_id();
+                    let host_addr = m.request.host_addr;
+                    if let Err(e) = ports.allocate(host_addr).await {
+                        tracing::warn!(host.addr = %host_addr, error = %e,
+                            "failed allocating port for untracked container");
+                        continue;
+                    }
+                    if let Err(e) = iptables.install_dockermap(&m) {
+                        tracing::error!(mapping = ?m, error = %e,
+                            "failed to install mapping for untracked container");
+                        ports.deallocate(host_addr).await;
+                        continue;
+                    }
+                    max_id = max_id.max(m.id);
+                    installed.push(m);
+                }
+                if !installed.is_empty() {
+                    new_docker.insert(id.to_string(), installed);
+                }
+            }
+
             daemon_state.mapping = new_docker;
             state
                 .next_id
@@ -556,8 +630,57 @@ impl Daemon {
     }
 }
 
+/// Looks up whether `host_addr` is claimed by a container other than
+/// `new_container_id` in the persisted daemon state.
+///
+/// Returns `Some(stale_container_id)` if a different container owns the port,
+/// indicating the old container was recreated and its mapping should be removed
+/// before allocating for the new one.
+async fn resolve_stale_container(
+    daemon_state: &Arc<RwLock<DaemonState>>,
+    host_addr: SocketAddr,
+    new_container_id: &str,
+) -> Option<String> {
+    let lock = daemon_state.read().await;
+    lock.mapping.iter().find_map(|(id, maps)| {
+        (id.as_str() != new_container_id && maps.iter().any(|m| m.request.host_addr == host_addr))
+            .then(|| id.clone())
+    })
+}
+
+/// Returns container IDs that are running but have no tracked port mappings.
+///
+/// Used during daemon reload to discover containers that started while the
+/// daemon was down.
+fn untracked_container_ids<'a>(
+    running_ids: &'a HashSet<String>,
+    tracked_ids: &'a HashSet<String>,
+) -> Vec<&'a str> {
+    running_ids
+        .iter()
+        .filter(|id| !tracked_ids.contains(id.as_str()))
+        .map(|id| id.as_str())
+        .collect()
+}
+
+/// Updates `stored` container address from `current` if it changed.
+///
+/// Returns `true` if an update was made.
+fn reconcile_container_addr(
+    stored: &mut DockerPortMapRequest,
+    current: &DockerPortMapRequest,
+) -> bool {
+    if stored.container_addr == current.container_addr {
+        return false;
+    }
+    stored.container_addr = current.container_addr;
+    true
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+    use std::net::SocketAddr;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
@@ -572,9 +695,19 @@ mod tests {
 
     use super::AppState;
     use super::Daemon;
+    use super::reconcile_container_addr;
+    use super::resolve_stale_container;
+    use super::untracked_container_ids;
     use crate::iptables::IptablesManager;
     use crate::models::DaemonState;
+    use crate::models::DockerPortMap;
+    use crate::models::DockerPortMapRequest;
+    use crate::models::TransportProtocol;
     use crate::policy_route::PolicyRouteManager;
+
+    fn id_set(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|&s| s.to_string()).collect()
+    }
 
     fn create_test_daemon(state_path: PathBuf) -> Daemon {
         let iptables = Arc::new(IptablesManager::new());
@@ -635,5 +768,200 @@ mod tests {
         daemon.handle_docker_event(event, &docker).await;
 
         assert!(logs_contain("container.id=\"1234567890\""));
+    }
+
+    #[tokio::test]
+    async fn resolve_stale_returns_none_when_no_mapping() {
+        let state = Arc::new(RwLock::new(DaemonState::default()));
+        let addr: SocketAddr = "0.0.0.0:9000".parse().unwrap();
+        let result = resolve_stale_container(&state, addr, "new-container").await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_stale_returns_none_when_no_match() {
+        let state = Arc::new(RwLock::new(DaemonState::default()));
+        state.write().await.mapping.insert(
+            "other".into(),
+            vec![DockerPortMap::new(
+                1,
+                DockerPortMapRequest {
+                    host_addr: "0.0.0.0:8080".parse().unwrap(),
+                    container_addr: "10.0.0.2:8080".parse().unwrap(),
+                    proto: TransportProtocol::Tcp,
+                },
+                "other".into(),
+                "other-container".into(),
+            )],
+        );
+        let addr: SocketAddr = "0.0.0.0:9000".parse().unwrap();
+        let result = resolve_stale_container(&state, addr, "new-container").await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_stale_returns_stale_id_when_match() {
+        let state = Arc::new(RwLock::new(DaemonState::default()));
+        state.write().await.mapping.insert(
+            "stale".into(),
+            vec![DockerPortMap::new(
+                1,
+                DockerPortMapRequest {
+                    host_addr: "0.0.0.0:9000".parse().unwrap(),
+                    container_addr: "10.0.0.2:9000".parse().unwrap(),
+                    proto: TransportProtocol::Tcp,
+                },
+                "stale".into(),
+                "old-container".into(),
+            )],
+        );
+        let addr: SocketAddr = "0.0.0.0:9000".parse().unwrap();
+        let result = resolve_stale_container(&state, addr, "new-container").await;
+        assert_eq!(result, Some("stale".to_string()));
+    }
+
+    #[tokio::test]
+    async fn resolve_stale_returns_none_for_same_container() {
+        let state = Arc::new(RwLock::new(DaemonState::default()));
+        state.write().await.mapping.insert(
+            "same".into(),
+            vec![DockerPortMap::new(
+                1,
+                DockerPortMapRequest {
+                    host_addr: "0.0.0.0:9000".parse().unwrap(),
+                    container_addr: "10.0.0.2:9000".parse().unwrap(),
+                    proto: TransportProtocol::Tcp,
+                },
+                "same".into(),
+                "same-container".into(),
+            )],
+        );
+        let addr: SocketAddr = "0.0.0.0:9000".parse().unwrap();
+        let result = resolve_stale_container(&state, addr, "same").await;
+        assert!(result.is_none(), "same container should not be stale");
+    }
+
+    #[tokio::test]
+    async fn resolve_stale_returns_correct_id_when_multiple_containers() {
+        let state = Arc::new(RwLock::new(DaemonState::default()));
+        state.write().await.mapping.insert(
+            "alpha".into(),
+            vec![DockerPortMap::new(
+                1,
+                DockerPortMapRequest {
+                    host_addr: "0.0.0.0:8080".parse().unwrap(),
+                    container_addr: "10.0.0.2:8080".parse().unwrap(),
+                    proto: TransportProtocol::Tcp,
+                },
+                "alpha".into(),
+                "alpha-container".into(),
+            )],
+        );
+        state.write().await.mapping.insert(
+            "bravo".into(),
+            vec![DockerPortMap::new(
+                2,
+                DockerPortMapRequest {
+                    host_addr: "0.0.0.0:9000".parse().unwrap(),
+                    container_addr: "10.0.0.3:9000".parse().unwrap(),
+                    proto: TransportProtocol::Tcp,
+                },
+                "bravo".into(),
+                "bravo-container".into(),
+            )],
+        );
+        let addr: SocketAddr = "0.0.0.0:9000".parse().unwrap();
+        let result = resolve_stale_container(&state, addr, "new-container").await;
+        assert_eq!(result, Some("bravo".to_string()));
+    }
+
+    #[test]
+    fn untracked_returns_empty_when_all_tracked() {
+        let running = id_set(&["a", "b"]);
+        let tracked = id_set(&["a", "b"]);
+        let result = untracked_container_ids(&running, &tracked);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn untracked_returns_new_ids() {
+        let running = id_set(&["a", "b", "c"]);
+        let tracked = id_set(&["a"]);
+        let mut result = untracked_container_ids(&running, &tracked);
+        result.sort();
+        assert_eq!(result, vec!["b", "c"]);
+    }
+
+    #[test]
+    fn untracked_returns_empty_when_no_running() {
+        let running = HashSet::new();
+        let tracked = id_set(&["a"]);
+        let result = untracked_container_ids(&running, &tracked);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn untracked_ignores_tracked_not_running() {
+        let running = id_set(&["b"]);
+        let tracked = id_set(&["a", "b"]);
+        let result = untracked_container_ids(&running, &tracked);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn reconcile_addr_no_change() {
+        let mut stored = DockerPortMapRequest {
+            host_addr: "0.0.0.0:9000".parse().unwrap(),
+            container_addr: "10.0.0.2:9000".parse().unwrap(),
+            proto: TransportProtocol::Tcp,
+        };
+        let current = DockerPortMapRequest {
+            host_addr: "0.0.0.0:9000".parse().unwrap(),
+            container_addr: "10.0.0.2:9000".parse().unwrap(),
+            proto: TransportProtocol::Tcp,
+        };
+        assert!(!reconcile_container_addr(&mut stored, &current));
+        assert_eq!(
+            stored.container_addr,
+            "10.0.0.2:9000".parse::<SocketAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn reconcile_addr_updated() {
+        let mut stored = DockerPortMapRequest {
+            host_addr: "0.0.0.0:9000".parse().unwrap(),
+            container_addr: "10.0.0.2:9000".parse().unwrap(),
+            proto: TransportProtocol::Tcp,
+        };
+        let current = DockerPortMapRequest {
+            host_addr: "0.0.0.0:9000".parse().unwrap(),
+            container_addr: "10.0.0.3:9000".parse().unwrap(),
+            proto: TransportProtocol::Tcp,
+        };
+        assert!(reconcile_container_addr(&mut stored, &current));
+        assert_eq!(
+            stored.container_addr,
+            "10.0.0.3:9000".parse::<SocketAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn reconcile_addr_different_host_port_same_container_ip() {
+        let mut stored = DockerPortMapRequest {
+            host_addr: "0.0.0.0:8080".parse().unwrap(),
+            container_addr: "10.0.0.2:80".parse().unwrap(),
+            proto: TransportProtocol::Tcp,
+        };
+        let current = DockerPortMapRequest {
+            host_addr: "0.0.0.0:9090".parse().unwrap(),
+            container_addr: "10.0.0.2:80".parse().unwrap(),
+            proto: TransportProtocol::Tcp,
+        };
+        assert!(!reconcile_container_addr(&mut stored, &current));
+        assert_eq!(
+            stored.container_addr,
+            "10.0.0.2:80".parse::<SocketAddr>().unwrap()
+        );
     }
 }

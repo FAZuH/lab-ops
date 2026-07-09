@@ -31,16 +31,32 @@ members = ["crates/natmap", "crates/auto-discover", "crates/lab-lib"]
 lab-ops_lab-lib = { path = "./crates/lab-lib", version = "0.1.3" }
 lab-ops_natmap = { path = "./crates/natmap", version = "0.1.8" }
 lab-ops_auto-discover = { path = "./crates/auto-discover", version = "0.1.7" }
-
-[dependencies]
-regex = "1.12.3"
+proptest = "1"
+bollard = "0.21.0"
+tokio = "1"
+color-eyre = "0.6.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 clap_complete = { version = "4", features = ["unstable-dynamic"] }
-bollard = "0.21.0"
-color-eyre = "0.6.5"
+futures-util = "0.3"
+reqwest = "0.12"
 comfy-table = "7.2.2"
-tokio = { version = "1.52.2", features = ["rt"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+regex = "1"
+tracing-test = "0.2"
+tempfile = "3"
+
+[dependencies]
+regex = { workspace = true }
+clap = { workspace = true }
+clap_complete = { workspace = true }
+bollard = { workspace = true }
+color-eyre = { workspace = true }
+comfy-table = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
+tracing-subscriber = { workspace = true }
 lab-ops_lab-lib = { workspace = true }
 lab-ops_natmap = { workspace = true }
 lab-ops_auto-discover = { workspace = true }

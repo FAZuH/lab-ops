@@ -26,7 +26,7 @@ lab-ops/
 │   ├── natmap/                   # NAT management crate
 │   │   └── src/
 │   │       ├── lib.rs            # Module declarations
-│   │       ├── cli.rs            # NatMapCommand enum + CLI dispatch
+│   │       ├── cli.rs            # Command enum + CLI dispatch
 │   │       ├── command.rs        # Handler functions for all subcommands
 │   │       ├── daemon.rs         # Axum API server, state management
 │   │       ├── models.rs         # Data types (configs, requests, state)
@@ -46,7 +46,7 @@ lab-ops/
 │           ├── forwarding.rs     # Proxy-side DNAT rule sync
 │           ├── model.rs          # ContainerInfo data type
 │           ├── natmap.rs         # Natmap client (CLI subprocess + HTTP)
-│           ├── nginx_daemon.rs   # Nginx config generation watcher
+
 │           └── port.rs           # Port assignment persistence + allocation
 ├── tests/                        # Integration tests
 │   ├── integration.rs            # cf2ansible integration tests

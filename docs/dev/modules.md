@@ -71,15 +71,15 @@ pub mod utils;
 
 ### `cli.rs` — CLI Definitions
 
-Defines the `NatMapCommand` enum with clap derives. Each variant maps to a subcommand:
+Defines the `Command` enum with clap derives. Each variant maps to a subcommand:
 
 ```rust
-pub enum NatMapCommand {
+pub enum Command {
     Dnat { ext_ip, int_ip, proto, ports, ext_if, delete },
     Snat { int_ip, ext_if, ext_ip, delete },
     Hairpin { ext_ip, int_ip, proto, ports, lan_cidr, delete },
     List { container_id },
-    Docker { cmd: DockerCommand },
+    Docker { cmd: Docker },
     Save,
     Fwd,
     Daemon { state_dir, socket, socket_group },
@@ -182,7 +182,6 @@ mod docker;
 mod forwarding;
 mod model;
 mod natmap;
-mod nginx_daemon;
 ```
 
 ### `cli.rs` — CLI Definitions
@@ -191,18 +190,17 @@ Defines `Cli` struct and `Commands` enum with clap derives. The `run_cli(cli, _u
 
 | Variant | Purpose |
 |---|---|
-| `Daemon` | Unified long-running daemon (discovery + forwarding + nginx) |
+| `Daemon` | Unified long-running daemon (discovery + forwarding) |
 | `Sync` | One-shot discovery sync pass |
 | `Check` | Validate `discovery.yaml` |
 | `ForwardingSync` | One-shot proxy-side DNAT rule sync |
-| `NginxSync` | One-shot proxy-side nginx config sync |
 
 ### `config.rs` — DiscoveryConfig
 
 Parses `/etc/auto-discover/discovery.yaml`:
 
 - **`DiscoveryConfig`**: Top-level config (`name`, `bind_ip`, `bind_interface`, `networks`, `defaults`)
-- **`NetworkEntry`**: Per-network config (`name`, `container_port`, `protocol`, `template`, `nginx_generator`, `forwarding`, `preprocess`, `postprocess`)
+- **`NetworkEntry`**: Per-network config (`name`, `container_port`, `protocol`, `template`, `forwarding`)
 - **`ResolvedService`**: Fully resolved config with all defaults applied
 
 ### `consul.rs` — ConsulClient
@@ -213,9 +211,8 @@ Interacts with Consul Agent API:
 - `deregister_by_container()` — Remove all services matching a container ID
 - `get_services_by_container()` — Query services by container ID
 - `get_forwarding_services()` — Query catalog for forwarding services across all agents
-- `get_nginx_configs()`, `watch_nginx_configs()` — KV operations for nginx configs
-- `get_all_catalog_service_ids()` — Query the Consul catalog cluster-wide for all registered service instance IDs. Used by the nginx daemon GC to detect orphaned KV entries
-- `delete_nginx_config_kv()` — Delete all nginx config and postproc KV entries for a service ID (both `sites/` and `streams/` prefixes)
+- `get_all_catalog_service_ids()` — Query the Consul catalog cluster-wide for all registered service instance IDs
+- `delete_kv()` — Delete a single KV entry
 
 ### `daemon.rs` — DiscoveryDaemon
 
@@ -243,13 +240,6 @@ Proxy-side DNAT management:
 Communicates with the natmap daemon via `lab-ops natmap` CLI subprocess or via the daemon's Unix socket HTTP API:
 - `add_docker_mapping()` / `remove_docker_mapping()` — Manage Docker port mappings through natmap
 - `get_container_ip()` — Get container IP via `docker inspect`
-
-### `nginx_daemon.rs` — NginxDaemon
-
-Proxy-side nginx config management:
-- `sync()` — Pull configs from Consul KV, run postprocs, write to disk, reload nginx. Also runs a periodic GC sweep (every 5 min) that cross-references KV entries against the Consul catalog and deletes orphaned entries
-- `run_loop()` — Blocking-query watch loop
-- `gc_orphaned_kv_entries()` — GC sweep that finds and deletes KV entries whose service IDs no longer exist in the Consul catalog
 
 <!-- PortAssignments moved to lab_lib::port; see port.rs section in lab-lib crate above -->
 

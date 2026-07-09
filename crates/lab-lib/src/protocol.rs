@@ -3,6 +3,15 @@
 //! Canonical representation shared across the workspace. Previously defined
 //! in natmap's `models.rs`; extracted here so auto-discover can use it without
 //! depending on natmap.
+//!
+//! ```
+//! use lab_ops_lab_lib::TransportProtocol;
+//!
+//! assert_eq!(TransportProtocol::Tcp.to_string(), "tcp");
+//! assert_eq!(TransportProtocol::Udp.to_string(), "udp");
+//! assert_eq!("tcp".parse::<TransportProtocol>().unwrap(), TransportProtocol::Tcp);
+//! assert!("xyz".parse::<TransportProtocol>().is_err());
+//! ```
 
 use std::fmt::Display;
 

@@ -53,13 +53,13 @@ From `docs/dev/standards.md`:
 | Root CLI | `src/` → `main.rs` | `Cli::parse()`, dispatches to commands |
 | Root cmds | `src/cmd/` | `cf2ansible`, `cf2terra`, `dockernet` |
 | natmap | `crates/natmap/` → `cli.rs:run_cli()` | iptables NAT daemon + CLI over Unix socket |
-| auto-discover | `crates/auto-discover/` → `cli.rs:run_cli()` | Service discovery (Docker + Consul + nginx) |
+| auto-discover | `crates/auto-discover/` → `cli.rs:run_cli()` | Service discovery (Docker + Consul + forwarding) |
 | lab-lib | `crates/lab-lib/` | Shared types: `TransportProtocol`, `PortAllocator`, Docker helpers |
 
 **natmap modules**: `api.rs` (HTTP handlers), `cli.rs` (CLI parsing), `command.rs` (handler functions), `daemon.rs` (state + lifecycle), `iptables.rs` (rule CRUD), `models.rs` (data types), `policy_route.rs` (ip rule/route management).
 
 - **natmap daemon**: central authority for ALL iptables NAT rules. CLI commands talk Unix socket (`/run/natmap.sock`). State in `/var/lib/natmap/state.json`. `natmap install` creates systemd service.
-- **auto-discover daemon**: runs discovery, forwarding, nginx as concurrent tokio tasks. Component flags: `--no-discovery`, `--no-forwarding`, `--no-nginx`.
+- **auto-discover daemon**: runs discovery and forwarding as concurrent tokio tasks. Component flags: `--no-discovery`, `--no-forwarding`.
 - **`policy-route` subcommand** (natmap): manages `ip rule`/`ip route` policy routing for source IP preservation. Used by auto-discover when `preserve_src_ip: true`. API: `POST/DELETE /policy-route`.
 - **`DnatConfig.no_masquerade`**: metadata flag (no iptables change) signaling intent to skip MASQUERADE. Passed through from auto-discover's forwarding sync.
 

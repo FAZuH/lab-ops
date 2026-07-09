@@ -403,9 +403,164 @@ fn parse_dnat_rule(line: &str) -> Option<(String, String, u16, String)> {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
     use serde_json::json;
 
     use super::*;
+
+    fn arb_ipv4() -> impl Strategy<Value = String> {
+        (any::<u8>(), any::<u8>(), any::<u8>(), any::<u8>())
+            .prop_map(|(a, b, c, d)| format!("{a}.{b}.{c}.{d}"))
+    }
+
+    fn arb_forwarding_service() -> impl Strategy<Value = serde_json::Value> {
+        (
+            arb_ipv4(),
+            arb_ipv4(),
+            prop::sample::select(&["tcp", "udp"]),
+            any::<bool>(),
+            any::<bool>(),
+        )
+            .prop_flat_map(|(ext_ip, int_ip, proto, hairpin, preserve_src_ip)| {
+                let port_count = 1..=5usize;
+                (
+                    Just((ext_ip, int_ip, proto, hairpin, preserve_src_ip)),
+                    prop::collection::vec(any::<u16>(), port_count),
+                )
+            })
+            .prop_map(
+                |((ext_ip, int_ip, proto, hairpin, preserve_src_ip), ports)| {
+                    let ports_str = ports
+                        .iter()
+                        .map(|p| p.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let mut meta = serde_json::Map::new();
+                    meta.insert("ext_ip".into(), json!(ext_ip));
+                    meta.insert("ext_ports".into(), json!(ports_str));
+                    meta.insert("protocol".into(), json!(proto));
+                    if hairpin {
+                        meta.insert("hairpin".into(), json!("true"));
+                    }
+                    if preserve_src_ip {
+                        meta.insert("preserve_src_ip".into(), json!("true"));
+                    }
+                    json!({
+                        "Address": int_ip,
+                        "Meta": meta,
+                    })
+                },
+            )
+    }
+
+    fn service_matches_group(svc: &serde_json::Value, g: &ForwardingGroup) -> Option<bool> {
+        let meta = svc.get("Meta")?.as_object()?;
+        let ext_ip = meta.get("ext_ip")?.as_str()?;
+        let address = svc.get("Address")?.as_str()?;
+        let proto = meta
+            .get("protocol")
+            .and_then(|v| v.as_str())
+            .unwrap_or("tcp");
+        if ext_ip != g.ext_ip || address != g.int_ip || proto != g.proto {
+            return Some(false);
+        }
+        Some(true)
+    }
+
+    proptest! {
+        #[test]
+        fn no_duplicate_keys(services in prop::collection::vec(arb_forwarding_service(), 0..=10)) {
+            let groups = group_forwarding_services(services);
+            let mut seen = std::collections::HashSet::new();
+            for g in &groups {
+                let key = (g.ext_ip.clone(), g.int_ip.clone(), g.proto.clone());
+                prop_assert!(seen.insert(key), "duplicate key ({}, {}, {})", g.ext_ip, g.int_ip, g.proto);
+            }
+        }
+
+        #[test]
+        fn ports_sorted_and_unique(services in prop::collection::vec(arb_forwarding_service(), 0..=10)) {
+            let groups = group_forwarding_services(services);
+            for g in &groups {
+                let mut expected = g.ports.clone();
+                expected.sort();
+                expected.dedup();
+                prop_assert_eq!(&g.ports, &expected, "ports not sorted/deduped for ({}, {})", g.ext_ip, g.int_ip);
+            }
+        }
+
+        #[test]
+        fn all_ports_in_group(services in prop::collection::vec(arb_forwarding_service(), 0..=10)) {
+            let groups = group_forwarding_services(services.clone());
+            for svc in &services {
+                let svc_addr = match svc.get("Address").and_then(|v| v.as_str()) {
+                    Some(a) => a,
+                    None => continue,
+                };
+                let meta = match svc.get("Meta").and_then(|v| v.as_object()) {
+                    Some(m) => m,
+                    None => continue,
+                };
+                let ext_ip = match meta.get("ext_ip").and_then(|v| v.as_str()) {
+                    Some(e) => e,
+                    None => continue,
+                };
+                let ports_str = match meta.get("ext_ports").and_then(|v| v.as_str()) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let ports: Vec<u16> = ports_str.split(',').filter_map(|p| p.parse().ok()).collect();
+                if ports.is_empty() {
+                    continue;
+                }
+                let proto = meta.get("protocol").and_then(|v| v.as_str()).unwrap_or("tcp");
+                let group = groups.iter().find(|g| {
+                    g.ext_ip == ext_ip && g.int_ip == svc_addr && g.proto == proto
+                });
+                prop_assert!(group.is_some(),
+                    "service ({}, {}, {}) has no matching group", ext_ip, svc_addr, proto);
+                let group = group.unwrap();
+                for p in &ports {
+                    prop_assert!(group.ports.contains(p),
+                        "port {} from service ({}, {}, {}) not in group", p, ext_ip, svc_addr, proto);
+                }
+            }
+        }
+
+        #[test]
+        fn hairpin_or_ed(services in prop::collection::vec(arb_forwarding_service(), 0..=10)) {
+            let groups = group_forwarding_services(services.clone());
+            for g in &groups {
+                let any_hairpin = services.iter().filter(|svc| {
+                    service_matches_group(svc, g).unwrap_or(false)
+                }).any(|svc| {
+                    svc.get("Meta")
+                        .and_then(|m| m.get("hairpin"))
+                        .and_then(|v| v.as_str())
+                        == Some("true")
+                });
+                prop_assert_eq!(g.hairpin, any_hairpin,
+                    "hairpin mismatch for ({}, {}): group={}, any_service={}", g.ext_ip, g.int_ip, g.hairpin, any_hairpin);
+            }
+        }
+
+        #[test]
+        fn preserve_src_ip_or_ed(services in prop::collection::vec(arb_forwarding_service(), 0..=10)) {
+            let groups = group_forwarding_services(services.clone());
+            for g in &groups {
+                let any_preserve = services.iter().filter(|svc| {
+                    service_matches_group(svc, g).unwrap_or(false)
+                }).any(|svc| {
+                    svc.get("Meta")
+                        .and_then(|m| m.get("preserve_src_ip"))
+                        .and_then(|v| v.as_str())
+                        == Some("true")
+                });
+                prop_assert_eq!(g.preserve_src_ip, any_preserve,
+                    "preserve_src_ip mismatch for ({}, {}): group={}, any_service={}", g.ext_ip, g.int_ip, g.preserve_src_ip, any_preserve);
+            }
+        }
+    }
 
     fn make_service(
         ext_ip: &str,
@@ -570,6 +725,52 @@ mod tests {
         let groups = group_forwarding_services(services);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].ports, vec![80, 443, 8080]);
+    }
+
+    #[test]
+    fn empty_input_returns_empty() {
+        let groups = group_forwarding_services(vec![]);
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn port_zero_in_ext_ports() {
+        let services = vec![make_service(
+            "1.2.3.4", "10.0.0.1", "0", "tcp", false, false,
+        )];
+        let groups = group_forwarding_services(services);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].ports, vec![0]);
+    }
+
+    #[test]
+    fn different_protocols_grouped_separately() {
+        let services = vec![
+            make_service("1.2.3.4", "10.0.0.1", "80", "tcp", false, false),
+            make_service("1.2.3.4", "10.0.0.1", "80", "udp", false, false),
+        ];
+        let groups = group_forwarding_services(services);
+        assert_eq!(groups.len(), 2);
+        assert!(groups.iter().any(|g| g.proto == "tcp"));
+        assert!(groups.iter().any(|g| g.proto == "udp"));
+    }
+
+    #[test]
+    fn meta_non_object_skipped() {
+        let services = vec![json!({
+            "Address": "10.0.0.1",
+            "Meta": "not-an-object",
+        })];
+        assert!(group_forwarding_services(services).is_empty());
+    }
+
+    #[test]
+    fn meta_null_skipped() {
+        let services = vec![json!({
+            "Address": "10.0.0.1",
+            "Meta": null,
+        })];
+        assert!(group_forwarding_services(services).is_empty());
     }
 
     #[test]

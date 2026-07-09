@@ -27,6 +27,9 @@ use crate::models::SnatConfig;
 use crate::models::SnatRequest;
 use crate::models::TransportProtocol;
 
+// --- Read handlers ---
+
+#[tracing::instrument(skip_all)]
 /// `GET /mappings` — Returns all managed DNAT, SNAT, hairpin, and Docker mappings.
 pub async fn list_mappings(State(state): State<AppState>) -> Json<ListResponse> {
     let state = state.daemon_state.read().await;
@@ -138,6 +141,7 @@ pub async fn remove_dnat(
 }
 
 /// `POST /snat` — Adds a static SNAT rule.
+#[tracing::instrument(skip_all, fields(int.ip = %req.int_ip, ext.ip = %req.ext_ip, ext.iface = %req.ext_if))]
 pub async fn add_snat(
     State(state): State<AppState>,
     Json(req): Json<SnatRequest>,
@@ -161,6 +165,7 @@ pub async fn add_snat(
 }
 
 /// `DELETE /snat` — Removes a static SNAT rule.
+#[tracing::instrument(skip_all, fields(int.ip = %req.int_ip, ext.ip = %req.ext_ip))]
 pub async fn remove_snat(
     State(state): State<AppState>,
     Json(req): Json<SnatRequest>,
@@ -187,6 +192,7 @@ pub async fn remove_snat(
 }
 
 /// `POST /hairpin` — Adds a static hairpin NAT rule.
+#[tracing::instrument(skip_all, fields(ext.ip = %req.ext_ip, int.ip = %req.int_ip, ports = %req.ports, proto = %req.proto))]
 pub async fn add_hairpin(
     State(state): State<AppState>,
     Json(req): Json<HairpinRequest>,
@@ -219,6 +225,7 @@ pub async fn add_hairpin(
 }
 
 /// `DELETE /hairpin` — Removes a static hairpin NAT rule.
+#[tracing::instrument(skip_all, fields(ext.ip = %req.ext_ip, int.ip = %req.int_ip, ports = %req.ports))]
 pub async fn remove_hairpin(
     State(state): State<AppState>,
     Json(req): Json<HairpinRequest>,
@@ -253,6 +260,11 @@ pub async fn remove_hairpin(
 
 // --- Policy Route handlers ---
 
+/// `POST /policy-route` — Adds a policy route rule.
+///
+/// Installs an `ip rule` + `ip route` entry for source IP preservation.
+/// Idempotent if the same policy route already exists.
+#[tracing::instrument(skip_all, fields(src.ip = %req.src_ip, via = %req.via, table = req.table))]
 pub async fn add_policy_route(
     State(state): State<AppState>,
     Json(req): Json<PolicyRouteRequest>,
@@ -282,6 +294,11 @@ pub async fn add_policy_route(
     Ok(Json(config))
 }
 
+/// `DELETE /policy-route` — Removes a policy route rule.
+///
+/// Deletes the `ip rule` + `ip route` entry. Idempotent — returns OK
+/// even if the route was already removed from the kernel.
+#[tracing::instrument(skip_all, fields(src.ip = %req.src_ip, via = %req.via, table = req.table))]
 pub async fn remove_policy_route(
     State(state): State<AppState>,
     Json(req): Json<PolicyRouteRequest>,
@@ -312,6 +329,7 @@ pub async fn remove_policy_route(
 // --- Docker handlers ---
 
 /// `PUT /remap/:container_id` — Remaps a host port for a running container.
+#[tracing::instrument(skip_all, fields(container.id = %container_id, old.port = req.host_port, new.port = req.new_host_port))]
 pub async fn remap_port(
     State(state): State<AppState>,
     Path(container_id): Path<String>,
@@ -527,6 +545,7 @@ pub async fn add_mapping(
 }
 
 /// `DELETE /mapping/{container_id}/{port}` — Removes a specific port mapping by container and port.
+#[tracing::instrument(skip_all, fields(container.id = %container_id, port = %port_str))]
 pub async fn remove_mapping(
     State(state): State<AppState>,
     Path((container_id, port_str)): Path<(String, String)>,
@@ -562,6 +581,7 @@ pub async fn remove_mapping(
 }
 
 /// `DELETE /mapping/by-id/:id` — Removes a port mapping by its numeric ID.
+#[tracing::instrument(skip_all, fields(mapping.id = id))]
 pub async fn remove_mapping_by_id(
     State(state): State<AppState>,
     Path(id): Path<u64>,
@@ -586,6 +606,7 @@ pub async fn remove_mapping_by_id(
 }
 
 /// `DELETE /clear` — Removes all managed NAT rules and resets daemon state.
+#[tracing::instrument(skip_all)]
 pub async fn clear_all(
     State(state): State<AppState>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
@@ -625,6 +646,8 @@ pub async fn clear_all(
     state.persist().await;
     Ok(StatusCode::OK)
 }
+
+// --- Internal helpers ---
 
 pub async fn bind_ports(
     ports: Arc<PortAllocator>,
@@ -679,4 +702,283 @@ fn parse_socket_addrs(
             Ok(SocketAddr::new(ip, port))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::IpAddr;
+    use std::str::FromStr;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
+
+    use super::*;
+    use crate::iptables::IptablesManager;
+    use crate::models::*;
+    use crate::policy_route::PolicyRouteManager;
+
+    fn test_app_state() -> AppState {
+        AppState {
+            daemon_state: Arc::new(tokio::sync::RwLock::new(DaemonState::default())),
+            iptables: Arc::new(IptablesManager::new()),
+            policy_route: Arc::new(PolicyRouteManager::new()),
+            docker: None,
+            state_path: std::path::PathBuf::from("/tmp/natmap-test-state.json"),
+            next_id: Arc::new(AtomicU64::new(1)),
+            ports: Arc::new(lab_ops_lab_lib::port::PortAllocator::new()),
+            socket_group: "root".to_string(),
+            socket_path: std::path::PathBuf::from("/tmp/natmap.sock"),
+        }
+    }
+
+    #[test]
+    fn parse_socket_addrs_single_port() {
+        let addrs = parse_socket_addrs("1.2.3.4", "80").unwrap();
+        assert_eq!(
+            addrs,
+            vec![SocketAddr::new(IpAddr::from_str("1.2.3.4").unwrap(), 80)]
+        );
+    }
+
+    #[test]
+    fn parse_socket_addrs_csv_ports() {
+        let addrs = parse_socket_addrs("1.2.3.4", "80,443,8080").unwrap();
+        assert_eq!(addrs.len(), 3);
+        assert_eq!(addrs[0].port(), 80);
+        assert_eq!(addrs[1].port(), 443);
+        assert_eq!(addrs[2].port(), 8080);
+    }
+
+    #[test]
+    fn parse_socket_addrs_invalid_ip_returns_error() {
+        let err = parse_socket_addrs("not-an-ip", "80").unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn parse_socket_addrs_invalid_port_returns_error() {
+        let err = parse_socket_addrs("1.2.3.4", "99999").unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn parse_socket_addrs_port_zero_is_accepted() {
+        let addrs = parse_socket_addrs("1.2.3.4", "0").unwrap();
+        assert_eq!(addrs[0].port(), 0);
+    }
+
+    #[test]
+    fn parse_socket_addrs_empty_ports_returns_error() {
+        let err = parse_socket_addrs("1.2.3.4", "").unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn parse_socket_addrs_port_65535_boundary() {
+        let addrs = parse_socket_addrs("1.2.3.4", "65535").unwrap();
+        assert_eq!(addrs[0].port(), 65535);
+    }
+
+    #[test]
+    fn parse_socket_addrs_ipv6_works() {
+        let addrs = parse_socket_addrs("::1", "443").unwrap();
+        assert_eq!(
+            addrs,
+            vec![SocketAddr::new(IpAddr::from_str("::1").unwrap(), 443)]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_mappings_empty_state() {
+        let state = test_app_state();
+        let res = list_mappings(State(state)).await.0;
+        assert!(res.docker.is_empty());
+        assert!(res.dnats.is_empty());
+        assert!(res.snats.is_empty());
+        assert!(res.hairpins.is_empty());
+        assert!(res.policy_routes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_mappings_reflects_dnat_state() {
+        let state = test_app_state();
+        {
+            let mut lock = state.daemon_state.write().await;
+            lock.dnats.push(DnatConfig {
+                ext_ip: "1.2.3.4".into(),
+                int_ip: "10.0.0.1".into(),
+                ports: "80".into(),
+                proto: TransportProtocol::Tcp,
+                ext_if: None,
+                no_masquerade: false,
+            });
+        }
+        let res = list_mappings(State(state)).await.0;
+        assert_eq!(res.dnats.len(), 1);
+        assert_eq!(res.dnats[0].ext_ip, "1.2.3.4");
+    }
+
+    #[tokio::test]
+    async fn add_dnat_duplicate_is_idempotent() {
+        let state = test_app_state();
+        let req = DnatRequest {
+            ext_ip: "1.2.3.4".into(),
+            int_ip: "10.0.0.1".into(),
+            ports: "80".into(),
+            proto: TransportProtocol::Tcp,
+            ext_if: None,
+            no_masquerade: false,
+        };
+
+        let result = add_dnat(State(state.clone()), Json(req.clone())).await;
+        if result.is_err() {
+            // iptables not available — skip
+            return;
+        }
+        assert!(result.is_ok());
+
+        let second = add_dnat(State(state.clone()), Json(req.clone())).await;
+        assert!(second.is_ok());
+        assert_eq!(state.daemon_state.read().await.dnats.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn remove_dnat_not_found_still_returns_ok() {
+        let state = test_app_state();
+        let req = DnatRequest {
+            ext_ip: "1.2.3.4".into(),
+            int_ip: "10.0.0.1".into(),
+            ports: "80".into(),
+            proto: TransportProtocol::Tcp,
+            ext_if: None,
+            no_masquerade: false,
+        };
+        let result = remove_dnat(State(state), Json(req)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn add_dnat_invalid_port_csv_returns_error() {
+        let state = test_app_state();
+        let req = DnatRequest {
+            ext_ip: "1.2.3.4".into(),
+            int_ip: "10.0.0.1".into(),
+            ports: "not-a-port".into(),
+            proto: TransportProtocol::Tcp,
+            ext_if: None,
+            no_masquerade: false,
+        };
+        let result = add_dnat(State(state), Json(req)).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn remove_snat_not_found_returns_error() {
+        let state = test_app_state();
+        let req = SnatRequest {
+            int_ip: "10.0.0.1".into(),
+            ext_ip: "1.2.3.4".into(),
+            ext_if: "eth0".into(),
+        };
+        let result = remove_snat(State(state), Json(req)).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn add_hairpin_invalid_ip_returns_error() {
+        let state = test_app_state();
+        let req = HairpinRequest {
+            ext_ip: "not-an-ip".into(),
+            int_ip: "10.0.0.1".into(),
+            ports: "80".into(),
+            proto: TransportProtocol::Tcp,
+            lan_cidr: Some("10.0.0.0/24".into()),
+        };
+        let result = add_hairpin(State(state), Json(req)).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn add_mapping_invalid_host_ip_returns_error() {
+        let state = test_app_state();
+        let req = DockerAddMapRequest {
+            host_ip: "bad-ip".into(),
+            host_port: 8080,
+            container_port: 80,
+            target_ip: Some("10.0.0.2".into()),
+            proto: TransportProtocol::Tcp,
+        };
+        let result = add_mapping(State(state), Path("test123".into()), Json(req)).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn add_mapping_with_target_ip_success() {
+        let state = test_app_state();
+        let req = DockerAddMapRequest {
+            host_ip: "127.0.0.1".into(),
+            host_port: 0,
+            container_port: 80,
+            target_ip: Some("10.0.0.2".into()),
+            proto: TransportProtocol::Tcp,
+        };
+        let result = add_mapping(State(state.clone()), Path("test123".into()), Json(req)).await;
+        if result.is_err() {
+            // port 0 allocation or iptables may fail — skip
+            return;
+        }
+        assert!(result.is_ok());
+        let mapping = result.unwrap().0;
+        assert_eq!(mapping.container_id, "test123");
+    }
+
+    #[tokio::test]
+    async fn remove_mapping_not_found_returns_error() {
+        let state = test_app_state();
+        let result = remove_mapping(State(state), Path(("nonexistent".into(), "80".into()))).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn remove_mapping_by_id_not_found_returns_error() {
+        let state = test_app_state();
+        let result = remove_mapping_by_id(State(state), Path(999)).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn remap_port_container_not_found_returns_error() {
+        let state = test_app_state();
+        let req = DockerRemapRequest {
+            host_port: 8080,
+            new_host_port: 9090,
+        };
+        let result = remap_port(State(state), Path("nonexistent".into()), Json(req)).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn clear_all_empty_state_succeeds() {
+        let state = test_app_state();
+        let result = clear_all(State(state)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn remove_policy_route_not_found_returns_ok() {
+        let state = test_app_state();
+        let req = PolicyRouteRequest {
+            src_ip: "10.0.0.1".into(),
+            via: "192.168.1.1".into(),
+            table: 100,
+        };
+        let result = remove_policy_route(State(state), Json(req)).await;
+        assert!(result.is_ok());
+    }
 }

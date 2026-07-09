@@ -1,7 +1,6 @@
 //! Consul HTTP API client for service registration and KV storage.
 
 use std::collections::HashMap;
-use std::collections::HashSet;
 
 use color_eyre::Result;
 use color_eyre::eyre::WrapErr;
@@ -11,33 +10,7 @@ use serde_json::json;
 
 use crate::config::ResolvedService;
 
-/// A single key-value entry from Consul's KV store.
-///
-/// Values are automatically base64-decoded by the client.
-#[derive(Debug, Clone)]
-pub struct KvEntry {
-    /// Full key path (e.g. `nginx-configs/sites/svc-123.conf`).
-    pub key: String,
-    /// Decoded plain-text value.
-    pub value: String,
-}
-
-#[derive(serde::Deserialize)]
-#[allow(non_snake_case)]
-struct KvRawEntry {
-    Key: String,
-    Value: String,
-}
-
-fn base64_decode(s: &str) -> Option<String> {
-    use base64::Engine;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(s.as_bytes())
-        .ok()?;
-    Some(String::from_utf8(bytes).unwrap_or_default())
-}
-
-/// Client for the Consul HTTP API (service registration, KV store, catalog queries).
+/// Client for the Consul HTTP API (service registration, catalog queries).
 pub struct ConsulClient {
     http_addr: String,
     client: reqwest::Client,
@@ -54,7 +27,7 @@ pub struct ConsulServiceRegistration {
     pub address: String,
     /// Port for the health check.
     pub port: u16,
-    /// Arbitrary metadata (domain, template, protocol, forwarding info, etc.).
+    /// Arbitrary metadata (domain, protocol, forwarding info, etc.).
     pub meta: HashMap<String, String>,
     /// Health check definition (TCP or UDP netcat).
     pub check: serde_json::Value,
@@ -252,165 +225,6 @@ impl ConsulClient {
 
         Ok(results)
     }
-
-    /// Store a value at the given KV key.
-    pub async fn put_kv(&self, key: &str, value: &str) -> Result<()> {
-        let url = format!("{}/v1/kv/{}", self.http_addr, key);
-        let resp = self
-            .client
-            .put(&url)
-            .body(value.to_owned())
-            .send()
-            .await
-            .wrap_err("Consul HTTP request failed")?;
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            bail!("Consul API error: {}", body.trim());
-        }
-        Ok(())
-    }
-
-    /// List all KV entries under a prefix. Returns an empty vec if the
-    /// prefix does not exist.
-    pub async fn list_kv_prefix(&self, prefix: &str) -> Result<Vec<KvEntry>> {
-        let url = format!("{}/v1/kv/{}?recurse=true", self.http_addr, prefix);
-        let resp = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .wrap_err("Consul HTTP request failed")?;
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(vec![]);
-        }
-        let entries: Vec<KvRawEntry> = resp.json().await.wrap_err("Consul HTTP request failed")?;
-        Ok(entries
-            .into_iter()
-            .map(|e| KvEntry {
-                key: e.Key,
-                value: base64_decode(&e.Value).unwrap_or_default(),
-            })
-            .collect())
-    }
-
-    /// Long-poll the Consul KV prefix with a blocking query.
-    ///
-    /// Returns `(entries, new_index)` where `new_index` should be passed
-    /// in the next call for continuous watching. Blocks up to 55 seconds.
-    pub async fn list_kv_prefix_blocking(
-        &self,
-        prefix: &str,
-        index: u64,
-    ) -> Result<(Vec<KvEntry>, u64)> {
-        let url = format!(
-            "{}/v1/kv/{}?recurse=true&wait=55s&index={}",
-            self.http_addr, prefix, index
-        );
-        let resp = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .wrap_err("Consul HTTP request failed")?;
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok((vec![], index));
-        }
-        let new_index: u64 = resp
-            .headers()
-            .get("x-consul-index")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(index);
-        let entries: Vec<KvRawEntry> = resp.json().await.wrap_err("Consul HTTP request failed")?;
-        Ok((
-            entries
-                .into_iter()
-                .map(|e| KvEntry {
-                    key: e.Key,
-                    value: base64_decode(&e.Value).unwrap_or_default(),
-                })
-                .collect(),
-            new_index,
-        ))
-    }
-
-    /// Delete a single KV key. 404 responses are silently ignored.
-    pub async fn delete_kv(&self, key: &str) -> Result<()> {
-        let url = format!("{}/v1/kv/{}", self.http_addr, key);
-        let resp = self
-            .client
-            .delete(&url)
-            .send()
-            .await
-            .wrap_err("Consul HTTP request failed")?;
-        if !resp.status().is_success() && resp.status() != reqwest::StatusCode::NOT_FOUND {
-            let body = resp.text().await.unwrap_or_default();
-            bail!("Consul API error: {}", body.trim());
-        }
-        Ok(())
-    }
-
-    /// Delete all nginx config and postproc KV entries for a service ID
-    /// (both `sites/` and `streams/` prefixes).
-    pub async fn delete_nginx_config_kv(&self, service_id: &str) -> Result<()> {
-        for prefix in &["sites", "streams"] {
-            let _ = self
-                .delete_kv(&format!("nginx-configs/{prefix}/{service_id}.conf"))
-                .await;
-            let _ = self
-                .delete_kv(&format!("nginx-configs/{prefix}/{service_id}.postproc"))
-                .await;
-        }
-        Ok(())
-    }
-
-    /// Query the Consul catalog cluster-wide for all registered service
-    /// instance IDs.
-    ///
-    /// Iterates over all service names in the catalog and collects every
-    /// `ServiceID`. Used by the nginx daemon GC to detect orphaned KV
-    /// entries whose service no longer exists.
-    pub async fn get_all_catalog_service_ids(&self) -> Result<HashSet<String>> {
-        let services_url = format!("{}/v1/catalog/services", self.http_addr);
-        let resp = self
-            .client
-            .get(&services_url)
-            .send()
-            .await
-            .wrap_err("Consul HTTP request failed")?;
-        let catalog: HashMap<String, Vec<String>> =
-            resp.json().await.wrap_err("Consul HTTP request failed")?;
-
-        let mut ids = HashSet::new();
-
-        for svc_name in catalog.keys() {
-            let svc_url = format!(
-                "{}/v1/catalog/service/{}",
-                self.http_addr,
-                urlencoding(svc_name)
-            );
-            let resp = self
-                .client
-                .get(&svc_url)
-                .send()
-                .await
-                .wrap_err("Consul HTTP request failed")?;
-            let instances: Vec<serde_json::Value> =
-                resp.json().await.wrap_err("Consul HTTP request failed")?;
-
-            for instance in instances {
-                if let Some(sid) = instance
-                    .get("ServiceID")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                {
-                    ids.insert(sid);
-                }
-            }
-        }
-
-        Ok(ids)
-    }
 }
 
 impl ConsulServiceRegistration {
@@ -439,6 +253,9 @@ impl ConsulServiceRegistration {
 
         let mut meta = HashMap::new();
         meta.insert("domain".into(), domain);
+        if service.domains().len() > 1 {
+            meta.insert("domains".into(), service.domains().join(","));
+        }
         meta.insert("protocol".into(), protocol.to_string());
         meta.insert("server_name".into(), server_name.to_string());
         meta.insert("generation_id".into(), generation_id.to_string());
@@ -590,9 +407,6 @@ mod tests {
                 domains: vec!["drive.example.com".into()],
                 proxy_on: None,
                 proxy_ip: Some("203.0.113.43".into()),
-                nginx_generator: "/usr/local/bin/auto-discover-gen-nginx".into(),
-                preprocess: String::new(),
-                postprocess: String::new(),
             },
         };
 
@@ -638,9 +452,6 @@ mod tests {
                 domains: vec!["dns.example.com".into()],
                 proxy_on: None,
                 proxy_ip: None,
-                nginx_generator: "/usr/local/bin/auto-discover-gen-nginx".into(),
-                preprocess: String::new(),
-                postprocess: String::new(),
             },
         };
 

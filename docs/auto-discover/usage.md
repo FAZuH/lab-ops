@@ -3,42 +3,35 @@
 - **Proxy server**: Public-facing reverse proxy server that routes traffic to other servers (currently `proxy-node-1`)
 - **Service server**: Servers that host Docker services
 - **Service**: A named group of containers. e.g., `example-drive`
-- **auto-discover**: Rust daemon that watches Docker events, manages port forwarding via `lab-ops`, registers services with Consul, generates nginx configs stored in Consul KV, and syncs forwarding/nginx rules on the proxy server. Components are controlled with `--no-discovery`/`--no-forwarding`/`--no-nginx` flags
+- **auto-discover**: Rust daemon that watches Docker events, manages port forwarding via `lab-ops`, registers services with Consul, and syncs forwarding rules on the proxy server. Components are controlled with `--no-discovery`/`--no-forwarding` flags
 - **lab-ops natmap**: Manages iptables NAT rules, including dynamic Docker port mappings
 - **Forwarding**: Kernel-level NAT (iptables DNAT) that bypasses NGINX reverse proxy for latency-sensitive or non-HTTP services (e.g., game servers, mail servers). Managed via `lab-ops natmap dnat` on the proxy server
-- **auto-discover nginx component**: Runs as part of the unified daemon on the proxy server, watches Consul KV for nginx config changes, applies post-processing, and writes per-service configs to `sites-available/` and `streams-available/`. nginx-ui manages `sites-enabled/` symlinks. Disable with `--no-nginx`
-- **Static nginx configs**: Proxy-local services (Consul UI, NGINX-UI) served directly from the proxy server via static nginx configs at `/etc/nginx/sites-available/`. These do NOT go through Docker/Consul/auto-discover
+
 
 ## Architecture
 
-The cluster uses two networks: Tailscale (`100.64.0.x` CGNAT) for user-facing access, and a VM bridge (`10.0.0.x`) for Consul gossip and inter-service traffic. The proxy server (`proxy-node-1`) runs the auto-discover daemon (`--no-discovery`) to route traffic from the public IP (`203.0.113.43`) and Tailscale IP to service VMs.
-
-Proxy-local services (Consul UI, NGINX-UI) are served by static nginx configs — they don't go through Docker/Consul/auto-discover.
+The cluster uses two networks: Tailscale (`100.64.0.x` CGNAT) for user-facing access, and a VM bridge (`10.0.0.x`) for Consul gossip and inter-service traffic. The proxy server (`proxy-node-1`) runs the auto-discover daemon (both discovery and forwarding components) to route traffic from the public IP (`203.0.113.43`) and Tailscale IP to service VMs.
 
 ```
 Service Server                           Proxy Server
 ─────────────                           ─────────────
 Docker Container:80                     lab-ops auto-discover daemon
-    │                                      │  (--no-discovery)
-    ▼                                      │  watches Consul KV
-lab-ops natmap docker add                  │  blocking queries
-    │  (iptables DNAT)                     │
+    │                                      │
+    ▼                                      │  polls Consul every 30s
+lab-ops natmap docker add                  │  for Meta.forwarding==true
+    │  (iptables DNAT)                     │  applies natmap dnat rules
     ▼                                      ▼
-10.0.0.101:32000 ←──────────────  NGINX configs written:
-    │                                /etc/nginx/sites-available/{id}.conf
-    ▼                                /etc/nginx/streams-available/{id}.conf
-auto-discover (daemon)                     │
-    │  generates nginx config        nginx-ui manages sites-enabled
-    │  runs generator script         symlinks for enable/disable
-    │  stores in Consul KV:               │
-    │  nginx-configs/sites/{id}.conf      ▼
-    │  registers to Consul:         NGINX reverse proxy (http + stream)
-    │  - Address: 10.0.0.101            │  reloaded on config change
-    │  - Port: 32000                      │
-    │  - Meta.proxy_ip: 203.0.113.43      │
-    │  - Meta.template: HTTP              ▼
-    │  - Meta.domain: drive.example.com  Internet ← 203.0.113.43:80/443
-    ▼
+10.0.0.101:32000 ←──────────────  203.0.113.43:36000
+    │                                        
+    ▼                                        
+auto-discover (daemon)                     
+    │  registers to Consul:               
+    │  - Address: 10.0.0.101            
+    │  - Port: 32000                      
+    │  - Meta.proxy_ip: 203.0.113.43      
+    │  - Meta.template: HTTP             
+    │  - Meta.domain: drive.example.com  
+    ▼                                      
 Consul Agent ──────────────────────────→ Consul Server
                                       (proxy-node-1)
                                         │
@@ -54,12 +47,8 @@ Consul Agent ──────────────────────�
 ```
 
 **Nginx config generation**:
-- Service nodes: `lab-ops auto-discover daemon` calls `/usr/local/bin/auto-discover-gen-nginx` with `AUTO_DISCOVER_*` env vars, applies inline `preprocess`, and stores the result in Consul KV at `nginx-configs/{sites,streams}/{service_id}.conf`
-- If `postprocess` is configured, the script content is stored alongside at `nginx-configs/{sites,streams}/{service_id}.postproc`
-- Proxy server: `lab-ops auto-discover daemon --no-discovery` watches Consul KV with blocking queries, pipes each config through per-service postproc scripts + common postprocs from `/etc/auto-discover/postprocs.d/`, and writes to `/var/lib/auto-discover/nginx-configs/`
-- Configs are symlinked to `/etc/nginx/sites-available/` or `/etc/nginx/streams-available/`
-- nginx-ui manages `sites-enabled/` and `streams-enabled/` symlinks for enable/disable
-- Adding or changing a service triggers Consul KV update → automatic nginx regeneration
+- Service nodes: `lab-ops auto-discover daemon` discovers Docker containers, allocates host ports, registers services with Consul, and creates NAT mappings via natmap
+- Proxy server: `lab-ops auto-discover daemon` watches Consul for forwarding services and applies DNAT rules via natmap
 
 ### Route flow
 1. Internet → Proxy Server (NGINX) → Service Server VM IP:port → iptables DNAT → Docker container
@@ -74,7 +63,7 @@ For services with `forwardlocal` or `forwardremote` config, the flow bypasses NG
 Service Server                           Proxy Server
 ─────────────                           ─────────────
 Docker Container:25565                  lab-ops auto-discover daemon
-    │                                         │  (--no-discovery --no-nginx)
+    │                                         │
     ▼                                         │
 lab-ops natmap docker add                     │ (reads Consul forwarding meta)
     │  (iptables DNAT, static port)           │
@@ -94,7 +83,7 @@ Consul Agent ──────────────────────�
                                   (proxy-node-1)
 ```
 
-The proxy server runs `lab-ops auto-discover daemon --no-discovery --no-nginx` via systemd. See [[#forwarding-daemon]] for the service unit and polling details.
+The proxy server runs `lab-ops auto-discover daemon` via systemd. The forwarding component polls Consul every 30s for services with `Meta.forwarding=="true"` and applies DNAT rules.
 
 ## Configuration
 
@@ -113,16 +102,13 @@ defaults:
   proxy_on: proxy-node-1       # proxy server node name (optional, for multi-proxy)
   bind_ip: 10.0.0.101         # cascades: per-service → defaults → container IP (fallback)
   bind_interface: eth0         # resolved via `ip -j -4 addr show <iface>`
-  nginx_generator: /usr/local/bin/auto-discover-gen-nginx  # path to generator script
-  preprocess: ""               # default preprocess script (runs on service node)
-  postprocess: ""              # default postprocess script (runs on proxy)
 
 services:
   example-drive:
     type: docker               # "docker" or "local"
     match:
       project: example-drive   # must match com.docker.compose.project label
-    rproxylocal:               # reverse proxy entries for services on this node (nginx configs)
+    rproxylocal:               # reverse proxy entries for services on this node
       - port: 80
         template: HTTP_PROXY
         domains:
@@ -182,7 +168,7 @@ services:
 | `address` | No | IP address for `type: local` services. Not used for Docker services |
 | `bind_ip` | No | IP to bind the natmap host port on. Cascades from `defaults.bind_ip`. Falls back to container Docker IP |
 | `bind_interface` | No | Interface name to resolve an IP from via `ip -j -4 addr show`. Cascades from `defaults.bind_interface` |
-| `rproxylocal` | No | List of reverse proxy port entries for services on this node. Each entry generates an nginx config stored in Consul KV. See [[#RProxyLocal Config]] below |
+| `rproxylocal` | No | List of reverse proxy port entries for services on this node. See [[#RProxyLocal Config]] below |
 | `rproxyremote` | No | List of reverse proxy port entries for services on other nodes. Requires `proxy_on` to specify target proxy. See [[#RProxyRemote Config]] below |
 | `forwardlocal` | No | List of kernel-level NAT port entries for iptables DNAT on this node. See [[#ForwardLocal Config]] below |
 | `forwardremote` | No | List of kernel-level NAT port entries for iptables DNAT on the proxy server. See [[#ForwardRemote Config]] below |
@@ -203,25 +189,19 @@ At least one match field should be set. If `match` is absent, the service matche
 | Field | Required | Description |
 |-------|----------|-------------|
 | `port` | Yes | Container/host port the service listens on |
-| `template` | Yes | Nginx template type (e.g., `HTTP_PROXY`, `TCP_PROXY`). Used by your custom nginx generator script. |
-| `domains` | No | Domain names for NGINX `server_name`. First domain is the primary — also used as a discriminator in the Consul service ID to prevent collisions when multiple entries share the same name+port |
+| `template` | Yes | Template type (e.g., `HTTP_PROXY`, `TCP_PROXY`). Stored as Consul `Meta.template` for external consumers. |
+| `domains` | No | Domain names. First domain used as a discriminator in the Consul service ID to prevent collisions when multiple entries share the same name+port |
 | `proxy_ip` | No | Override for the proxy server IP. Cascades from `defaults.proxy_ip` |
-| `nginx_generator` | No | Path to nginx config generator script. Cascades from `defaults.nginx_generator`. Default: `/usr/local/bin/auto-discover-gen-nginx` |
-| `preprocess` | No | Inline shell script run on the service node after the generator. stdin = generator output, stdout = stored config. Cascades from `defaults.preprocess` |
-| `postprocess` | No | Inline shell script stored in Consul KV, run on the proxy. stdin = config from KV, stdout = final nginx config. Exit 1 = skip. Cascades from `defaults.postprocess` |
 
 **RProxyRemote Config (`services.<name>.rproxyremote[]`):**
 
 | Field | Required | Description |
 |-------|----------|-------------|
 | `port` | Yes | Container/host port the service listens on |
-| `template` | Yes | Nginx template type (e.g., `HTTP_PROXY`, `TCP_PROXY`). Used by your custom nginx generator script. |
-| `domains` | No | Domain names for NGINX `server_name`. First domain is the primary — also used as a discriminator in the Consul service ID to prevent collisions when multiple entries share the same name+port |
-| `proxy_on` | Yes | Target proxy server node name where this nginx config should be generated |
+| `template` | Yes | Template type (e.g., `HTTP_PROXY`, `TCP_PROXY`). Stored as Consul `Meta.template` for external consumers. |
+| `domains` | No | Domain names. First domain used as a discriminator in the Consul service ID to prevent collisions when multiple entries share the same name+port |
+| `proxy_on` | Yes | Target proxy server node name |
 | `proxy_ip` | No | Override for the proxy server IP. Cascades from `defaults.proxy_ip` |
-| `nginx_generator` | No | Path to nginx config generator script. Cascades from `defaults.nginx_generator`. Default: `/usr/local/bin/auto-discover-gen-nginx` |
-| `preprocess` | No | Inline shell script run on the service node after the generator. stdin = generator output, stdout = stored config. Cascades from `defaults.preprocess` |
-| `postprocess` | No | Inline shell script stored in Consul KV, run on the proxy. stdin = config from KV, stdout = final nginx config. Exit 1 = skip. Cascades from `defaults.postprocess` |
 
 **Defaults fields:**
 
@@ -231,9 +211,6 @@ At least one match field should be set. If `match` is absent, the service matche
 | `proxy_ip` | Default proxy server listen IP for all services |
 | `bind_ip` | Default natmap bind IP for all services |
 | `bind_interface` | Default interface for IP resolution |
-| `nginx_generator` | Default path to nginx config generator script |
-| `preprocess` | Default preprocess script |
-| `postprocess` | Default postprocess script |
 | `preserve_src_ip` | Default source IP preservation setting for all ForwardRemote services |
 | `preserve_src_ip_gateway` | Default gateway IP for policy routing |
 | `preserve_src_ip_src` | Default source IP for policy routing |
@@ -307,7 +284,7 @@ services:
 1. **Service server**: The daemon uses `ext_ports[0]` as the Consul registration host port value. No local natmap mapping is created — the DNAT rule lives entirely on the proxy server. The port is NOT persisted to `ports.json`. No `port_is_free` check is performed on the service node.
 2. **Service server**: Registers in Consul with forwarding meta (`forwarding=true`, `forwarding_type=remote`, `ext_ip`, `ext_ports`, `hairpin`). If `preserve_src_ip: true`, also includes `preserve_src_ip=true`, `preserve_src_ip_gateway`, and `preserve_src_ip_src` in meta.
 3. **Service server** (preserve_src_ip only): Calls `natmap policy-route` to add an `ip rule` and `ip route` so return traffic routes back through the proxy gateway, preserving the real sender IP.
-4. **Proxy server**: Runs `lab-ops auto-discover daemon --no-discovery --no-nginx` (or one-shot `forwarding-sync`), which:
+4. **Proxy server**: Runs `lab-ops auto-discover daemon` (or one-shot `forwarding-sync`), which:
    - Queries Consul **catalog** API (`GET /v1/catalog/services` → `GET /v1/health/service/:name?passing=true`) across all agents — NOT the local agent API. Forwarding services are registered on service VMs' agents, not the proxy's agent
    - Filters services with `Meta.forwarding=="true"`
    - Groups by `(ext_ip, address, protocol)`
@@ -323,69 +300,6 @@ services:
 1. **Service node**: The daemon uses `bind_port` as a static host port (or allocates from ephemeral pool if unset). Always calls natmap to create the DNAT rule on the service node.
 2. **Service node**: Registers in Consul with `forwarding=true`, `forwarding_type=local`. No `ext_ip`, `ext_ports`, or `hairpin` metadata.
 3. **No proxy-server DNAT sync**: ForwardLocal does NOT participate in the proxy-server forwarding daemon. DNAT is local to the service node.
-
-### Proxy Server NGINX Config Generation
-
-The proxy server runs **`lab-ops auto-discover daemon --no-discovery`** as a systemd daemon that watches Consul KV for nginx config changes using Consul's blocking-query mechanism.
-
-**Flow:**
-1. Service nodes generate nginx configs via `/usr/local/bin/auto-discover-gen-nginx` and store them in Consul KV at `nginx-configs/sites/{service_id}.conf` (or `streams/`)
-2. The auto-discover daemon watches the `nginx-configs/` KV prefix. When any key changes, it:
-   - Reads all `.conf` keys
-   - Pipes each through the service's postproc script (if stored at `.postproc` key)
-   - Runs all common postprocs from `/etc/auto-discover/postprocs.d/` in lexicographic order
-   - Writes processed configs to `/var/lib/auto-discover/nginx-configs/`
-   - Symlinks to `/etc/nginx/sites-available/` or `/etc/nginx/streams-available/`
-   - Runs `nginx -t && systemctl reload nginx` if configs changed
-3. nginx-ui manages `sites-enabled/` and `streams-enabled/` symlinks — the daemon never touches them
-
-**Stale config GC:** Every 5 minutes, the daemon performs a GC sweep that cross-references the KV entries against the Consul catalog. If a KV entry's service ID no longer exists in any registered Consul service (e.g., a node crashed and `DeregisterCriticalServiceAfter` auto-removed the service after 5 minutes), the orphaned config and postproc KV entries are deleted. This prevents stale configs from accumulating and disrupting nginx with references to dead upstream addresses.
-
-**Generator script** (`/usr/local/bin/auto-discover-gen-nginx`):
-- Receives service data via `AUTO_DISCOVER_*` env vars
-- Outputs raw nginx config to stdout
-- Optionally piped through `preprocess` (inline shell in discovery.yaml) before storage
-
-**Common postprocs** (`/etc/auto-discover/postprocs.d/`):
-- `10-handle-tailscale-private`: substitutes `__TAILSCALE_IP__` → actual Tailscale IP. Exits 1 (skip service) if tailscale is unreachable and config contains the placeholder
-
-**auto-discover-nginx systemd unit** (proxy server, nginx component only):
-
-```ini
-[Unit]
-Description=auto-discover — NGINX config generator
-Requires=consul.service network-online.target
-After=consul.service network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/lab-ops auto-discover daemon --no-discovery --no-forwarding
-Restart=on-failure
-RestartSec=10
-Environment=TAILSCALE_IP=<tailscale-ip>
-Environment=TAILSCALE_REACHABLE=true|false
-```
-
-**Dynamic updates**: the auto-discover daemon uses Consul KV blocking queries (long-polling with an index parameter). Any KV change under `nginx-configs/` triggers regeneration and reload.
-
-### forwarding-daemon
-
-The proxy server runs `lab-ops auto-discover daemon --no-discovery --no-nginx` as a systemd daemon. It polls Consul every 30s for services with `Meta.forwarding=="true"` and applies `lab-ops natmap dnat` rules. Static ports are configured in `discovery.yaml` — no ephemeral allocation.
-
-**systemd unit** (proxy server, forwarding component only):
-
-```ini
-[Unit]
-Description=Lab Discovery Forwarding Daemon
-Requires=consul.service network-online.target
-After=consul.service network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/lab-ops auto-discover daemon --no-discovery --no-nginx
-Restart=on-failure
-RestartSec=10
-```
 
 ## Consul Service Registration
 
@@ -454,7 +368,7 @@ When forwarding is configured, additional meta fields are present:
 - `Meta.template`: Template file name on the proxy server
 - `Meta.protocol`: `tcp` or `udp`
 - `Meta.proxy_ip`: Proxy server IP (used by generator script `listen` directive)
-- `Meta.proxy_on`: Target proxy server node name for nginx config generation (RProxyRemote only)
+- `Meta.proxy_on`: Target proxy server node name (RProxyRemote only)
 - `Meta.generation_id`: Deterministic config version for stale service cleanup (`{node_name}-{sha256_of_config[:16]}`)
 - `Meta.container_id`: Docker container ID for per-container deregistration
 - `Meta.*`: Any `extra` fields from `discovery.yaml` are passed through as-is
@@ -486,15 +400,7 @@ UDP services use a `netcat`-based health check instead of TCP:
 }
 ```
 
-### Nginx Config KV Query
 
-The auto-discover daemon watches Consul KV with blocking queries:
-
-```
-GET /v1/kv/nginx-configs/?recurse=true&wait=55s&index=X
-```
-
-Returns all `.conf` and `.postproc` keys. The daemon processes each config through per-service and common postprocs, writes to disk, and reloads nginx on change.
 
 ## auto-discover Daemon
 
@@ -536,7 +442,7 @@ After=docker.service natmap.service consul.service network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/lab-ops auto-discover daemon --no-forwarding --no-nginx
+ExecStart=/usr/local/bin/lab-ops auto-discover daemon --no-forwarding
 Restart=on-failure
 RestartSec=10
 
@@ -551,9 +457,9 @@ WantedBy=multi-user.target
 lab-ops auto-discover daemon
 
 # Run discovery only (service node)
-lab-ops auto-discover daemon --no-forwarding --no-nginx
+lab-ops auto-discover daemon --no-forwarding
 
-# Run forwarding + nginx only (proxy server)
+# Run forwarding only (disable discovery on systems with no Docker)
 lab-ops auto-discover daemon --no-discovery
 
 # Run a single sync pass and exit
@@ -564,9 +470,6 @@ lab-ops auto-discover check
 
 # Run on proxy server: one-shot sync of DNAT rules from Consul
 lab-ops auto-discover forwarding-sync [--consul-addr http://127.0.0.1:8500]
-
-# Run on proxy server: one-shot sync of nginx configs from Consul KV
-lab-ops auto-discover nginx-sync [--consul-addr http://127.0.0.1:8500]
 
 # Show version
 lab-ops auto-discover --version
@@ -601,4 +504,4 @@ The `node.name` field in `discovery.yaml` is the single source of node identity.
 5. **Deploy** `auto-discover.service` systemd unit (daemon mode)
 6. **Depends on**: `consul.service` + `natmap.service` (from `lab-ops natmap install`)
 
-Proxy-local static nginx configs at `/etc/nginx/sites-available/consul` and `/etc/nginx/sites-available/web` serve the Consul web UI (`127.0.0.1:8500`) and NGINX-UI (`100.64.0.1:9000`) on the proxy server itself.
+
