@@ -56,6 +56,7 @@ use crate::docker;
 use crate::iptables::IptablesManager;
 use crate::models::DaemonState;
 use crate::models::DockerPortMap;
+use crate::models::DockerPortMapRequest;
 use crate::policy_route::PolicyRouteManager;
 
 /// Shared application state held by all Axum route handlers.
@@ -454,9 +455,43 @@ impl Daemon {
                     continue;
                 }
                 let mut kept = Vec::new();
+
+                // Re-inspect container to get current IPs (may have changed if
+                // Docker network was recreated while daemon was down)
+                let current_addrs: HashMap<SocketAddr, SocketAddr> =
+                    docker::get_port_mappings(docker, &id)
+                        .await
+                        .ok()
+                        .into_iter()
+                        .flat_map(|mappings| {
+                            mappings
+                                .into_iter()
+                                .map(|m| (m.request.host_addr, m.request.container_addr))
+                        })
+                        .collect();
+
                 // iter port mappings for this container
-                for m in maps {
+                for mut m in maps {
                     let host_addr = m.request.host_addr;
+
+                    // Update container_addr from live Docker inspect if changed
+                    // (silently falls back to stored IP if inspect failed above)
+                    if let Some(&current_ctn_addr) = current_addrs.get(&host_addr) {
+                        let proto = m.request.proto;
+                        if reconcile_container_addr(
+                            &mut m.request,
+                            &DockerPortMapRequest {
+                                host_addr,
+                                container_addr: current_ctn_addr,
+                                proto,
+                            },
+                        ) {
+                            tracing::info!(
+                                container.id = %id, host.port = %host_addr.port(),
+                                "container IP changed on reload"
+                            );
+                        }
+                    }
 
                     // check this map
                     if ports.is_allocated(host_addr).await {
@@ -602,9 +637,24 @@ fn untracked_container_ids<'a>(
         .collect()
 }
 
+/// Updates `stored` container address from `current` if it changed.
+///
+/// Returns `true` if an update was made.
+fn reconcile_container_addr(
+    stored: &mut DockerPortMapRequest,
+    current: &DockerPortMapRequest,
+) -> bool {
+    if stored.container_addr == current.container_addr {
+        return false;
+    }
+    stored.container_addr = current.container_addr;
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::net::SocketAddr;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
@@ -619,9 +669,12 @@ mod tests {
 
     use super::AppState;
     use super::Daemon;
+    use super::reconcile_container_addr;
     use super::untracked_container_ids;
     use crate::iptables::IptablesManager;
     use crate::models::DaemonState;
+    use crate::models::DockerPortMapRequest;
+    use crate::models::TransportProtocol;
     use crate::policy_route::PolicyRouteManager;
 
     fn id_set(ids: &[&str]) -> HashSet<String> {
@@ -720,5 +773,62 @@ mod tests {
         let tracked = id_set(&["a", "b"]);
         let result = untracked_container_ids(&running, &tracked);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn reconcile_addr_no_change() {
+        let mut stored = DockerPortMapRequest {
+            host_addr: "0.0.0.0:9000".parse().unwrap(),
+            container_addr: "10.0.0.2:9000".parse().unwrap(),
+            proto: TransportProtocol::Tcp,
+        };
+        let current = DockerPortMapRequest {
+            host_addr: "0.0.0.0:9000".parse().unwrap(),
+            container_addr: "10.0.0.2:9000".parse().unwrap(),
+            proto: TransportProtocol::Tcp,
+        };
+        assert!(!reconcile_container_addr(&mut stored, &current));
+        assert_eq!(
+            stored.container_addr,
+            "10.0.0.2:9000".parse::<SocketAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn reconcile_addr_updated() {
+        let mut stored = DockerPortMapRequest {
+            host_addr: "0.0.0.0:9000".parse().unwrap(),
+            container_addr: "10.0.0.2:9000".parse().unwrap(),
+            proto: TransportProtocol::Tcp,
+        };
+        let current = DockerPortMapRequest {
+            host_addr: "0.0.0.0:9000".parse().unwrap(),
+            container_addr: "10.0.0.3:9000".parse().unwrap(),
+            proto: TransportProtocol::Tcp,
+        };
+        assert!(reconcile_container_addr(&mut stored, &current));
+        assert_eq!(
+            stored.container_addr,
+            "10.0.0.3:9000".parse::<SocketAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn reconcile_addr_different_host_port_same_container_ip() {
+        let mut stored = DockerPortMapRequest {
+            host_addr: "0.0.0.0:8080".parse().unwrap(),
+            container_addr: "10.0.0.2:80".parse().unwrap(),
+            proto: TransportProtocol::Tcp,
+        };
+        let current = DockerPortMapRequest {
+            host_addr: "0.0.0.0:9090".parse().unwrap(),
+            container_addr: "10.0.0.2:80".parse().unwrap(),
+            proto: TransportProtocol::Tcp,
+        };
+        assert!(!reconcile_container_addr(&mut stored, &current));
+        assert_eq!(
+            stored.container_addr,
+            "10.0.0.2:80".parse::<SocketAddr>().unwrap()
+        );
     }
 }
