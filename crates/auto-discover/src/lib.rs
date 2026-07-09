@@ -8,7 +8,6 @@
 //! - `daemon` — Long-running daemon on service nodes (watches Docker events)
 //! - `sync` — One-shot sync on service nodes
 //! - `check` — Validate the discovery configuration file
-//! - `forwarding-daemon` — Proxy-side daemon for kernel-level DNAT rules (30s polling)
 //! - `forwarding-sync` — One-shot proxy-side DNAT rule sync
 //!
 //! The CLI is exposed through [`cli::run_cli`] and integrated as the
