@@ -10,13 +10,13 @@
 
 ## Architecture
 
-The cluster uses two networks: Tailscale (`100.64.0.x` CGNAT) for user-facing access, and a VM bridge (`10.0.0.x`) for Consul gossip and inter-service traffic. The proxy server (`proxy-node-1`) runs the auto-discover daemon (`--no-discovery`) to route traffic from the public IP (`203.0.113.43`) and Tailscale IP to service VMs.
+The cluster uses two networks: Tailscale (`100.64.0.x` CGNAT) for user-facing access, and a VM bridge (`10.0.0.x`) for Consul gossip and inter-service traffic. The proxy server (`proxy-node-1`) runs the auto-discover daemon (both discovery and forwarding components) to route traffic from the public IP (`203.0.113.43`) and Tailscale IP to service VMs.
 
 ```
 Service Server                           Proxy Server
 ─────────────                           ─────────────
 Docker Container:80                     lab-ops auto-discover daemon
-    │                                      │  (--no-discovery)
+    │                                      │
     ▼                                      │  polls Consul every 30s
 lab-ops natmap docker add                  │  for Meta.forwarding==true
     │  (iptables DNAT)                     │  applies natmap dnat rules
@@ -48,7 +48,7 @@ Consul Agent ──────────────────────�
 
 **Nginx config generation**:
 - Service nodes: `lab-ops auto-discover daemon` discovers Docker containers, allocates host ports, registers services with Consul, and creates NAT mappings via natmap
-- Proxy server: `lab-ops auto-discover daemon --no-discovery` watches Consul for forwarding services and applies DNAT rules via natmap
+- Proxy server: `lab-ops auto-discover daemon` watches Consul for forwarding services and applies DNAT rules via natmap
 
 ### Route flow
 1. Internet → Proxy Server (NGINX) → Service Server VM IP:port → iptables DNAT → Docker container
@@ -63,7 +63,7 @@ For services with `forwardlocal` or `forwardremote` config, the flow bypasses NG
 Service Server                           Proxy Server
 ─────────────                           ─────────────
 Docker Container:25565                  lab-ops auto-discover daemon
-    │                                         │  (--no-discovery)
+    │                                         │
     ▼                                         │
 lab-ops natmap docker add                     │ (reads Consul forwarding meta)
     │  (iptables DNAT, static port)           │
@@ -83,7 +83,7 @@ Consul Agent ──────────────────────�
                                   (proxy-node-1)
 ```
 
-The proxy server runs `lab-ops auto-discover daemon --no-discovery` via systemd. See [[#forwarding-daemon]] for the service unit and polling details.
+The proxy server runs `lab-ops auto-discover daemon` via systemd. The forwarding component polls Consul every 30s for services with `Meta.forwarding=="true"` and applies DNAT rules.
 
 ## Configuration
 
@@ -284,7 +284,7 @@ services:
 1. **Service server**: The daemon uses `ext_ports[0]` as the Consul registration host port value. No local natmap mapping is created — the DNAT rule lives entirely on the proxy server. The port is NOT persisted to `ports.json`. No `port_is_free` check is performed on the service node.
 2. **Service server**: Registers in Consul with forwarding meta (`forwarding=true`, `forwarding_type=remote`, `ext_ip`, `ext_ports`, `hairpin`). If `preserve_src_ip: true`, also includes `preserve_src_ip=true`, `preserve_src_ip_gateway`, and `preserve_src_ip_src` in meta.
 3. **Service server** (preserve_src_ip only): Calls `natmap policy-route` to add an `ip rule` and `ip route` so return traffic routes back through the proxy gateway, preserving the real sender IP.
-4. **Proxy server**: Runs `lab-ops auto-discover daemon --no-discovery` (or one-shot `forwarding-sync`), which:
+4. **Proxy server**: Runs `lab-ops auto-discover daemon` (or one-shot `forwarding-sync`), which:
    - Queries Consul **catalog** API (`GET /v1/catalog/services` → `GET /v1/health/service/:name?passing=true`) across all agents — NOT the local agent API. Forwarding services are registered on service VMs' agents, not the proxy's agent
    - Filters services with `Meta.forwarding=="true"`
    - Groups by `(ext_ip, address, protocol)`
@@ -300,29 +300,6 @@ services:
 1. **Service node**: The daemon uses `bind_port` as a static host port (or allocates from ephemeral pool if unset). Always calls natmap to create the DNAT rule on the service node.
 2. **Service node**: Registers in Consul with `forwarding=true`, `forwarding_type=local`. No `ext_ip`, `ext_ports`, or `hairpin` metadata.
 3. **No proxy-server DNAT sync**: ForwardLocal does NOT participate in the proxy-server forwarding daemon. DNAT is local to the service node.
-
-
-
-
-
-### forwarding-daemon
-
-The proxy server runs `lab-ops auto-discover daemon --no-discovery` as a systemd daemon. It polls Consul every 30s for services with `Meta.forwarding=="true"` and applies `lab-ops natmap dnat` rules. Static ports are configured in `discovery.yaml` — no ephemeral allocation.
-
-**systemd unit** (proxy server, forwarding component only):
-
-```ini
-[Unit]
-Description=Lab Discovery Forwarding Daemon
-Requires=consul.service network-online.target
-After=consul.service network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/lab-ops auto-discover daemon --no-discovery
-Restart=on-failure
-RestartSec=10
-```
 
 ## Consul Service Registration
 
@@ -482,7 +459,7 @@ lab-ops auto-discover daemon
 # Run discovery only (service node)
 lab-ops auto-discover daemon --no-forwarding
 
-# Run forwarding only (proxy server)
+# Run forwarding only (disable discovery on systems with no Docker)
 lab-ops auto-discover daemon --no-discovery
 
 # Run a single sync pass and exit
