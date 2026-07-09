@@ -477,6 +477,37 @@ impl Daemon {
                     new_docker.insert(id, kept);
                 }
             }
+
+            // Discover untracked containers (started while daemon was down)
+            let tracked: HashSet<String> = new_docker.keys().cloned().collect();
+            for id in untracked_container_ids(&running_ids, &tracked) {
+                tracing::info!(container.id = %id, "discovering untracked container");
+                let Ok(discovered) = docker::get_port_mappings(docker, id).await else {
+                    continue;
+                };
+                let mut installed = Vec::new();
+                for mut m in discovered {
+                    m.id = state.allocate_id();
+                    let host_addr = m.request.host_addr;
+                    if let Err(e) = ports.allocate(host_addr).await {
+                        tracing::warn!(host.addr = %host_addr, error = %e,
+                            "failed allocating port for untracked container");
+                        continue;
+                    }
+                    if let Err(e) = iptables.install_dockermap(&m) {
+                        tracing::error!(mapping = ?m, error = %e,
+                            "failed to install mapping for untracked container");
+                        ports.deallocate(host_addr).await;
+                        continue;
+                    }
+                    max_id = max_id.max(m.id);
+                    installed.push(m);
+                }
+                if !installed.is_empty() {
+                    new_docker.insert(id.to_string(), installed);
+                }
+            }
+
             daemon_state.mapping = new_docker;
             state
                 .next_id
@@ -556,8 +587,24 @@ impl Daemon {
     }
 }
 
+/// Returns container IDs that are running but have no tracked port mappings.
+///
+/// Used during daemon reload to discover containers that started while the
+/// daemon was down.
+fn untracked_container_ids<'a>(
+    running_ids: &'a HashSet<String>,
+    tracked_ids: &'a HashSet<String>,
+) -> Vec<&'a str> {
+    running_ids
+        .iter()
+        .filter(|id| !tracked_ids.contains(id.as_str()))
+        .map(|id| id.as_str())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
@@ -572,9 +619,14 @@ mod tests {
 
     use super::AppState;
     use super::Daemon;
+    use super::untracked_container_ids;
     use crate::iptables::IptablesManager;
     use crate::models::DaemonState;
     use crate::policy_route::PolicyRouteManager;
+
+    fn id_set(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|&s| s.to_string()).collect()
+    }
 
     fn create_test_daemon(state_path: PathBuf) -> Daemon {
         let iptables = Arc::new(IptablesManager::new());
@@ -635,5 +687,38 @@ mod tests {
         daemon.handle_docker_event(event, &docker).await;
 
         assert!(logs_contain("container.id=\"1234567890\""));
+    }
+
+    #[test]
+    fn untracked_returns_empty_when_all_tracked() {
+        let running = id_set(&["a", "b"]);
+        let tracked = id_set(&["a", "b"]);
+        let result = untracked_container_ids(&running, &tracked);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn untracked_returns_new_ids() {
+        let running = id_set(&["a", "b", "c"]);
+        let tracked = id_set(&["a"]);
+        let mut result = untracked_container_ids(&running, &tracked);
+        result.sort();
+        assert_eq!(result, vec!["b", "c"]);
+    }
+
+    #[test]
+    fn untracked_returns_empty_when_no_running() {
+        let running = HashSet::new();
+        let tracked = id_set(&["a"]);
+        let result = untracked_container_ids(&running, &tracked);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn untracked_ignores_tracked_not_running() {
+        let running = id_set(&["b"]);
+        let tracked = id_set(&["a", "b"]);
+        let result = untracked_container_ids(&running, &tracked);
+        assert!(result.is_empty());
     }
 }
