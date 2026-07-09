@@ -394,8 +394,16 @@ impl Daemon {
             m.id = state.allocate_id();
             let host_addr = m.request.host_addr;
             if state.ports.is_allocated(host_addr).await {
-                tracing::warn!(host.addr = %host_addr, "address already allocated, skipping");
-                continue;
+                if let Some(stale_id) =
+                    resolve_stale_container(&state.daemon_state, host_addr, &container_id).await
+                {
+                    tracing::info!(host.addr = %host_addr, stale.container.id = %stale_id,
+                        "port held by stale container, removing old mapping");
+                    self.on_container_stop(stale_id).await;
+                } else {
+                    tracing::warn!(host.addr = %host_addr, "address already allocated, skipping");
+                    continue;
+                }
             }
             if let Err(e) = state.ports.allocate(host_addr).await {
                 tracing::warn!(host.addr = %host_addr, error = %e, "failed allocating, skipping");
@@ -622,6 +630,24 @@ impl Daemon {
     }
 }
 
+/// Looks up whether `host_addr` is claimed by a container other than
+/// `new_container_id` in the persisted daemon state.
+///
+/// Returns `Some(stale_container_id)` if a different container owns the port,
+/// indicating the old container was recreated and its mapping should be removed
+/// before allocating for the new one.
+async fn resolve_stale_container(
+    daemon_state: &Arc<RwLock<DaemonState>>,
+    host_addr: SocketAddr,
+    new_container_id: &str,
+) -> Option<String> {
+    let lock = daemon_state.read().await;
+    lock.mapping.iter().find_map(|(id, maps)| {
+        (id.as_str() != new_container_id && maps.iter().any(|m| m.request.host_addr == host_addr))
+            .then(|| id.clone())
+    })
+}
+
 /// Returns container IDs that are running but have no tracked port mappings.
 ///
 /// Used during daemon reload to discover containers that started while the
@@ -670,9 +696,11 @@ mod tests {
     use super::AppState;
     use super::Daemon;
     use super::reconcile_container_addr;
+    use super::resolve_stale_container;
     use super::untracked_container_ids;
     use crate::iptables::IptablesManager;
     use crate::models::DaemonState;
+    use crate::models::DockerPortMap;
     use crate::models::DockerPortMapRequest;
     use crate::models::TransportProtocol;
     use crate::policy_route::PolicyRouteManager;
@@ -740,6 +768,111 @@ mod tests {
         daemon.handle_docker_event(event, &docker).await;
 
         assert!(logs_contain("container.id=\"1234567890\""));
+    }
+
+    #[tokio::test]
+    async fn resolve_stale_returns_none_when_no_mapping() {
+        let state = Arc::new(RwLock::new(DaemonState::default()));
+        let addr: SocketAddr = "0.0.0.0:9000".parse().unwrap();
+        let result = resolve_stale_container(&state, addr, "new-container").await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_stale_returns_none_when_no_match() {
+        let state = Arc::new(RwLock::new(DaemonState::default()));
+        state.write().await.mapping.insert(
+            "other".into(),
+            vec![DockerPortMap::new(
+                1,
+                DockerPortMapRequest {
+                    host_addr: "0.0.0.0:8080".parse().unwrap(),
+                    container_addr: "10.0.0.2:8080".parse().unwrap(),
+                    proto: TransportProtocol::Tcp,
+                },
+                "other".into(),
+                "other-container".into(),
+            )],
+        );
+        let addr: SocketAddr = "0.0.0.0:9000".parse().unwrap();
+        let result = resolve_stale_container(&state, addr, "new-container").await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_stale_returns_stale_id_when_match() {
+        let state = Arc::new(RwLock::new(DaemonState::default()));
+        state.write().await.mapping.insert(
+            "stale".into(),
+            vec![DockerPortMap::new(
+                1,
+                DockerPortMapRequest {
+                    host_addr: "0.0.0.0:9000".parse().unwrap(),
+                    container_addr: "10.0.0.2:9000".parse().unwrap(),
+                    proto: TransportProtocol::Tcp,
+                },
+                "stale".into(),
+                "old-container".into(),
+            )],
+        );
+        let addr: SocketAddr = "0.0.0.0:9000".parse().unwrap();
+        let result = resolve_stale_container(&state, addr, "new-container").await;
+        assert_eq!(result, Some("stale".to_string()));
+    }
+
+    #[tokio::test]
+    async fn resolve_stale_returns_none_for_same_container() {
+        let state = Arc::new(RwLock::new(DaemonState::default()));
+        state.write().await.mapping.insert(
+            "same".into(),
+            vec![DockerPortMap::new(
+                1,
+                DockerPortMapRequest {
+                    host_addr: "0.0.0.0:9000".parse().unwrap(),
+                    container_addr: "10.0.0.2:9000".parse().unwrap(),
+                    proto: TransportProtocol::Tcp,
+                },
+                "same".into(),
+                "same-container".into(),
+            )],
+        );
+        let addr: SocketAddr = "0.0.0.0:9000".parse().unwrap();
+        let result = resolve_stale_container(&state, addr, "same").await;
+        assert!(result.is_none(), "same container should not be stale");
+    }
+
+    #[tokio::test]
+    async fn resolve_stale_returns_correct_id_when_multiple_containers() {
+        let state = Arc::new(RwLock::new(DaemonState::default()));
+        state.write().await.mapping.insert(
+            "alpha".into(),
+            vec![DockerPortMap::new(
+                1,
+                DockerPortMapRequest {
+                    host_addr: "0.0.0.0:8080".parse().unwrap(),
+                    container_addr: "10.0.0.2:8080".parse().unwrap(),
+                    proto: TransportProtocol::Tcp,
+                },
+                "alpha".into(),
+                "alpha-container".into(),
+            )],
+        );
+        state.write().await.mapping.insert(
+            "bravo".into(),
+            vec![DockerPortMap::new(
+                2,
+                DockerPortMapRequest {
+                    host_addr: "0.0.0.0:9000".parse().unwrap(),
+                    container_addr: "10.0.0.3:9000".parse().unwrap(),
+                    proto: TransportProtocol::Tcp,
+                },
+                "bravo".into(),
+                "bravo-container".into(),
+            )],
+        );
+        let addr: SocketAddr = "0.0.0.0:9000".parse().unwrap();
+        let result = resolve_stale_container(&state, addr, "new-container").await;
+        assert_eq!(result, Some("bravo".to_string()));
     }
 
     #[test]
