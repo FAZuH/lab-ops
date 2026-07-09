@@ -1,3 +1,19 @@
+## 0.1.27 (2026-07-09)
+
+
+### ⚠ BREAKING CHANGES
+
+* Remove deprecated nginx-sync subcommand
+
+### New Features
+
+* Store all domains in Consul Meta.domains ([6fe8054](https://github.com/FAZuH/lab-ops/commit/6fe805435f67bfa46e2bde58d1ca177e471d532d))
+
+
+### Code Refactoring
+
+* Remove deprecated nginx-sync subcommand ([e398049](https://github.com/FAZuH/lab-ops/commit/e398049b3071e0ea17ca895268dadc1d61f463f2))
+
 ## 0.1.26 (2026-07-05)
 
 
@@ -26,6 +42,4 @@
 
 * Add LAN hairpin MASQUERADE for preserve_src_ip ([585273f](https://github.com/FAZuH/lab-ops/commit/585273fb341e533a8037d6287ea36a1661ca692b))
 * Fix natmap networking error on ForwardRemote with ([c539f43](https://github.com/FAZuH/lab-ops/commit/c539f43920e3e9fd6d4f9c3edfc030be0f112b7a))
-
-## 0.1.22 (2026-06-02)
 

@@ -1,6 +1,6 @@
 [package]
 name = "lab-ops_lab-lib"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 description = "Shared types, port allocation, and Docker helpers for the lab-ops workspace"
 license.workspace = true
