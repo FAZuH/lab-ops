@@ -1,6 +1,6 @@
 [package]
 name = "lab-ops_auto-discover"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 description = "Service discovery daemon with Consul registration"
 license.workspace = true

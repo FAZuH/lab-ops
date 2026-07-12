@@ -1,3 +1,15 @@
+## 0.1.28 (2026-07-12)
+
+
+### New Features
+
+* Support UDP port reservation in PortAllocator ([2fefbc0](https://github.com/FAZuH/lab-ops/commit/2fefbc07f9cb3927e4f2bd8a4f87ad2806f689a8))
+
+
+### Bug Fixes
+
+* Fix DNAT sync short circuiting on single failure ([1e4476c](https://github.com/FAZuH/lab-ops/commit/1e4476c2e5065fcd12c930bb8adc5d5fa5a62964))
+
 ## 0.1.27 (2026-07-09)
 
 
@@ -34,12 +46,4 @@
 ### Bug Fixes
 
 * Fix cannot access Docker containers via natmap localhost port mappings. ([f1cb5f9](https://github.com/FAZuH/lab-ops/commit/f1cb5f963948c89ffcb88ff44e544a252d05948f))
-
-## 0.1.23 (2026-06-02)
-
-
-### Bug Fixes
-
-* Add LAN hairpin MASQUERADE for preserve_src_ip ([585273f](https://github.com/FAZuH/lab-ops/commit/585273fb341e533a8037d6287ea36a1661ca692b))
-* Fix natmap networking error on ForwardRemote with ([c539f43](https://github.com/FAZuH/lab-ops/commit/c539f43920e3e9fd6d4f9c3edfc030be0f112b7a))
 
