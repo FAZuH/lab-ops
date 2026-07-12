@@ -82,7 +82,13 @@ pub async fn add_dnat(
         }
     }
 
-    bind_ports(state.ports.clone(), &config.ext_ip, &config.ports).await?;
+    bind_ports(
+        state.ports.clone(),
+        &config.ext_ip,
+        &config.ports,
+        config.proto,
+    )
+    .await?;
     if let Err(e) = state.iptables.install_dnat(&config) {
         unbind_ports(state.ports, &config.ext_ip, &config.ports).await;
         return Err((
@@ -204,7 +210,13 @@ pub async fn add_hairpin(
         proto: req.proto,
         lan_cidr: req.lan_cidr.clone(),
     };
-    bind_ports(state.ports.clone(), &config.ext_ip, &config.ports).await?;
+    bind_ports(
+        state.ports.clone(),
+        &config.ext_ip,
+        &config.ports,
+        config.proto,
+    )
+    .await?;
     if let Err(e) = state.iptables.install_hairpin(&config) {
         unbind_ports(state.ports, &config.ext_ip, &config.ports).await;
         return Err((
@@ -372,7 +384,11 @@ pub async fn remap_port(
             container_id.clone(),
             old.container_name.clone(),
         );
-        if let Err(e) = state.ports.allocate(new_mapping.request.host_addr).await {
+        if let Err(e) = state
+            .ports
+            .allocate(new_mapping.request.host_addr, old.request.proto)
+            .await
+        {
             return Err((
                 StatusCode::CONFLICT,
                 Json(ErrorResponse {
@@ -515,7 +531,7 @@ pub async fn add_mapping(
     let id = state.allocate_id();
     let mapping = DockerPortMap::new(id, request, container_id.clone(), container_name);
 
-    state.ports.allocate(host_addr).await.map_err(|e| {
+    state.ports.allocate(host_addr, proto).await.map_err(|e| {
         (
             StatusCode::CONFLICT,
             Json(ErrorResponse {
@@ -653,9 +669,10 @@ pub async fn bind_ports(
     ports: Arc<PortAllocator>,
     ip: &str,
     ports_csv: &str,
+    proto: TransportProtocol,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     for addr in parse_socket_addrs(ip, ports_csv)? {
-        ports.allocate(addr).await.map_err(|e| {
+        ports.allocate(addr, proto).await.map_err(|e| {
             (
                 StatusCode::CONFLICT,
                 Json(ErrorResponse {

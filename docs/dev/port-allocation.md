@@ -12,19 +12,26 @@ Without port reservation, `natmap` only creates iptables rules to redirect traff
 
 ## How It Works
 
-The `PortAllocator` struct maintains a `HashMap<SocketAddr, TcpListener>` keyed by `SocketAddr`. When a rule is added that needs a port reservation (DNAT, hairpin, Docker mapping):
+The `PortAllocator` struct maintains a `HashMap<SocketAddr, ReservedSocket>` keyed by `SocketAddr`. The [`ReservedSocket`] enum has two variants:
 
-1. A raw TCP socket is created and configured with the `IP_FREEBIND` (Linux) socket option
-2. The socket is bound to the exact `{ext_ip}:{port}` using `TcpListener::bind()`
-3. The kernel reserves the port, preventing any other process from binding to it
-4. The `TcpListener` is stored in the HashMap (keeping the reservation alive)
-5. iptables rules are then installed (redirecting traffic away from the bound socket)
+| Variant | Protocol | Socket Type | Behavior |
+|---------|----------|-------------|----------|
+| `Tcp(TcpListener)` | TCP | `Type::STREAM` | `bind()` + `listen(128)` |
+| `Udp(UdpSocket)` | UDP | `Type::DGRAM` | `bind()` only (connectionless) |
+
+When a rule is added that needs a port reservation (DNAT, hairpin, Docker mapping):
+
+1. A raw socket is created with the protocol-appropriate socket type (`STREAM` for TCP, `DGRAM` for UDP) and configured with `SO_REUSEADDR` and `IP_FREEBIND`.
+2. The socket is bound to the exact `{ext_ip}:{port}`. For TCP, the socket also calls `listen(128)`; for UDP it does not (UDP is connectionless).
+3. The kernel reserves the port, preventing any other process from binding to it.
+4. The `ReservedSocket` is stored in the HashMap (keeping the reservation alive).
+5. iptables rules are then installed (redirecting traffic away from the bound socket).
 
 When a rule is removed:
 
-1. iptables rules are deleted first
-2. The `TcpListener` entry is removed from the HashMap
-3. Rust drops the `TcpListener`, which closes the socket and releases the port
+1. iptables rules are deleted first.
+2. The `ReservedSocket` entry is removed from the HashMap.
+3. Rust drops the value, which closes the underlying file descriptor and releases the port.
 
 ## Why IP_FREEBIND?
 
@@ -49,7 +56,7 @@ Keys are the actual `SocketAddr` object (e.g., `203.0.113.43:25`). The IP in the
 
 ## Error Handling
 
-If `TcpListener::bind()` fails (e.g. port is already in use by another application on that IP):
+If socket `bind()` fails (e.g. port is already in use by another application on that IP):
 - The daemon returns HTTP `409 Conflict` to the CLI
 - No iptables rules are created
 - No state changes are persisted
