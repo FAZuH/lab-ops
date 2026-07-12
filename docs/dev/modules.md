@@ -35,13 +35,14 @@ The canonical `TransportProtocol` enum (`Tcp` / `Udp`) with serde, `Display`, an
 Consolidated from the old `natmap/src/port.rs` and `auto-discover/src/port.rs`. Three layers:
 
 **Low-level socket utilities:**
-- `create_freebind_socket(addr) -> io::Result<Socket>` — Creates a `socket2::Socket` with `SO_REUSEADDR` and `IP_FREEBIND`.
+- `create_freebind_socket(addr, Type) -> io::Result<Socket>` — Creates a `socket2::Socket` with `SO_REUSEADDR`, `IP_FREEBIND`, and the given socket type (`STREAM` for TCP, `DGRAM` for UDP).
 - `is_port_free(addr: A) -> bool` where `A: ToSocketAddrs` — Checks if a TCP port is free using the robust freebind socket. Generic over any type that can resolve to a socket address.
 
-**`PortAllocator`** — Runtime TCP pre-bind reservation (used by `natmap` daemon):
-- `allocate(addr)` — Bind `addr` via TcpListener with `SO_REUSEADDR` + `IP_FREEBIND`, store listener
-- `deallocate(addr)` — Remove from map, drop Listener (releases port)
-- `is_allocated(addr)` — Check if `addr` has an active reservation; falls back to probing the port
+**`PortAllocator`** — Runtime TCP/UDP pre-bind reservation (used by `natmap` daemon):
+- Holds `HashMap<SocketAddr, ReservedSocket>` where `ReservedSocket` is an enum with `Tcp(TcpListener)` and `Udp(UdpSocket)` variants.
+- `allocate(addr, proto)` — Binds `addr` with protocol-appropriate socket type (`STREAM` + `listen()` for TCP, `DGRAM` for UDP); stores the reservation
+- `deallocate(addr)` — Remove from map, drop reservation (releases port)
+- `is_allocated(addr)` — Check if `addr` has an active reservation
 - `deallocate_all()` — Clear all reservations
 
 **`PortAssignments`** — Persistent ephemeral port allocation (used by `auto-discover`):

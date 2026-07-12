@@ -57,6 +57,7 @@ use crate::iptables::IptablesManager;
 use crate::models::DaemonState;
 use crate::models::DockerPortMap;
 use crate::models::DockerPortMapRequest;
+use crate::models::TransportProtocol;
 use crate::policy_route::PolicyRouteManager;
 
 /// Shared application state held by all Axum route handlers.
@@ -405,7 +406,7 @@ impl Daemon {
                     continue;
                 }
             }
-            if let Err(e) = state.ports.allocate(host_addr).await {
+            if let Err(e) = state.ports.allocate(host_addr, m.request.proto).await {
                 tracing::warn!(host.addr = %host_addr, error = %e, "failed allocating, skipping");
                 continue;
             }
@@ -506,7 +507,7 @@ impl Daemon {
                         tracing::warn!(host.addr = %host_addr, "address already held, removing stale mapping");
                         continue;
                     }
-                    if let Err(e) = ports.allocate(host_addr).await {
+                    if let Err(e) = ports.allocate(host_addr, m.request.proto).await {
                         tracing::warn!(host.addr = %host_addr, error = %e, "address in use, dropping mapping");
                         continue;
                     }
@@ -532,7 +533,7 @@ impl Daemon {
                 for mut m in discovered {
                     m.id = state.allocate_id();
                     let host_addr = m.request.host_addr;
-                    if let Err(e) = ports.allocate(host_addr).await {
+                    if let Err(e) = ports.allocate(host_addr, m.request.proto).await {
                         tracing::warn!(host.addr = %host_addr, error = %e,
                             "failed allocating port for untracked container");
                         continue;
@@ -562,7 +563,7 @@ impl Daemon {
     async fn reconcile_hairpins(&self, daemon_state: &mut DaemonState) {
         let mut keep = Vec::new();
         for config in daemon_state.hairpins.drain(..) {
-            if Self::should_reconcile(&config.ports, &config.ext_ip, &self.state.ports).await {
+            if Self::should_reconcile(&config.ports, &config.ext_ip, &self.state.ports, config.proto).await {
                 let _ = self.state.iptables.install_hairpin(&config);
                 keep.push(config);
             } else {
@@ -575,7 +576,7 @@ impl Daemon {
     async fn reconcile_dnats(&self, daemon_state: &mut DaemonState) {
         let mut keep = Vec::new();
         for config in daemon_state.dnats.drain(..) {
-            if Self::should_reconcile(&config.ports, &config.ext_ip, &self.state.ports).await {
+            if Self::should_reconcile(&config.ports, &config.ext_ip, &self.state.ports, config.proto).await {
                 let _ = self.state.iptables.install_dnat(&config);
                 keep.push(config);
             } else {
@@ -604,7 +605,12 @@ impl Daemon {
     }
 
     /// Check if this port can be reconciled.
-    async fn should_reconcile(configs_ports: &str, ext_ip: &str, ports: &PortAllocator) -> bool {
+    async fn should_reconcile(
+        configs_ports: &str,
+        ext_ip: &str,
+        ports: &PortAllocator,
+        proto: TransportProtocol,
+    ) -> bool {
         let ip = match ext_ip.parse() {
             Ok(ip) => ip,
             Err(e) => {
@@ -621,7 +627,7 @@ impl Daemon {
             if ports.is_allocated(addr).await {
                 continue;
             }
-            if let Err(e) = ports.allocate(addr).await {
+            if let Err(e) = ports.allocate(addr, proto).await {
                 tracing::warn!(port = %port, error = %e, "port in use, dropping");
                 return false;
             }
