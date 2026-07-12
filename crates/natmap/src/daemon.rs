@@ -563,7 +563,14 @@ impl Daemon {
     async fn reconcile_hairpins(&self, daemon_state: &mut DaemonState) {
         let mut keep = Vec::new();
         for config in daemon_state.hairpins.drain(..) {
-            if Self::should_reconcile(&config.ports, &config.ext_ip, &self.state.ports, config.proto).await {
+            if Self::should_reconcile(
+                &config.ports,
+                &config.ext_ip,
+                &self.state.ports,
+                config.proto,
+            )
+            .await
+            {
                 let _ = self.state.iptables.install_hairpin(&config);
                 keep.push(config);
             } else {
@@ -576,7 +583,14 @@ impl Daemon {
     async fn reconcile_dnats(&self, daemon_state: &mut DaemonState) {
         let mut keep = Vec::new();
         for config in daemon_state.dnats.drain(..) {
-            if Self::should_reconcile(&config.ports, &config.ext_ip, &self.state.ports, config.proto).await {
+            if Self::should_reconcile(
+                &config.ports,
+                &config.ext_ip,
+                &self.state.ports,
+                config.proto,
+            )
+            .await
+            {
                 let _ = self.state.iptables.install_dnat(&config);
                 keep.push(config);
             } else {

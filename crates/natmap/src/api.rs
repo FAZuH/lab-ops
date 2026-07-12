@@ -82,7 +82,13 @@ pub async fn add_dnat(
         }
     }
 
-    bind_ports(state.ports.clone(), &config.ext_ip, &config.ports, config.proto).await?;
+    bind_ports(
+        state.ports.clone(),
+        &config.ext_ip,
+        &config.ports,
+        config.proto,
+    )
+    .await?;
     if let Err(e) = state.iptables.install_dnat(&config) {
         unbind_ports(state.ports, &config.ext_ip, &config.ports).await;
         return Err((
@@ -204,7 +210,13 @@ pub async fn add_hairpin(
         proto: req.proto,
         lan_cidr: req.lan_cidr.clone(),
     };
-    bind_ports(state.ports.clone(), &config.ext_ip, &config.ports, config.proto).await?;
+    bind_ports(
+        state.ports.clone(),
+        &config.ext_ip,
+        &config.ports,
+        config.proto,
+    )
+    .await?;
     if let Err(e) = state.iptables.install_hairpin(&config) {
         unbind_ports(state.ports, &config.ext_ip, &config.ports).await;
         return Err((
@@ -372,7 +384,11 @@ pub async fn remap_port(
             container_id.clone(),
             old.container_name.clone(),
         );
-        if let Err(e) = state.ports.allocate(new_mapping.request.host_addr, old.request.proto).await {
+        if let Err(e) = state
+            .ports
+            .allocate(new_mapping.request.host_addr, old.request.proto)
+            .await
+        {
             return Err((
                 StatusCode::CONFLICT,
                 Json(ErrorResponse {

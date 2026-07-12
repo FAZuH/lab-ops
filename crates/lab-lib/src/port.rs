@@ -355,7 +355,10 @@ mod tests {
     async fn is_allocated_returns_true_for_reserved_port() {
         let allocator = PortAllocator::new();
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        allocator.allocate(addr, TransportProtocol::Tcp).await.unwrap();
+        allocator
+            .allocate(addr, TransportProtocol::Tcp)
+            .await
+            .unwrap();
         assert!(allocator.is_allocated(addr).await);
     }
 
@@ -363,7 +366,10 @@ mod tests {
     async fn is_allocated_returns_false_after_release() {
         let allocator = PortAllocator::new();
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        allocator.allocate(addr, TransportProtocol::Tcp).await.unwrap();
+        allocator
+            .allocate(addr, TransportProtocol::Tcp)
+            .await
+            .unwrap();
         allocator.deallocate(addr).await;
         assert!(!allocator.is_allocated(addr).await);
     }
@@ -379,7 +385,10 @@ mod tests {
     async fn allocate_udp_binds_dgram() {
         let allocator = PortAllocator::new();
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        allocator.allocate(addr, TransportProtocol::Udp).await.unwrap();
+        allocator
+            .allocate(addr, TransportProtocol::Udp)
+            .await
+            .unwrap();
         assert!(allocator.is_allocated(addr).await);
         allocator.deallocate(addr).await;
         assert!(!allocator.is_allocated(addr).await);
