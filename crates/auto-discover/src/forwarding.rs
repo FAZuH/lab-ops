@@ -132,7 +132,7 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
             .await
             .ok();
 
-        natmap
+        if let Err(e) = natmap
             .dnat(
                 &group.ext_ip,
                 &group.int_ip,
@@ -142,7 +142,17 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
                 group.preserve_src_ip,
             )
             .await
-            .wrap_err_with(|| format!("dnat for {} -> {} failed", group.ext_ip, group.int_ip))?;
+        {
+            tracing::warn!(
+                ext.ip = %group.ext_ip,
+                int.ip = %group.int_ip,
+                ports = %ports_csv,
+                proto = %group.proto,
+                error = %e,
+                "dnat creation failed, skipping group"
+            );
+            continue;
+        }
 
         if group.hairpin {
             let lan_cidr = if group.preserve_src_ip {
