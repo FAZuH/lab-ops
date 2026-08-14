@@ -309,12 +309,8 @@ if [ "$MAPPING" != "$EXPECTED" ]; then echo "FAIL: expected $EXPECTED, got $MAPP
 echo "PASS: bound to $EXPECTED, ignored default 1.2.3.4"
 {teardown}
 "#,
-        setup = new_format_setup_with_defaults_ext(
-            services_yaml,
-            defaults_yaml,
-            "",
-            "--no-forwarding"
-        ),
+        setup =
+            new_format_setup_with_defaults_ext(services_yaml, defaults_yaml, "", "--no-forwarding"),
         teardown = teardown(&[cname]),
         cname = cname,
     );

@@ -51,12 +51,8 @@ fi
 echo "PASS: global preserve_src_ip created policy route with cloned local routes"
 {teardown}
 "#,
-        setup = new_format_setup_with_defaults_ext(
-            services_yaml,
-            defaults_yaml,
-            "",
-            "--no-forwarding"
-        ),
+        setup =
+            new_format_setup_with_defaults_ext(services_yaml, defaults_yaml, "", "--no-forwarding"),
         teardown = teardown(&[cname]),
         cname = cname,
     );
@@ -100,12 +96,8 @@ fi
 echo "PASS: per-service preserve_src_ip overrides default"
 {teardown}
 "#,
-        setup = new_format_setup_with_defaults_ext(
-            services_yaml,
-            defaults_yaml,
-            "",
-            "--no-forwarding"
-        ),
+        setup =
+            new_format_setup_with_defaults_ext(services_yaml, defaults_yaml, "", "--no-forwarding"),
         teardown = teardown(&[cname]),
         cname = cname,
     );

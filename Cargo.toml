@@ -18,6 +18,10 @@ categories = ["command-line-utilities", "network-programming", "virtualization"]
 [features]
 docker-tests = []
 
+[[test]]
+name = "auto_discover"
+path = "tests/auto_discover/mod.rs"
+
 [workspace.package]
 description = "Personal utility tools for my homelab"
 license = "MIT"
