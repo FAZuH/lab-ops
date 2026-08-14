@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use color_eyre::Result;
 use color_eyre::eyre::WrapErr;
+use color_eyre::eyre::bail;
 use lab_ops_lab_lib::port::PortAssignments;
 use lab_ops_natmap::client::NatmapClient;
 use lab_ops_natmap::client::NatmapError;
@@ -56,6 +57,7 @@ impl DiscoveryDaemon {
         let ports_path = self.state_dir.join("ports.json");
         let mut port_assignments = PortAssignments::load(&ports_path);
         let mut current_service_ids = Vec::new();
+        let mut sync_errors: usize = 0;
 
         let all_resolved = config.resolve_all();
 
@@ -82,6 +84,7 @@ impl DiscoveryDaemon {
                             Ok(Some(id)) => ids.push(id),
                             Ok(None) => {}
                             Err(e) => {
+                                sync_errors += 1;
                                 tracing::error!(
                                     service.id_prefix = %resolved.service_id_prefix,
                                     error = %e,
@@ -109,6 +112,7 @@ impl DiscoveryDaemon {
                         .await
                         .map(|id| id.into_iter().collect::<Vec<_>>())
                         .map_err(|e| {
+                            sync_errors += 1;
                             tracing::error!(
                                 service.id_prefix = %resolved.service_id_prefix,
                                 error = %e,
@@ -129,10 +133,26 @@ impl DiscoveryDaemon {
             .map_err(|e| tracing::warn!(error = %e, "failed to save port assignments"))
             .ok();
 
-        let _ = self
-            .consul
-            .deregister_stale_services(&server_name, &current_service_ids)
-            .await;
+        // The sweep guard is fail-closed by design: a non-total failure with
+        // zero registrations (e.g. some docker services absent plus one errored
+        // local service) blocks the sweep, deferring legitimately-stale cleanup
+        // to the next clean pass so a partial failure never wipes the catalog.
+        let sweep_stale = should_sweep_stale(current_service_ids.len(), sync_errors);
+        if sweep_stale {
+            let _ = self
+                .consul
+                .deregister_stale_services(&server_name, &current_service_ids)
+                .await;
+        } else {
+            tracing::warn!(
+                services.errors = sync_errors,
+                "sync failed completely; skipping stale-service deregistration to protect existing registrations"
+            );
+        }
+
+        if !sweep_stale {
+            bail!("sync failed: {sync_errors} service(s) errored, 0 registered");
+        }
 
         tracing::info!(
             services.active = current_service_ids.len(),
@@ -532,6 +552,16 @@ impl DiscoveryDaemon {
     }
 }
 
+/// Decide whether the stale-service sweep should run after a sync pass.
+///
+/// A sync where every service errored and none registered (a total failure,
+/// e.g. the natmap socket was not ready at startup) must not sweep, because
+/// sweeping would deregister previously-registered services that merely
+/// failed to re-register this pass.
+fn should_sweep_stale(registered: usize, errors: usize) -> bool {
+    !(errors > 0 && registered == 0)
+}
+
 /// Match a container against a resolved service definition.
 ///
 /// Checks project, container name, and container_regex match criteria.
@@ -610,6 +640,28 @@ mod tests {
     use tracing_test::traced_test;
 
     use super::*;
+
+    // ── should_sweep_stale ──
+
+    #[test]
+    fn sweep_runs_when_no_errors_and_nothing_registered() {
+        assert!(should_sweep_stale(0, 0));
+    }
+
+    #[test]
+    fn sweep_runs_when_sync_healthy() {
+        assert!(should_sweep_stale(3, 0));
+    }
+
+    #[test]
+    fn sweep_skipped_on_total_failure() {
+        assert!(!should_sweep_stale(0, 5));
+    }
+
+    #[test]
+    fn sweep_runs_on_partial_failure() {
+        assert!(should_sweep_stale(2, 3));
+    }
 
     #[tokio::test]
     #[traced_test]
