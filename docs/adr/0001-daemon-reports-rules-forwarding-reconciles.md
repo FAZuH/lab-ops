@@ -1,0 +1,3 @@
+# 0001 — The natmap daemon reports live rules; forwarding reconciles
+
+The natmap daemon is the central authority for the NAT rules it creates, but live-rule enumeration is exposed read-only (`GET /rules`) rather than absorbing reconciliation. Auto-discover's forwarding sync keeps ownership of its forwarding rules and diffs its desired set against the daemon's reported rules. We chose this over moving reconciliation into the daemon because it keeps each daemon's ownership where it is, concentrates rule parsing in one place, and is a smaller change; moving reconciliation into the daemon remains a possible end-state but is an ownership transfer, not a deepening.
