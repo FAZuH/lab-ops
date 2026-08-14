@@ -842,7 +842,7 @@ pub(crate) mod tests {
             *self.rules_lines.lock().unwrap() = lines;
         }
 
-        fn installed_mappings(&self) -> Vec<DockerPortMap> {
+        pub(crate) fn installed_mappings(&self) -> Vec<DockerPortMap> {
             self.installed_mappings.lock().unwrap().clone()
         }
 
@@ -858,7 +858,7 @@ pub(crate) mod tests {
             self.installed_hairpins.lock().unwrap().clone()
         }
 
-        fn set_fail_dockermap(&self, fail: bool) {
+        pub(crate) fn set_fail_dockermap(&self, fail: bool) {
             self.fail_dockermap.store(fail, Ordering::SeqCst);
         }
 
