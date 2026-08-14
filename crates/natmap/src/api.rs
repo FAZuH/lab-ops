@@ -66,7 +66,7 @@ pub async fn add_dnat(
         ports: req.ports.clone(),
         proto: req.proto,
         ext_if: req.ext_if.clone(),
-        no_masquerade: req.no_masquerade,
+        preserve_src_ip: req.preserve_src_ip,
     };
 
     // Check if this DNAT already exists (idempotent add).
@@ -138,7 +138,7 @@ pub async fn remove_dnat(
             ports: req.ports,
             proto: req.proto,
             ext_if: req.ext_if,
-            no_masquerade: req.no_masquerade,
+            preserve_src_ip: req.preserve_src_ip,
         };
         let _ = state.iptables.remove_dnat(&config);
         unbind_ports(state.ports.clone(), &config.ext_ip, &config.ports).await;
@@ -826,7 +826,7 @@ mod tests {
                 ports: "80".into(),
                 proto: TransportProtocol::Tcp,
                 ext_if: None,
-                no_masquerade: false,
+                preserve_src_ip: false,
             });
         }
         let res = list_mappings(State(state)).await.0;
@@ -843,7 +843,7 @@ mod tests {
             ports: "80".into(),
             proto: TransportProtocol::Tcp,
             ext_if: None,
-            no_masquerade: false,
+            preserve_src_ip: false,
         };
 
         let result = add_dnat(State(state.clone()), Json(req.clone())).await;
@@ -867,7 +867,7 @@ mod tests {
             ports: "80".into(),
             proto: TransportProtocol::Tcp,
             ext_if: None,
-            no_masquerade: false,
+            preserve_src_ip: false,
         };
         let result = remove_dnat(State(state), Json(req)).await;
         assert!(result.is_ok());
@@ -882,7 +882,7 @@ mod tests {
             ports: "not-a-port".into(),
             proto: TransportProtocol::Tcp,
             ext_if: None,
-            no_masquerade: false,
+            preserve_src_ip: false,
         };
         let result = add_dnat(State(state), Json(req)).await;
         assert!(result.is_err());

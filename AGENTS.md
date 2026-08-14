@@ -58,10 +58,10 @@ From `docs/dev/standards.md`:
 
 **natmap modules**: `api.rs` (HTTP handlers), `cli.rs` (CLI parsing), `command.rs` (handler functions), `daemon.rs` (state + lifecycle), `iptables.rs` (rule CRUD), `models.rs` (data types), `policy_route.rs` (ip rule/route management).
 
-- **natmap daemon**: central authority for ALL iptables NAT rules. CLI commands talk Unix socket (`/run/natmap.sock`). State in `/var/lib/natmap/state.json`. `natmap install` creates systemd service.
+- **natmap daemon**: central authority for the NAT rules it creates. CLI commands talk Unix socket (`/run/natmap.sock`). State in `/var/lib/natmap/state.json`. `natmap install` creates systemd service. Live rules exposed read-only via `GET /rules`; rule reconciliation stays with each daemon (see `docs/adr/0001-daemon-reports-rules-forwarding-reconciles.md`).
 - **auto-discover daemon**: runs discovery and forwarding as concurrent tokio tasks. Component flags: `--no-discovery`, `--no-forwarding`.
 - **`policy-route` subcommand** (natmap): manages `ip rule`/`ip route` policy routing for source IP preservation. Used by auto-discover when `preserve_src_ip: true`. API: `POST/DELETE /policy-route`.
-- **`DnatConfig.no_masquerade`**: metadata flag (no iptables change) signaling intent to skip MASQUERADE. Passed through from auto-discover's forwarding sync.
+- **`DnatConfig.preserve_src_ip`** (renamed from `no_masquerade`; glossary term in `CONTEXT.md`): metadata flag (no iptables change) signaling intent to skip MASQUERADE. Passed through from auto-discover's forwarding sync.
 
 ## Global CLI Flags
 
@@ -86,3 +86,17 @@ From `docs/dev/standards.md`:
 | User-facing commands | `README.md` |
 
 Check `docs/dev/standards.md` §12 (backlog) — remove resolved items.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live in GitHub Issues (`FAZuH/lab-ops`) — use the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default label vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context — one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.

@@ -68,9 +68,9 @@ pub enum Command {
         /// Whether to delete the rule instead of adding it.
         #[arg(long)]
         delete: bool,
-        /// Don't masquerade
-        #[arg(long)]
-        no_masquerade: bool,
+        /// Preserve the source IP (skip masquerade).
+        #[arg(long = "no-masquerade")]
+        preserve_src_ip: bool,
     },
     /// Adds or deletes SNAT (masquerade) rules.
     #[command(name = "snat")]
@@ -254,7 +254,7 @@ pub async fn run_cli(cli: Cli, use_color: bool) -> Result<()> {
             ports,
             ext_if,
             delete,
-            no_masquerade,
+            preserve_src_ip,
         } => {
             handle_dnat(
                 ext_ip,
@@ -263,7 +263,7 @@ pub async fn run_cli(cli: Cli, use_color: bool) -> Result<()> {
                 ports,
                 ext_if,
                 delete,
-                no_masquerade,
+                preserve_src_ip,
                 &socket,
             )
             .await?;

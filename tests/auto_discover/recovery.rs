@@ -455,7 +455,7 @@ docker rm -f {cname} 2>/dev/null || true
 sleep 2
 
 cat > /tmp/discovery.yaml <<'YAMLEOF'
-services: {}
+services: {{}}
 YAMLEOF
 
 lab-ops auto-discover sync /tmp/discovery.yaml --state-dir /tmp/state >/tmp/sync.log 2>&1 || true

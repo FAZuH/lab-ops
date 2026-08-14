@@ -1,12 +1,50 @@
 //! Docker API client for listing running containers.
 
+use std::net::IpAddr;
+use std::process::Command as ProcessCommand;
+
 use bollard::Docker;
 use bollard::plugin::ContainerSummary;
 use bollard::query_parameters::ListContainersOptionsBuilder;
 use color_eyre::Result;
 use color_eyre::eyre::WrapErr;
+use color_eyre::eyre::bail;
 
 use crate::model::ContainerInfo;
+
+/// Parses `docker inspect` output to extract a container's first network IP.
+fn parse_docker_inspect_output(output: &str) -> Result<IpAddr> {
+    let ip_str = output.trim();
+    if ip_str.is_empty() {
+        bail!("no IP address found for container");
+    }
+    ip_str
+        .parse()
+        .wrap_err_with(|| format!("invalid IP from docker inspect: {ip_str}"))
+}
+
+/// Runs `docker inspect` for a container's first network IP address.
+///
+/// Used as a fallback when no `bind_ip` or `bind_interface` is configured.
+pub fn get_container_ip(container_id: &str) -> Result<IpAddr> {
+    let output = ProcessCommand::new("docker")
+        .args([
+            "inspect",
+            "-f",
+            "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+            container_id,
+        ])
+        .output()
+        .wrap_err("failed to run docker inspect")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("docker inspect failed: {}", stderr.trim());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_docker_inspect_output(&stdout)
+}
 
 /// Wrapper around the Bollard Docker API client.
 pub struct DockerClient {
@@ -87,5 +125,47 @@ impl DockerClient {
             name,
             compose_project,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use super::*;
+
+    // ── parse_docker_inspect_output ──
+
+    #[test]
+    fn parse_docker_inspect_output_valid_ipv4() {
+        let ip = parse_docker_inspect_output("172.17.0.2\n").unwrap();
+        assert_eq!(ip, IpAddr::from_str("172.17.0.2").unwrap());
+    }
+
+    #[test]
+    fn parse_docker_inspect_output_valid_ipv6() {
+        let ip = parse_docker_inspect_output("2001:db8::1\n").unwrap();
+        assert_eq!(ip, IpAddr::from_str("2001:db8::1").unwrap());
+    }
+
+    #[test]
+    fn parse_docker_inspect_output_trimmed() {
+        let ip = parse_docker_inspect_output("  10.0.0.5  \n").unwrap();
+        assert_eq!(ip, IpAddr::from_str("10.0.0.5").unwrap());
+    }
+
+    #[test]
+    fn parse_docker_inspect_output_empty_errors() {
+        assert!(parse_docker_inspect_output("").is_err());
+    }
+
+    #[test]
+    fn parse_docker_inspect_output_whitespace_only_errors() {
+        assert!(parse_docker_inspect_output("  \n  ").is_err());
+    }
+
+    #[test]
+    fn parse_docker_inspect_output_invalid_ip_errors() {
+        assert!(parse_docker_inspect_output("not-an-ip").is_err());
     }
 }

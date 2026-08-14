@@ -119,6 +119,8 @@ build_consul_service_udp_check
 
 **Every crate in the workspace must use `color_eyre`.** There are no custom error enums in this project. The root `main.rs` calls `color_eyre::install()?` at startup.
 
+> **Exception — typed client errors**: `crates/natmap/src/utils.rs` defines `NatmapError` (hand-implemented `Display` + `std::error::Error`, no `thiserror`). It exists so natmap's public `client` module and auto-discover can match daemon status codes (`BadRequest`/`NotFound`/`Conflict`/`Unavailable`, etc.) without parsing error strings. `request_json` returns `Result<T, NatmapError>`; library code converts via `?` (color_eyre `Report: From<E: StdError>`). This is the one deliberate exception to §4.1/§4.2 — internal code paths still use `color_eyre::Result`.
+
 ```rust
 use color_eyre::eyre::Result;
 use color_eyre::eyre::{bail, eyre};

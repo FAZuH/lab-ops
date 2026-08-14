@@ -60,15 +60,26 @@ Declares all modules with `pub` visibility:
 ```rust
 pub mod api;
 pub mod cli;
+pub mod client;
 pub mod command;
+pub mod completions;
 pub mod consts;
 pub mod daemon;
 pub mod docker;
 pub mod install;
 pub mod iptables;
 pub mod models;
+pub mod policy_route;
 pub mod utils;
 ```
+
+### `client.rs` — Typed Client
+
+`pub struct NatmapClient { socket: PathBuf }` — one typed method per daemon operation, speaking the same HTTP-over-Unix-socket protocol as the CLI's `request_json`:
+
+- Static NAT ops take the typed config struct + an explicit `delete: bool` and return `Result<Option<T>, NatmapError>` (daemon echo on install, `None` on delete): `dnat(DnatConfig, bool)`, `snat`, `hairpin`, `policy_route`.
+- Docker mapping ops mirror the daemon endpoints: `add_mapping(&str, DockerAddMapRequest) -> Result<DockerPortMap>`, `remove_mapping(&str, u16)`, `remove_mapping_by_id(u64)`, `remap_port(&str, DockerRemapRequest) -> Result<Vec<DockerPortMap>>`, `list_mappings() -> Result<ListResponse>`, `clear()`.
+- `new(impl Into<PathBuf>)` and `default_socket()` (env `NATMAP_SOCKET`, else `lab_ops_lab_lib::NATMAP_SOCKET`). Config → request conversion happens inside the client via `From` impls in `models.rs`. Re-exports `NatmapError` from `utils.rs`. Consumed by auto-discover (which previously built `cli::Cli` values and called `run_cli`).
 
 ### `cli.rs` — CLI Definitions
 
@@ -119,7 +130,7 @@ Key types:
 
 | Type | Purpose |
 |------|---------|
-| `DnatConfig` | Persisted DNAT rule (ext_ip, int_ip, ports, proto, ext_if, no_masquerade) |
+| `DnatConfig` | Persisted DNAT rule (ext_ip, int_ip, ports, proto, ext_if, preserve_src_ip) |
 | `SnatConfig` | Persisted SNAT rule (int_ip, ext_ip, ext_if) |
 | `HairpinConfig` | Persisted hairpin rule (ext_ip, int_ip, ports, proto, optional lan_cidr) |
 | `DnatRequest` / `SnatRequest` / `HairpinRequest` | API request bodies |
@@ -165,8 +176,9 @@ Wraps the `bollard` Docker API crate:
 
 ### `utils.rs` — HTTP Client
 
-Generic HTTP client for daemon communication:
-- `request_json<T, R>(socket_path, method, path, body)` — Sends HTTP request to Unix socket, deserializes JSON response
+HTTP client for daemon communication:
+- `NatmapError` — typed error enum (variants: `Connect`, `Http`, `Json`, `BadRequest`, `NotFound`, `Conflict`, `Internal`, `Unavailable`, `UnexpectedStatus { status, body }`). Hand-implemented `Display` + `std::error::Error`; status → variant via `from_status()`. This is the one deliberate exception to the "no custom error enums" rule (see `docs/dev/standards.md` §4).
+- `request_json<T, R>(socket_path, method, path, body) -> Result<T, NatmapError>` — Sends HTTP request to Unix socket, deserializes JSON response. Maps non-success statuses to `NatmapError` variants instead of a flat error string.
 
 ## `crates/auto-discover/src/`
 
@@ -182,7 +194,6 @@ mod daemon;
 mod docker;
 mod forwarding;
 mod model;
-mod natmap;
 ```
 
 ### `cli.rs` — CLI Definitions
@@ -223,24 +234,21 @@ Orchestrates the full discovery lifecycle:
 - `handle_container_start()` — Match started container to network entries, allocate ports, register
 - `handle_container_die()` — Deregister stale services
 - `run_config_watcher()` — Watch `discovery.yaml` for file changes and re-sync
+- `ensure_docker_mapping()` — Adds a Docker mapping via `lab_ops_natmap::client::NatmapClient`, swallowing `NatmapError::Conflict`/`NotFound` (mapping already exists / container missing) as non-fatal
 
 ### `docker.rs` — Docker Client
 
 Wraps bollard:
 - `list_running_containers()` — List running containers with metadata
 - `inspect_container()` — Inspect a single container by ID, returns all metadata
+- `get_container_ip(container_id)` — Free function running `docker inspect` for a container's first network IP (fallback when no `bind_ip`/`bind_interface` is configured); `parse_docker_inspect_output` is its pure parsing half
 
 ### `forwarding.rs` — Forwarding Rule Sync
 
 Proxy-side DNAT management:
-- `sync_forwarding_rules()` — Query Consul for forwarding services, apply DNAT rules via [`IptablesManager`]
+- `sync_forwarding_rules()` — Query Consul for forwarding services, apply DNAT rules via `lab_ops_natmap::client::NatmapClient`
+- `parse_group_proto(proto)` — Parses a forwarding group's protocol string, rejecting invalid values so a misconfigured service fails the sync instead of silently installing a TCP rule
 - `get_lan_cidr(ip)` — Determine the LAN subnet CIDR containing the given IP by querying the routing table (used for LAN-limited hairpin when `preserve_src_ip` is true)
-
-### `natmap.rs` — Natmap Client
-
-Communicates with the natmap daemon via `lab-ops natmap` CLI subprocess or via the daemon's Unix socket HTTP API:
-- `add_docker_mapping()` / `remove_docker_mapping()` — Manage Docker port mappings through natmap
-- `get_container_ip()` — Get container IP via `docker inspect`
 
 <!-- PortAssignments moved to lab_lib::port; see port.rs section in lab-lib crate above -->
 

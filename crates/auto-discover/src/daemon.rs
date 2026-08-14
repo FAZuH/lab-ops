@@ -2,7 +2,12 @@ use std::path::PathBuf;
 
 use color_eyre::Result;
 use color_eyre::eyre::WrapErr;
+use color_eyre::eyre::bail;
 use lab_ops_lab_lib::port::PortAssignments;
+use lab_ops_natmap::client::NatmapClient;
+use lab_ops_natmap::client::NatmapError;
+use lab_ops_natmap::models::DockerAddMapRequest;
+use lab_ops_natmap::models::PolicyRouteConfig;
 use sha2::Digest;
 use sha2::Sha256;
 
@@ -15,7 +20,6 @@ use crate::consul::ConsulServiceRegistration;
 use crate::consul::compute_generation_id;
 use crate::docker::DockerClient;
 use crate::model::ContainerInfo;
-use crate::natmap::NatmapClient;
 
 pub struct DiscoveryDaemon {
     config_path: PathBuf,
@@ -53,6 +57,7 @@ impl DiscoveryDaemon {
         let ports_path = self.state_dir.join("ports.json");
         let mut port_assignments = PortAssignments::load(&ports_path);
         let mut current_service_ids = Vec::new();
+        let mut sync_errors: usize = 0;
 
         let all_resolved = config.resolve_all();
 
@@ -79,6 +84,7 @@ impl DiscoveryDaemon {
                             Ok(Some(id)) => ids.push(id),
                             Ok(None) => {}
                             Err(e) => {
+                                sync_errors += 1;
                                 tracing::error!(
                                     service.id_prefix = %resolved.service_id_prefix,
                                     error = %e,
@@ -106,6 +112,7 @@ impl DiscoveryDaemon {
                         .await
                         .map(|id| id.into_iter().collect::<Vec<_>>())
                         .map_err(|e| {
+                            sync_errors += 1;
                             tracing::error!(
                                 service.id_prefix = %resolved.service_id_prefix,
                                 error = %e,
@@ -126,10 +133,26 @@ impl DiscoveryDaemon {
             .map_err(|e| tracing::warn!(error = %e, "failed to save port assignments"))
             .ok();
 
-        let _ = self
-            .consul
-            .deregister_stale_services(&server_name, &current_service_ids)
-            .await;
+        // The sweep guard is fail-closed by design: a non-total failure with
+        // zero registrations (e.g. some docker services absent plus one errored
+        // local service) blocks the sweep, deferring legitimately-stale cleanup
+        // to the next clean pass so a partial failure never wipes the catalog.
+        let sweep_stale = should_sweep_stale(current_service_ids.len(), sync_errors);
+        if sweep_stale {
+            let _ = self
+                .consul
+                .deregister_stale_services(&server_name, &current_service_ids)
+                .await;
+        } else {
+            tracing::warn!(
+                services.errors = sync_errors,
+                "sync failed completely; skipping stale-service deregistration to protect existing registrations"
+            );
+        }
+
+        if !sweep_stale {
+            bail!("sync failed: {sync_errors} service(s) errored, 0 registered");
+        }
 
         tracing::info!(
             services.active = current_service_ids.len(),
@@ -175,17 +198,15 @@ impl DiscoveryDaemon {
         };
 
         if !skip_natmap {
-            self.natmap
-                .add_docker_mapping(
-                    &container.id,
-                    natmap_bind_ip.as_deref(),
-                    host_port,
-                    resolved.container_port,
-                    resolved.protocol,
-                    None,
-                )
-                .await
-                .wrap_err("natmap command failed")?;
+            self.ensure_docker_mapping(
+                &container.id,
+                natmap_bind_ip.as_deref(),
+                host_port,
+                resolved.container_port,
+                resolved.protocol,
+                None,
+            )
+            .await?;
         }
 
         if let ResolvedPortType::ForwardRemote {
@@ -199,7 +220,14 @@ impl DiscoveryDaemon {
                 .clone()
                 .unwrap_or_else(|| natmap_bind_ip.clone().unwrap_or_else(|| consul_ip.clone()));
             self.natmap
-                .policy_route(&src_ip, gateway, 100, false)
+                .policy_route(
+                    PolicyRouteConfig {
+                        src_ip,
+                        via: gateway.clone(),
+                        table: 100,
+                    },
+                    false,
+                )
                 .await
                 .wrap_err("policy_route command failed")?;
         }
@@ -261,17 +289,15 @@ impl DiscoveryDaemon {
 
         if !skip_natmap {
             let natmap_bind_ip = get_natmap_bind_ip(resolved);
-            self.natmap
-                .add_docker_mapping(
-                    &resolved.service_id_prefix,
-                    natmap_bind_ip.as_deref(),
-                    host_port,
-                    resolved.container_port,
-                    resolved.protocol,
-                    Some(local_ip),
-                )
-                .await
-                .wrap_err("natmap command failed")?;
+            self.ensure_docker_mapping(
+                &resolved.service_id_prefix,
+                natmap_bind_ip.as_deref(),
+                host_port,
+                resolved.container_port,
+                resolved.protocol,
+                Some(local_ip),
+            )
+            .await?;
         }
 
         if let ResolvedPortType::ForwardRemote {
@@ -288,7 +314,14 @@ impl DiscoveryDaemon {
                     .unwrap_or_else(|| local_ip.to_string())
             });
             self.natmap
-                .policy_route(&src_ip, gateway, 100, false)
+                .policy_route(
+                    PolicyRouteConfig {
+                        src_ip,
+                        via: gateway.clone(),
+                        table: 100,
+                    },
+                    false,
+                )
                 .await
                 .wrap_err("policy_route command failed")?;
         }
@@ -433,7 +466,17 @@ impl DiscoveryDaemon {
                 && meta.get("preserve_src_ip").and_then(|v| v.as_str()) == Some("true")
                 && let Some(gateway) = meta.get("preserve_src_ip_gateway").and_then(|v| v.as_str())
                 && let Some(src_ip) = meta.get("preserve_src_ip_src").and_then(|v| v.as_str())
-                && let Err(e) = self.natmap.policy_route(src_ip, gateway, 100, true).await
+                && let Err(e) = self
+                    .natmap
+                    .policy_route(
+                        PolicyRouteConfig {
+                            src_ip: src_ip.to_string(),
+                            via: gateway.to_string(),
+                            table: 100,
+                        },
+                        true,
+                    )
+                    .await
             {
                 tracing::warn!(error = %e, "failed to remove policy route");
             }
@@ -445,6 +488,41 @@ impl DiscoveryDaemon {
             "deregistered services for container"
         );
         Ok(())
+    }
+
+    /// Adds a Docker port mapping via the natmap daemon, treating an existing
+    /// mapping (409) or a missing container (404) as non-fatal.
+    ///
+    /// Span fields: `host.port`, `container.port`, `proto`.
+    #[tracing::instrument(skip_all, fields(host.port = %host_port, container.port = %container_port, proto = %proto))]
+    async fn ensure_docker_mapping(
+        &self,
+        container_id: &str,
+        host_ip: Option<&str>,
+        host_port: u16,
+        container_port: u16,
+        proto: lab_ops_lab_lib::TransportProtocol,
+        target_ip: Option<&str>,
+    ) -> Result<()> {
+        let req = DockerAddMapRequest {
+            host_ip: host_ip.unwrap_or("0.0.0.0").to_string(),
+            host_port,
+            container_port,
+            target_ip: target_ip.map(|s| s.to_string()),
+            proto,
+        };
+        match self.natmap.add_mapping(container_id, req).await {
+            Ok(_) => Ok(()),
+            Err(NatmapError::Conflict(e)) => {
+                tracing::warn!(error = %e, "natmap mapping already exists (409), continuing");
+                Ok(())
+            }
+            Err(NatmapError::NotFound(e)) => {
+                tracing::warn!(error = %e, "container not found, continuing");
+                Ok(())
+            }
+            Err(e) => Err(e).wrap_err("natmap command failed"),
+        }
     }
 
     async fn determine_consul_ip(
@@ -460,8 +538,7 @@ impl DiscoveryDaemon {
         {
             return Ok(ip);
         }
-        self.natmap
-            .get_container_ip(container_id)
+        crate::docker::get_container_ip(container_id)
             .map(|ip| ip.to_string())
             .wrap_err("failed to get container IP")
     }
@@ -473,6 +550,16 @@ impl DiscoveryDaemon {
         let result = hasher.finalize();
         hex::encode(&result[..16])
     }
+}
+
+/// Decide whether the stale-service sweep should run after a sync pass.
+///
+/// A sync where every service errored and none registered (a total failure,
+/// e.g. the natmap socket was not ready at startup) must not sweep, because
+/// sweeping would deregister previously-registered services that merely
+/// failed to re-register this pass.
+fn should_sweep_stale(registered: usize, errors: usize) -> bool {
+    !(errors > 0 && registered == 0)
 }
 
 /// Match a container against a resolved service definition.
@@ -553,6 +640,28 @@ mod tests {
     use tracing_test::traced_test;
 
     use super::*;
+
+    // ── should_sweep_stale ──
+
+    #[test]
+    fn sweep_runs_when_no_errors_and_nothing_registered() {
+        assert!(should_sweep_stale(0, 0));
+    }
+
+    #[test]
+    fn sweep_runs_when_sync_healthy() {
+        assert!(should_sweep_stale(3, 0));
+    }
+
+    #[test]
+    fn sweep_skipped_on_total_failure() {
+        assert!(!should_sweep_stale(0, 5));
+    }
+
+    #[test]
+    fn sweep_runs_on_partial_failure() {
+        assert!(should_sweep_stale(2, 3));
+    }
 
     #[tokio::test]
     #[traced_test]

@@ -6,6 +6,7 @@ mod port_binding;
 mod preserve_src_ip;
 mod recovery;
 mod registration;
+mod startup_race;
 
 use std::process::Command;
 use std::sync::Once;
@@ -72,7 +73,7 @@ pub(crate) fn run(script: &str) -> String {
 }
 
 /// Cleanup helper. Kills all background jobs by PID and removes Docker containers.
-    pub(crate) fn teardown(container_names: &[&str]) -> String {
+pub(crate) fn teardown(container_names: &[&str]) -> String {
     let removes: String = container_names
         .iter()
         .map(|n| format!("docker rm -f {n} 2>/dev/null || true"))
@@ -93,7 +94,7 @@ done
     )
 }
 
-    pub(crate) fn assert_pass(output: &str, test_name: &str) {
+pub(crate) fn assert_pass(output: &str, test_name: &str) {
     assert!(
         output.contains("PASS"),
         "{test_name} failed.\nOutput:\n{output}"
@@ -102,16 +103,11 @@ done
 
 /// Writes new-format YAML config via extra_setup overwrite.
 /// The services_yaml must contain the `services:` block.
-    pub(crate) fn new_format_setup(services_yaml: &str, extra_setup: &str) -> String {
-    new_format_setup_with_defaults_ext(
-        services_yaml,
-        "",
-        extra_setup,
-        "--no-forwarding",
-    )
+pub(crate) fn new_format_setup(services_yaml: &str, extra_setup: &str) -> String {
+    new_format_setup_with_defaults_ext(services_yaml, "", extra_setup, "--no-forwarding")
 }
 
-    pub(crate) fn new_format_setup_with_defaults_ext(
+pub(crate) fn new_format_setup_with_defaults_ext(
     services_yaml: &str,
     defaults_yaml: &str,
     extra_setup: &str,

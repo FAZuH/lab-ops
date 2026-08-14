@@ -25,9 +25,10 @@ lab-ops/
 │   │       └── protocol.rs        # TransportProtocol enum (TCP/UDP)
 │   ├── natmap/                   # NAT management crate
 │   │   └── src/
-│   │       ├── lib.rs            # Module declarations
-│   │       ├── cli.rs            # Command enum + CLI dispatch
-│   │       ├── command.rs        # Handler functions for all subcommands
+│   │   ├── lib.rs            # Module declarations
+│   │   ├── cli.rs            # Command enum + CLI dispatch
+│   │   ├── client.rs         # Typed NatmapClient (HTTP over Unix socket)
+│   │   ├── command.rs        # Handler functions for all subcommands
 │   │       ├── daemon.rs         # Axum API server, state management
 │   │       ├── models.rs         # Data types (configs, requests, state)
 │   │       ├── iptables.rs       # IptablesManager (rule CRUD)
@@ -45,7 +46,6 @@ lab-ops/
 │           ├── docker.rs         # Docker API client
 │           ├── forwarding.rs     # Proxy-side DNAT rule sync
 │           ├── model.rs          # ContainerInfo data type
-│           ├── natmap.rs         # Natmap client (CLI subprocess + HTTP)
 
 │           └── port.rs           # Port assignment persistence + allocation
 ├── tests/                        # Integration tests
