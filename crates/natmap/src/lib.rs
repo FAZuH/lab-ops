@@ -16,6 +16,7 @@
 
 pub mod api;
 pub mod cli;
+pub mod client;
 pub mod command;
 pub mod completions;
 pub mod consts;

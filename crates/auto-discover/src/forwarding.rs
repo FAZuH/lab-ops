@@ -12,9 +12,24 @@ use std::process::Command;
 use color_eyre::Result;
 use color_eyre::eyre::WrapErr;
 use color_eyre::eyre::bail;
+use lab_ops_lab_lib::TransportProtocol;
+use lab_ops_natmap::client::NatmapClient;
+use lab_ops_natmap::models::DnatConfig;
+use lab_ops_natmap::models::HairpinConfig;
 
 use crate::consul::ConsulClient;
-use crate::natmap::NatmapClient;
+
+/// Parses a forwarding group's protocol string into a typed
+/// [`TransportProtocol`].
+///
+/// Returns an error for invalid values so a misconfigured service fails the
+/// sync instead of silently installing a TCP rule, matching the natmap
+/// daemon's rejection of unknown protocols.
+fn parse_group_proto(proto: &str) -> Result<TransportProtocol> {
+    proto
+        .parse()
+        .wrap_err_with(|| format!("invalid transport protocol for forwarding group: {proto}"))
+}
 
 /// Determine the LAN CIDR that contains the given IP by querying the routing
 /// table on the proxy host. Returns the network address in CIDR notation
@@ -88,6 +103,7 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
         let stale = find_stale_rules(&groups)?;
         tracing::Span::current().record("rule.count", stale.len());
         for stale_group in stale {
+            let proto = parse_group_proto(&stale_group.proto)?;
             let ports_csv = stale_group
                 .ports
                 .iter()
@@ -96,12 +112,15 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
                 .join(",");
             natmap
                 .dnat(
-                    &stale_group.ext_ip,
-                    &stale_group.int_ip,
-                    &ports_csv,
-                    &stale_group.proto,
+                    DnatConfig {
+                        ext_ip: stale_group.ext_ip.clone(),
+                        int_ip: stale_group.int_ip.clone(),
+                        ports: ports_csv,
+                        proto,
+                        ext_if: None,
+                        preserve_src_ip: stale_group.preserve_src_ip,
+                    },
                     true,
-                    stale_group.preserve_src_ip,
                 )
                 .await
                 .ok();
@@ -113,6 +132,7 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
     tracing::Span::current().record("rule.count", groups.len() + stale.len());
 
     for group in &groups {
+        let proto = parse_group_proto(&group.proto)?;
         let ports_csv: String = group
             .ports
             .iter()
@@ -122,24 +142,30 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
 
         natmap
             .dnat(
-                &group.ext_ip,
-                &group.int_ip,
-                &ports_csv,
-                &group.proto,
+                DnatConfig {
+                    ext_ip: group.ext_ip.clone(),
+                    int_ip: group.int_ip.clone(),
+                    ports: ports_csv.clone(),
+                    proto,
+                    ext_if: None,
+                    preserve_src_ip: group.preserve_src_ip,
+                },
                 true,
-                group.preserve_src_ip,
             )
             .await
             .ok();
 
         if let Err(e) = natmap
             .dnat(
-                &group.ext_ip,
-                &group.int_ip,
-                &ports_csv,
-                &group.proto,
+                DnatConfig {
+                    ext_ip: group.ext_ip.clone(),
+                    int_ip: group.int_ip.clone(),
+                    ports: ports_csv.clone(),
+                    proto,
+                    ext_if: None,
+                    preserve_src_ip: group.preserve_src_ip,
+                },
                 false,
-                group.preserve_src_ip,
             )
             .await
         {
@@ -174,11 +200,13 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
             // Delete first to avoid duplicates
             natmap
                 .hairpin(
-                    &group.ext_ip,
-                    &group.int_ip,
-                    &ports_csv,
-                    &group.proto,
-                    lan_cidr.as_deref(),
+                    HairpinConfig {
+                        ext_ip: group.ext_ip.clone(),
+                        int_ip: group.int_ip.clone(),
+                        ports: ports_csv.clone(),
+                        proto,
+                        lan_cidr: lan_cidr.clone(),
+                    },
                     true,
                 )
                 .await
@@ -186,11 +214,13 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
 
             if let Err(e) = natmap
                 .hairpin(
-                    &group.ext_ip,
-                    &group.int_ip,
-                    &ports_csv,
-                    &group.proto,
-                    lan_cidr.as_deref(),
+                    HairpinConfig {
+                        ext_ip: group.ext_ip.clone(),
+                        int_ip: group.int_ip.clone(),
+                        ports: ports_csv.clone(),
+                        proto,
+                        lan_cidr: lan_cidr.clone(),
+                    },
                     false,
                 )
                 .await
@@ -215,6 +245,7 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
     }
 
     for stale_group in stale {
+        let proto = parse_group_proto(&stale_group.proto)?;
         let ports_csv = stale_group
             .ports
             .iter()
@@ -223,12 +254,15 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
             .join(",");
         natmap
             .dnat(
-                &stale_group.ext_ip,
-                &stale_group.int_ip,
-                &ports_csv,
-                &stale_group.proto,
+                DnatConfig {
+                    ext_ip: stale_group.ext_ip.clone(),
+                    int_ip: stale_group.int_ip.clone(),
+                    ports: ports_csv,
+                    proto,
+                    ext_if: None,
+                    preserve_src_ip: stale_group.preserve_src_ip,
+                },
                 true,
-                stale_group.preserve_src_ip,
             )
             .await
             .ok();
@@ -417,6 +451,24 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    // --- parse_group_proto ---
+
+    #[test]
+    fn parse_group_proto_accepts_tcp() {
+        assert_eq!(parse_group_proto("tcp").unwrap(), TransportProtocol::Tcp);
+    }
+
+    #[test]
+    fn parse_group_proto_accepts_udp() {
+        assert_eq!(parse_group_proto("udp").unwrap(), TransportProtocol::Udp);
+    }
+
+    #[test]
+    fn parse_group_proto_rejects_invalid_protocol() {
+        let err = parse_group_proto("bogus").unwrap_err();
+        assert!(err.to_string().contains("bogus"));
+    }
 
     fn arb_ipv4() -> impl Strategy<Value = String> {
         (any::<u8>(), any::<u8>(), any::<u8>(), any::<u8>())

@@ -235,7 +235,7 @@ pub async fn handle_dnat(
     ports: String,
     ext_if: Option<String>,
     delete: bool,
-    no_masquerade: bool,
+    preserve_src_ip: bool,
     socket: impl AsRef<Path>,
 ) -> Result<()> {
     let req = DnatRequest {
@@ -244,7 +244,7 @@ pub async fn handle_dnat(
         ports,
         proto: proto.parse()?,
         ext_if,
-        no_masquerade,
+        preserve_src_ip,
     };
     if delete {
         let _: () = request_json(socket, Method::DELETE, "/dnat", Some(req)).await?;

@@ -142,8 +142,10 @@ pub struct DnatConfig {
     pub proto: TransportProtocol,
     /// Optional external network interface.
     pub ext_if: Option<String>,
+    /// Preserve the source IP of forwarded traffic (metadata only — the
+    /// daemon does not apply a MASQUERADE rule for this mapping).
     #[serde(default)]
-    pub no_masquerade: bool,
+    pub preserve_src_ip: bool,
 }
 
 impl DnatConfig {
@@ -210,7 +212,7 @@ pub struct DnatRequest {
     pub proto: TransportProtocol,
     pub ext_if: Option<String>,
     #[serde(default)]
-    pub no_masquerade: bool,
+    pub preserve_src_ip: bool,
 }
 
 /// JSON body for creating or deleting an SNAT rule.
@@ -244,6 +246,53 @@ pub struct PolicyRouteRequest {
     pub src_ip: String,
     pub via: String,
     pub table: u32,
+}
+
+// --- Config → request conversions ---
+
+impl From<DnatConfig> for DnatRequest {
+    fn from(config: DnatConfig) -> Self {
+        Self {
+            ext_ip: config.ext_ip,
+            int_ip: config.int_ip,
+            ports: config.ports,
+            proto: config.proto,
+            ext_if: config.ext_if,
+            preserve_src_ip: config.preserve_src_ip,
+        }
+    }
+}
+
+impl From<SnatConfig> for SnatRequest {
+    fn from(config: SnatConfig) -> Self {
+        Self {
+            int_ip: config.int_ip,
+            ext_ip: config.ext_ip,
+            ext_if: config.ext_if,
+        }
+    }
+}
+
+impl From<HairpinConfig> for HairpinRequest {
+    fn from(config: HairpinConfig) -> Self {
+        Self {
+            ext_ip: config.ext_ip,
+            int_ip: config.int_ip,
+            ports: config.ports,
+            proto: config.proto,
+            lan_cidr: config.lan_cidr,
+        }
+    }
+}
+
+impl From<PolicyRouteConfig> for PolicyRouteRequest {
+    fn from(config: PolicyRouteConfig) -> Self {
+        Self {
+            src_ip: config.src_ip,
+            via: config.via,
+            table: config.table,
+        }
+    }
 }
 
 // --- Persisted daemon state ---
@@ -374,7 +423,7 @@ mod tests {
             ports: "80".into(),
             proto: TransportProtocol::Tcp,
             ext_if: None,
-            no_masquerade: false,
+            preserve_src_ip: false,
         };
         assert_eq!(cfg.rule_comment(), "natmap:dnat:203.0.113.50:80");
     }
@@ -387,7 +436,7 @@ mod tests {
             ports: "80,443,8080".into(),
             proto: TransportProtocol::Tcp,
             ext_if: None,
-            no_masquerade: false,
+            preserve_src_ip: false,
         };
         assert_eq!(cfg.rule_comment(), "natmap:dnat:203.0.113.50:80,443,8080");
     }
@@ -400,7 +449,7 @@ mod tests {
             ports: "53".into(),
             proto: TransportProtocol::Udp,
             ext_if: Some("eth0".into()),
-            no_masquerade: true,
+            preserve_src_ip: true,
         };
         assert_eq!(cfg.rule_comment(), "natmap:dnat:198.51.100.10:53");
     }

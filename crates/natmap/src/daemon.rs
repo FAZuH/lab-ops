@@ -108,6 +108,29 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+/// Builds the HTTP API router for the daemon.
+///
+/// Exposed separately from [`Daemon::new`] so tests can serve the same router
+/// over a temporary Unix socket without touching iptables or Docker.
+pub fn build_router(state: AppState) -> Router {
+    Router::new()
+        .route("/mappings", get(list_mappings))
+        .route("/remap/:container_id", put(remap_port))
+        .route("/mapping/:container_id", post(add_mapping))
+        .route("/mapping/{container_id}/{port}", delete(remove_mapping))
+        .route("/mapping/by-id/:id", delete(remove_mapping_by_id))
+        .route("/dnat", post(add_dnat))
+        .route("/dnat", delete(remove_dnat))
+        .route("/snat", post(add_snat))
+        .route("/snat", delete(remove_snat))
+        .route("/hairpin", post(add_hairpin))
+        .route("/hairpin", delete(remove_hairpin))
+        .route("/policy-route", post(add_policy_route))
+        .route("/policy-route", delete(remove_policy_route))
+        .route("/clear", delete(clear_all))
+        .with_state(state)
+}
+
 #[derive(Clone)]
 pub struct Daemon {
     state: AppState,
@@ -160,24 +183,10 @@ impl Daemon {
             socket_path,
         };
 
-        let app = Router::new()
-            .route("/mappings", get(list_mappings))
-            .route("/remap/:container_id", put(remap_port))
-            .route("/mapping/:container_id", post(add_mapping))
-            .route("/mapping/{container_id}/{port}", delete(remove_mapping))
-            .route("/mapping/by-id/:id", delete(remove_mapping_by_id))
-            .route("/dnat", post(add_dnat))
-            .route("/dnat", delete(remove_dnat))
-            .route("/snat", post(add_snat))
-            .route("/snat", delete(remove_snat))
-            .route("/hairpin", post(add_hairpin))
-            .route("/hairpin", delete(remove_hairpin))
-            .route("/policy-route", post(add_policy_route))
-            .route("/policy-route", delete(remove_policy_route))
-            .route("/clear", delete(clear_all))
-            .with_state(state.clone());
-
-        Ok(Self { state, app })
+        Ok(Self {
+            app: build_router(state.clone()),
+            state,
+        })
     }
 
     /// Runs the natmap daemon with explicit paths for the socket, state file, and group.

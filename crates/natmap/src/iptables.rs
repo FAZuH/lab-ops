@@ -823,7 +823,7 @@ mod tests {
             ports: "80".into(),
             proto: TransportProtocol::Tcp,
             ext_if: None,
-            no_masquerade: false,
+            preserve_src_ip: false,
         };
         let args = build_static_dnat_prerouting_args(&cfg);
         assert!(args.contains(&"--dport".into()));
@@ -840,7 +840,7 @@ mod tests {
             ports: "80,443,8080".into(),
             proto: TransportProtocol::Tcp,
             ext_if: None,
-            no_masquerade: false,
+            preserve_src_ip: false,
         };
         let args = build_static_dnat_prerouting_args(&cfg);
         assert!(args.contains(&"multiport".into()));
@@ -857,7 +857,7 @@ mod tests {
             ports: "53".into(),
             proto: TransportProtocol::Udp,
             ext_if: Some("eth0".into()),
-            no_masquerade: false,
+            preserve_src_ip: false,
         };
         let args = build_static_dnat_prerouting_args(&cfg);
         assert!(args.contains(&"-i".into()));
@@ -872,7 +872,7 @@ mod tests {
             ports: "19132".into(),
             proto: TransportProtocol::Udp,
             ext_if: None,
-            no_masquerade: false,
+            preserve_src_ip: false,
         };
         let args = build_static_dnat_prerouting_args(&cfg);
         assert!(args.contains(&"udp".into()));
@@ -888,7 +888,7 @@ mod tests {
             ports: "80".into(),
             proto: TransportProtocol::Tcp,
             ext_if: None,
-            no_masquerade: false,
+            preserve_src_ip: false,
         };
         let args = build_static_dnat_forward_args(&cfg);
         assert!(args.contains(&"ACCEPT".into()));
@@ -905,7 +905,7 @@ mod tests {
             ports: "3000,3001,3002".into(),
             proto: TransportProtocol::Tcp,
             ext_if: None,
-            no_masquerade: false,
+            preserve_src_ip: false,
         };
         let args = build_static_dnat_forward_args(&cfg);
         assert!(args.contains(&"multiport".into()));
