@@ -541,8 +541,21 @@ pub async fn add_mapping(
             }),
         )
     })?;
-    let host_addr = SocketAddr::new(host_ip, req.host_port);
     let container_addr = SocketAddr::new(container_ip, req.container_port);
+    let host_addr = if req.host_port == 0 {
+        allocate_free_port(&state.ports, host_ip, proto).await?
+    } else {
+        let addr = SocketAddr::new(host_ip, req.host_port);
+        state.ports.allocate(addr, proto).await.map_err(|e| {
+            (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+        addr
+    };
 
     let span = tracing::Span::current();
     span.record("host.addr", tracing::field::display(host_addr));
@@ -556,14 +569,6 @@ pub async fn add_mapping(
     let id = state.allocate_id();
     let mapping = DockerPortMap::new(id, request, container_id.clone(), container_name);
 
-    state.ports.allocate(host_addr, proto).await.map_err(|e| {
-        (
-            StatusCode::CONFLICT,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-    })?;
     if let Err(e) = state.iptables.install_dockermap(&mapping) {
         state.ports.deallocate(host_addr).await;
         return Err((
@@ -689,6 +694,37 @@ pub async fn clear_all(
 }
 
 // --- Internal helpers ---
+
+/// Lower bound of the ephemeral port range the daemon allocates from.
+///
+/// Duplicated with lab-lib's private `PORT_RANGE_START` — keep both in sync.
+pub(crate) const EPHEMERAL_PORT_START: u16 = 32768;
+/// Upper bound of the ephemeral port range the daemon allocates from.
+pub(crate) const EPHEMERAL_PORT_END: u16 = 61000;
+
+/// Reserves the first free host port on `host_ip` from the ephemeral range.
+///
+/// Each candidate is reserved directly so a concurrent claim of the same port
+/// is detected by the bind itself; on success the port is held by the caller
+/// until it deallocates it.
+async fn allocate_free_port(
+    ports: &PortAllocator,
+    host_ip: IpAddr,
+    proto: TransportProtocol,
+) -> Result<SocketAddr, (StatusCode, Json<ErrorResponse>)> {
+    for port in EPHEMERAL_PORT_START..=EPHEMERAL_PORT_END {
+        let addr = SocketAddr::new(host_ip, port);
+        if ports.allocate(addr, proto).await.is_ok() {
+            return Ok(addr);
+        }
+    }
+    Err((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(ErrorResponse {
+            error: "no free host port available in ephemeral range".into(),
+        }),
+    ))
+}
 
 pub async fn bind_ports(
     ports: Arc<PortAllocator>,
@@ -920,6 +956,10 @@ mod tests {
         }
     }
 
+    fn make_addr(port: u16) -> SocketAddr {
+        SocketAddr::new(IpAddr::from([127, 0, 0, 1]), port)
+    }
+
     #[test]
     fn parse_socket_addrs_single_port() {
         let addrs = parse_socket_addrs("1.2.3.4", "80").unwrap();
@@ -1110,19 +1150,163 @@ mod tests {
         let state = test_app_state();
         let req = DockerAddMapRequest {
             host_ip: "127.0.0.1".into(),
-            host_port: 0,
+            host_port: 39050,
             container_port: 80,
             target_ip: Some("10.0.0.2".into()),
             proto: TransportProtocol::Tcp,
         };
         let result = add_mapping(State(state.clone()), Path("test123".into()), Json(req)).await;
         if result.is_err() {
-            // port 0 allocation or iptables may fail — skip
+            // real iptables may fail — skip
             return;
         }
         assert!(result.is_ok());
         let mapping = result.unwrap().0;
         assert_eq!(mapping.container_id, "test123");
+    }
+
+    // --- Add mapping allocation ---
+
+    #[tokio::test]
+    async fn add_mapping_no_host_port_allocates_and_returns_port() {
+        let fake = Arc::new(FakeIptables::default());
+        let state = test_app_state_with(fake.clone());
+        let req = DockerAddMapRequest {
+            host_ip: "127.0.0.2".into(),
+            host_port: 0,
+            container_port: 80,
+            target_ip: Some("10.0.0.2".into()),
+            proto: TransportProtocol::Tcp,
+        };
+
+        let result = add_mapping(State(state.clone()), Path("c1".into()), Json(req)).await;
+        let mapping = result.unwrap().0;
+
+        let host_addr = mapping.request.host_addr;
+        assert_eq!(host_addr.ip(), IpAddr::from_str("127.0.0.2").unwrap());
+        assert!(
+            (super::EPHEMERAL_PORT_START..=super::EPHEMERAL_PORT_END).contains(&host_addr.port())
+        );
+        assert_eq!(fake.installed_mappings(), vec![mapping.clone()]);
+        assert!(state.ports.is_allocated(host_addr).await);
+    }
+
+    #[tokio::test]
+    async fn add_mapping_taken_host_port_returns_conflict() {
+        let fake = Arc::new(FakeIptables::default());
+        let state = test_app_state_with(fake.clone());
+        let addr = make_addr(39040);
+        if state
+            .ports
+            .allocate(addr, TransportProtocol::Tcp)
+            .await
+            .is_err()
+        {
+            // OS ephemeral traffic may transiently hold the port — skip
+            return;
+        }
+        let req = DockerAddMapRequest {
+            host_ip: "127.0.0.1".into(),
+            host_port: 39040,
+            container_port: 80,
+            target_ip: Some("10.0.0.2".into()),
+            proto: TransportProtocol::Tcp,
+        };
+
+        let result = add_mapping(State(state.clone()), Path("c1".into()), Json(req)).await;
+
+        assert_eq!(result.unwrap_err().0, StatusCode::CONFLICT);
+        assert!(fake.installed_mappings().is_empty());
+    }
+
+    #[tokio::test]
+    async fn add_mapping_install_failure_releases_allocated_port() {
+        let fake = Arc::new(FakeIptables::default());
+        fake.set_fail_dockermap(true);
+        let state = test_app_state_with(fake.clone());
+        let req = DockerAddMapRequest {
+            host_ip: "127.0.0.4".into(),
+            host_port: 0,
+            container_port: 80,
+            target_ip: Some("10.0.0.2".into()),
+            proto: TransportProtocol::Tcp,
+        };
+
+        let result = add_mapping(State(state.clone()), Path("c1".into()), Json(req.clone())).await;
+        assert_eq!(result.unwrap_err().0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(fake.installed_mappings().is_empty());
+
+        // The port the daemon allocated for the scan must have been released.
+        // Check the allocator map directly (external OS ephemeral traffic never
+        // touches it), so the assertion is immune to port contention in the
+        // OS ephemeral range (32768..=60999) that overlaps the scan range.
+        let leaked: Vec<u16> = {
+            let mut leaked = Vec::new();
+            for port in super::EPHEMERAL_PORT_START..=super::EPHEMERAL_PORT_START + 12 {
+                let addr = SocketAddr::new(IpAddr::from_str("127.0.0.4").unwrap(), port);
+                if state.ports.is_allocated(addr).await {
+                    leaked.push(port);
+                }
+            }
+            leaked
+        };
+        assert!(
+            leaked.is_empty(),
+            "allocated port must be released on install failure; still held: {leaked:?}"
+        );
+
+        // The released port is immediately re-allocatable by the next request.
+        fake.set_fail_dockermap(false);
+        let mapping = add_mapping(State(state.clone()), Path("c1".into()), Json(req))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(
+            mapping.request.host_addr.ip(),
+            IpAddr::from_str("127.0.0.4").unwrap()
+        );
+        assert!(
+            (super::EPHEMERAL_PORT_START..=super::EPHEMERAL_PORT_END)
+                .contains(&mapping.request.host_addr.port())
+        );
+        assert!(state.ports.is_allocated(mapping.request.host_addr).await);
+    }
+
+    #[tokio::test]
+    async fn add_mapping_explicit_port_install_failure_releases_allocated_port() {
+        let fake = Arc::new(FakeIptables::default());
+        fake.set_fail_dockermap(true);
+        let state = test_app_state_with(fake.clone());
+        let req = DockerAddMapRequest {
+            host_ip: "127.0.0.4".into(),
+            host_port: 39040,
+            container_port: 80,
+            target_ip: Some("10.0.0.2".into()),
+            proto: TransportProtocol::Tcp,
+        };
+
+        let result = add_mapping(State(state.clone()), Path("c1".into()), Json(req.clone())).await;
+        assert_eq!(result.unwrap_err().0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(fake.installed_mappings().is_empty());
+
+        // The explicitly requested port must have been released on install
+        // failure. Check the allocator map directly (external OS ephemeral
+        // traffic never touches it), so the assertion is immune to port
+        // contention in the OS ephemeral range.
+        let addr = SocketAddr::new(IpAddr::from_str("127.0.0.4").unwrap(), 39040);
+        assert!(
+            !state.ports.is_allocated(addr).await,
+            "explicitly requested port must be released on install failure"
+        );
+
+        // The released port is immediately re-allocatable by the next request.
+        fake.set_fail_dockermap(false);
+        let mapping = add_mapping(State(state.clone()), Path("c1".into()), Json(req))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(mapping.request.host_addr.port(), 39040);
+        assert!(state.ports.is_allocated(mapping.request.host_addr).await);
     }
 
     #[tokio::test]

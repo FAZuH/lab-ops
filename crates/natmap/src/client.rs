@@ -335,6 +335,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn add_mapping_no_host_port_roundtrips_allocated_port() {
+        let fake = Arc::new(FakeIptables::default());
+        let (_dir, socket) = spawn_daemon(test_app_state_with(fake)).await;
+        let client = NatmapClient::new(socket);
+
+        let req = DockerAddMapRequest {
+            host_ip: "127.0.0.3".into(),
+            host_port: 0,
+            container_port: 80,
+            target_ip: Some("10.0.0.2".into()),
+            proto: TransportProtocol::Tcp,
+        };
+        let mapping = client.add_mapping("c1", req).await.unwrap();
+
+        assert_eq!(mapping.container_id, "c1");
+        assert_eq!(mapping.request.host_addr.ip().to_string(), "127.0.0.3");
+        assert!(
+            (crate::api::EPHEMERAL_PORT_START..=crate::api::EPHEMERAL_PORT_END)
+                .contains(&mapping.request.host_addr.port()),
+            "daemon must report the allocated port, got {}",
+            mapping.request.host_addr.port()
+        );
+    }
+
+    #[tokio::test]
     async fn remove_mapping_not_found_maps_not_found() {
         let (_dir, socket) = spawn_daemon(test_app_state()).await;
         let client = NatmapClient::new(socket);

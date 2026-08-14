@@ -106,7 +106,8 @@ pub struct DockerAddMapRequest {
     /// Host IP to bind to (defaults to `0.0.0.0`).
     #[serde(default = "default_host_ip")]
     pub host_ip: String,
-    /// Port on the host.
+    /// Port on the host. `0` asks the daemon to allocate a free port from its
+    /// ephemeral range and report the chosen port in the response.
     pub host_port: u16,
     /// Port on the target (container or local service).
     pub container_port: u16,
