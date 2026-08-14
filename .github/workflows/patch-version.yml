@@ -8,6 +8,11 @@ on:
         required: false
         type: string
         default: ''
+      publish-crates:
+        description: 'Whether to publish workspace members to crates.io'
+        required: false
+        type: boolean
+        default: false
     outputs:
       version:
         description: 'The version that was patched'
@@ -58,6 +63,12 @@ jobs:
         id: workspace
         run: |
           ROOT_NAME=$(grep '^name = ' Cargo.toml | head -1 | sed 's/name = "\(.*\)"/\1/')
+
+          if [[ "${{ inputs.publish-crates }}" != "true" ]]; then
+            echo "Crates are not published — patching root package only"
+            echo "packages=$ROOT_NAME" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
           if ! grep -q '^\[workspace\]' Cargo.toml; then
             echo "No workspace section found — skipping member patching"
@@ -183,10 +194,17 @@ jobs:
             echo "  $PKG: $MEMVER ✓"
           done
 
-      - name: Upload patched Cargo.tomls
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Regenerate Cargo.lock
+        run: cargo generate-lockfile
+
+      - name: Upload patched manifests
         uses: actions/upload-artifact@v4
         with:
           name: patched-cargo-toml
           path: |
             Cargo.toml
+            Cargo.lock
             crates/**/Cargo.toml

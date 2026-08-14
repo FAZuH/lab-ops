@@ -1,94 +1,102 @@
 # Commit & Changelog Conventions
 
-## `[pub]` marker
-
-Only commits tagged with `[pub]` (or `[public]`) appear in the changelog. The
-marker can be anywhere in the commit subject or body. It is stripped from the
-final changelog entry automatically.
-
-```
-feat: Add batch processing [pub]
-docs: Fix typo in readme [public]
-```
-
-Commits without `[pub]` are **silently excluded** from the changelog. Use this
-for things like refactors, CI changes, dev tooling, or any internal-only work.
-
-### When to use `[pub]` — two audiences
-
-The definition of "user-facing" depends on your project's audience:
-
-- **Developers (library / crate)** — your users are other developers. Mark
-  commits with `[pub]` when they affect the public API, add new features,
-  improve performance, or fix bugs. Skip internal refactors, test additions,
-  CI changes, or dev documentation.
-
-- **App consumers (binary)** — your users are end users of the application.
-  Mark commits with `[pub]` for UI changes, new features, performance
-  improvements, bug fixes, or user-facing documentation. Skip refactors,
-  developer tooling, internal docs, CI, or test-only changes.
-
-| Audience    | `[pub]` (include)                           | No marker (exclude)               |
-|-------------|---------------------------------------------|-----------------------------------|
-| Developer   | API changes, new features, perf, bug fixes  | Refactors, CI, dev docs, tests    |
-| App user    | UI changes, new features, perf, bug fixes   | Refactors, CI, dev tooling, tests |
+The changelog is generated from your commits automatically. Generation uses
+the stock `conventional-changelog-conventionalcommits` preset. The only
+custom behavior in `.config.cjs` is the version bump logic.
 
 ## Commit message format
 
-Follow [Conventional Commits](https://www.conventionalcommits.org/):
+Write commits in [Conventional Commits](https://www.conventionalcommits.org/)
+format:
 
 ```
 <type>(<scope>): <subject>
 ```
 
-- **type** — `feat`, `fix`, `perf`, `docs`, `refactor`, `test`, `ci`, `chore`,
-  `style`, `build`, `revert`
-- **scope** — optional; reflects the area of the codebase being changed
-- **subject** — capitalize the first letter; it appears verbatim in the
-  changelog (unless we override the changelog).
+- `type` — the type of change (see below)
+- `scope` — optional; the part of the codebase you changed
+- `subject` — a short description of the change
+
+The type decides the changelog section. The scope shows in the entry. The
+subject becomes the entry text.
+
+Example:
 
 ```
-feat(config): Add support for YAML config files [pub]
-fix(parser): Handle null values gracefully [pub]
+feat(api): add user search endpoint
+fix(parser): handle empty input
 ```
 
-### Bump control
+## Which commits appear
 
-Bump type is controlled by the commit subject, independent of `[pub]`:
+These types create changelog entries:
 
-| Subject                  | Bump    |
-|--------------------------|---------|
-| `chore!(major): ...`     | major   |
-| `chore!(minor): ...`     | minor   |
-| everything else          | patch   |
+| Type | Section heading | Meaning |
+|------|-----------------|---------|
+| `feat` | Features | A new user-facing feature |
+| `fix` | Bug Fixes | A bug fix |
+| `perf` | Performance Improvements | A performance improvement |
+| `revert` | Reverts | A reverted change |
 
-Workspace members are bumped independently based on **file path changes**
-under `crates/<member>/`, not commit scope. The CI runs `git diff` since the
-last tag to detect which member directories have changes. Commit scope is a
-human-readable convention and has no effect on bump logic.
-
-### Commit body overrides
-
-Additional fields in the commit body modify how entries appear in the
-changelog:
+These types do NOT create entries:
 
 ```
-feat(api): add user search endpoint [pub]
-
-scope: Users
-changelog: New `/api/users/search` endpoint with pagination
+docs, style, chore, refactor, test, build, ci
 ```
 
-- **`scope:`** — overrides the changelog section/group for this entry.
-  Defaults to the commit type label (e.g., "New Features", "Bug Fixes").
-- **`changelog:`** — replaces the commit subject in the changelog with a
-  custom message. Useful when the subject is too terse or technical.
+The exclusion is intentional. These commits appear often, and including
+them hides the user-facing entries. They still count toward the version
+bump (see below).
 
-## PR-level overrides
+## Bump control
 
-Add sections to any **maintainer-authored PR comment** (not the PR body) to
-override auto-detection. The bot picks up the latest maintainer comment
-containing overrides.
+The bump type comes from the commit subject. It is independent of changelog
+visibility:
+
+| Subject | Bump |
+|---------|------|
+| `chore!(major): ...` | major |
+| `chore!(minor): ...` | minor |
+| anything else | patch |
+
+Example: `chore!(major): drop the legacy config format` bumps the version
+to the next major but creates no entry.
+
+A visible commit can also declare a breaking change. Add `!` after the type,
+or add a `BREAKING CHANGE:` footer to the body. The changelog then shows the
+entry under a "Breaking Changes" section.
+
+Workspace members (crates) are bumped independently. The CI detects changed
+members by file path under `crates/<member>/`, not by commit scope. Commit
+scope is a human-readable convention. It has no effect on the bump logic.
+
+## Per-repo changelog mode
+
+Each project chooses how its CHANGELOG.md is maintained. Create a
+`.github/changelog-mode` file in the project repo. The file holds one word:
+`auto` or `manual`. A missing file means `auto`.
+
+**auto** (default) — the release workflow regenerates CHANGELOG.md from the
+commits and commits it to the release branch.
+
+**manual** — the release workflow does NOT generate CHANGELOG.md. On
+release, the CI renames the topmost `## [Unreleased]` section to
+`## <version> (<date>)`, inserts a fresh empty `## [Unreleased]` above it,
+and commits the change. The GitHub release body and the Discord embed read
+the renamed section. Version bumping and tag creation still happen
+automatically. On a pull request, the preview bot shows the materialized
+release body (the `[Unreleased]` section renamed to
+`## <version> (<date>)`), matching what the release will post.
+
+The file is project-local. `sync.sh` never ships it, and never pulls it.
+
+## PR-level overrides (auto mode only)
+
+On every pull request, the preview bot posts the generated changelog with
+the next version and the crate bump table. A maintainer can override the
+auto-detection. Add the sections in the PR description or in a comment on
+the PR. The bot uses the latest maintainer comment that contains the
+sections.
 
 ### `## Bump` — manual version bumps
 
@@ -98,25 +106,37 @@ natmap: minor
 auto-discover: patch
 ```
 
-Each line: `<scope>: <major|minor|patch>`. Overrides the automatic
-scope-based detection for workspace crate bumps.
+Each line sets one member's bump type. The format is
+`<name>: <major|minor|patch>`. The section overrides the automatic
+per-member detection in the preview.
 
 ### `## Override Changelog` — full changelog replacement
 
 ```
 ## Override Changelog
 ### Breaking Changes
-- Dropped support for legacy config format (v1)
+- Dropped support for the legacy config format
 
-### New Features
-- Added multi-threaded file watcher
-- New `--watch` flag for live reload
+### Features
+- Added a multi-threaded file watcher
 ```
 
-Replaces the entire auto-generated changelog. Also skips the TriPSs
-generation entirely.
+This text replaces the generated changelog in the preview comment. It does
+not affect the release. The release still generates its own changelog.
 
-Both sections are optional and can be used together in the same comment.
-`## Bump` controls the version bump table; `## Override Changelog` replaces
-the generated changelog text. Each overrides its respective auto-detection.
-If neither is present, the system falls back to auto-detection.
+Both sections are optional and can appear in the same comment. If neither
+is present, the preview falls back to the auto-generated output.
+
+The overrides apply only in `auto` mode. In `manual` mode the preview shows
+the materialized release body (the `[Unreleased]` section renamed to
+`## <version> (<date>)`). It ignores both overrides.
+
+## Generated vs manual
+
+| Aspect | auto | manual |
+|--------|------|--------|
+| CHANGELOG.md | generated and committed by the release | hand-written; `[Unreleased]` header renamed to version + date and fresh section inserted by the release |
+| GitHub release body | generated changelog | renamed `[Unreleased]` section (version + date) |
+| Discord embed | generated changelog | renamed `[Unreleased]` section (version + date) |
+| PR preview | changelog + version + bump table | materialized release body + version |
+| Version bump and tag | automatic | automatic |
