@@ -52,6 +52,42 @@ pub fn output_dnat_destination(host_ip: std::net::IpAddr, is_ipv6: bool) -> Stri
 /// methods to install/remove individual rules.
 pub struct IptablesManager;
 
+/// Interface for the iptables rule operations the daemon relies on.
+///
+/// [`IptablesManager`] is the production implementation. Daemon tests use
+/// fakes so orchestration can be exercised without touching the host firewall.
+pub trait Iptables: Send + Sync {
+    /// Creates the `NATMAP` chains and inserts jump rules.
+    fn setup(&self) -> Result<()>;
+
+    /// Flushes and deletes the `NATMAP` chains and removes all natmap-commented rules.
+    fn flush_all_natmap(&self) -> Result<()>;
+
+    /// Installs DNAT, FORWARD ACCEPT, MASQUERADE, and OUTPUT DNAT rules for a Docker mapping.
+    fn install_dockermap(&self, map: &DockerPortMap) -> Result<()>;
+
+    /// Removes all iptables rules associated with a Docker mapping by its rule comment.
+    fn remove_mapping(&self, map: &DockerPortMap) -> Result<()>;
+
+    /// Installs a static DNAT rule (PREROUTING + FORWARD ACCEPT).
+    fn install_dnat(&self, config: &DnatConfig) -> Result<()>;
+
+    /// Removes a static DNAT rule (PREROUTING + FORWARD ACCEPT).
+    fn remove_dnat(&self, config: &DnatConfig) -> Result<()>;
+
+    /// Installs a static SNAT (source NAT) rule in the POSTROUTING chain.
+    fn install_snat(&self, config: &SnatConfig) -> Result<()>;
+
+    /// Removes a static SNAT rule from the POSTROUTING chain.
+    fn remove_snat(&self, config: &SnatConfig) -> Result<()>;
+
+    /// Installs a hairpin NAT rule.
+    fn install_hairpin(&self, config: &HairpinConfig) -> Result<()>;
+
+    /// Removes a hairpin NAT rule (PREROUTING DNAT + POSTROUTING MASQUERADE).
+    fn remove_hairpin(&self, config: &HairpinConfig) -> Result<()>;
+}
+
 // ── Pure argument builders (testable without iptables) ──
 
 /// Builds iptables args for a docker mapping DNAT rule (nat/NATMAP).
@@ -650,6 +686,48 @@ impl IptablesManager {
             .collect();
 
         Ok(rules)
+    }
+}
+
+impl Iptables for IptablesManager {
+    fn setup(&self) -> Result<()> {
+        IptablesManager::setup(self)
+    }
+
+    fn flush_all_natmap(&self) -> Result<()> {
+        IptablesManager::flush_all_natmap(self)
+    }
+
+    fn install_dockermap(&self, map: &DockerPortMap) -> Result<()> {
+        IptablesManager::install_dockermap(self, map)
+    }
+
+    fn remove_mapping(&self, map: &DockerPortMap) -> Result<()> {
+        IptablesManager::remove_mapping(self, map)
+    }
+
+    fn install_dnat(&self, config: &DnatConfig) -> Result<()> {
+        IptablesManager::install_dnat(self, config)
+    }
+
+    fn remove_dnat(&self, config: &DnatConfig) -> Result<()> {
+        IptablesManager::remove_dnat(self, config)
+    }
+
+    fn install_snat(&self, config: &SnatConfig) -> Result<()> {
+        IptablesManager::install_snat(self, config)
+    }
+
+    fn remove_snat(&self, config: &SnatConfig) -> Result<()> {
+        IptablesManager::remove_snat(self, config)
+    }
+
+    fn install_hairpin(&self, config: &HairpinConfig) -> Result<()> {
+        IptablesManager::install_hairpin(self, config)
+    }
+
+    fn remove_hairpin(&self, config: &HairpinConfig) -> Result<()> {
+        IptablesManager::remove_hairpin(self, config)
     }
 }
 

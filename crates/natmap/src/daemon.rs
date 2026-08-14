@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
+use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -25,6 +26,7 @@ use bollard::Docker;
 use bollard::query_parameters::EventsOptions;
 use bollard::query_parameters::ListContainersOptionsBuilder;
 use color_eyre::Result;
+use color_eyre::eyre::WrapErr;
 use color_eyre::eyre::eyre;
 use futures_util::stream::StreamExt;
 use hyper_util::rt::TokioExecutor;
@@ -51,13 +53,14 @@ use crate::api::remove_mapping;
 use crate::api::remove_mapping_by_id;
 use crate::api::remove_policy_route;
 use crate::api::remove_snat;
-use crate::api::unbind_ports;
 use crate::docker;
+use crate::iptables::Iptables;
 use crate::iptables::IptablesManager;
 use crate::models::DaemonState;
+use crate::models::DnatConfig;
 use crate::models::DockerPortMap;
 use crate::models::DockerPortMapRequest;
-use crate::models::TransportProtocol;
+use crate::models::HairpinConfig;
 use crate::policy_route::PolicyRouteManager;
 
 /// Shared application state held by all Axum route handlers.
@@ -66,7 +69,7 @@ pub struct AppState {
     /// The in-memory daemon state.
     pub daemon_state: Arc<RwLock<DaemonState>>,
     /// iptables rule manager.
-    pub iptables: Arc<IptablesManager>,
+    pub iptables: Arc<dyn Iptables>,
     /// Policy routing manager.
     pub policy_route: Arc<PolicyRouteManager>,
     /// Docker client (None if Docker is unavailable).
@@ -399,13 +402,36 @@ impl Daemon {
             return;
         };
 
+        let assigned = self
+            .apply_discovered_mappings(&container_id, discovered)
+            .await;
+        let mut lock = state.daemon_state.write().await;
+        let existing = lock.mapping.entry(container_id.clone()).or_default();
+        let auto_comments: HashSet<String> =
+            assigned.iter().map(|m| m.rule_comment.clone()).collect();
+        existing.retain(|m| !auto_comments.contains(&m.rule_comment));
+        existing.extend(assigned);
+        drop(lock);
+        state.persist().await;
+    }
+
+    /// Allocates and installs rules for a container's freshly discovered mappings.
+    ///
+    /// Ports held by a stale mapping of the same container are released first;
+    /// ports held by other active containers are skipped.
+    async fn apply_discovered_mappings(
+        &self,
+        container_id: &str,
+        discovered: Vec<DockerPortMap>,
+    ) -> Vec<DockerPortMap> {
+        let state = &self.state;
         let mut assigned = Vec::new();
         for mut m in discovered {
             m.id = state.allocate_id();
             let host_addr = m.request.host_addr;
             if state.ports.is_allocated(host_addr).await {
                 if let Some(stale_id) =
-                    resolve_stale_container(&state.daemon_state, host_addr, &container_id).await
+                    resolve_stale_container(&state.daemon_state, host_addr, container_id).await
                 {
                     tracing::info!(host.addr = %host_addr, stale.container.id = %stale_id,
                         "port held by stale container, removing old mapping");
@@ -415,25 +441,13 @@ impl Daemon {
                     continue;
                 }
             }
-            if let Err(e) = state.ports.allocate(host_addr, m.request.proto).await {
-                tracing::warn!(host.addr = %host_addr, error = %e, "failed allocating, skipping");
-                continue;
-            }
-            if let Err(e) = state.iptables.install_dockermap(&m) {
-                tracing::error!(mapping = ?m, error = %e, "failed to install mapping");
-                state.ports.deallocate(host_addr).await;
+            if let Err(e) = ensure_docker_mapping(&state.ports, state.iptables.as_ref(), &m).await {
+                tracing::warn!(mapping = ?m, error = %e, "failed to ensure mapping");
                 continue;
             }
             assigned.push(m);
         }
-        let mut lock = state.daemon_state.write().await;
-        let existing = lock.mapping.entry(container_id.clone()).or_default();
-        let auto_comments: HashSet<String> =
-            assigned.iter().map(|m| m.rule_comment.clone()).collect();
-        existing.retain(|m| !auto_comments.contains(&m.rule_comment));
-        existing.extend(assigned);
-        drop(lock);
-        state.persist().await;
+        assigned
     }
 
     /// Create daemon state from [`AppState::state_path`] if exists, otherwise create default.
@@ -447,12 +461,75 @@ impl Daemon {
         }
     }
 
-    async fn reconcile_docker_portmaps(&self, daemon_state: &mut DaemonState) -> Result<()> {
-        let state = &self.state;
-        let ports = &self.state.ports;
-        let iptables = &self.state.iptables;
+    /// Re-verifies and reinstalls a tracked mapping, dropping it on failure.
+    ///
+    /// Returns `Some(mapping)` when the mapping was kept, `None` when it was
+    /// dropped (port held elsewhere, allocation failure, or install failure).
+    async fn reconcile_tracked_mapping(
+        &self,
+        container_id: &str,
+        mut m: DockerPortMap,
+        current_addrs: &HashMap<SocketAddr, SocketAddr>,
+    ) -> Option<DockerPortMap> {
+        let host_addr = m.request.host_addr;
 
-        if let Some(docker) = &state.docker {
+        // Update container_addr from live Docker inspect if changed
+        // (silently falls back to stored IP if inspect failed above)
+        if let Some(&current_ctn_addr) = current_addrs.get(&host_addr) {
+            let proto = m.request.proto;
+            if reconcile_container_addr(
+                &mut m.request,
+                &DockerPortMapRequest {
+                    host_addr,
+                    container_addr: current_ctn_addr,
+                    proto,
+                },
+            ) {
+                tracing::info!(
+                    container.id = %container_id, host.port = %host_addr.port(),
+                    "container IP changed on reload"
+                );
+            }
+        }
+
+        if self.state.ports.is_allocated(host_addr).await {
+            tracing::warn!(host.addr = %host_addr, "address already held, removing stale mapping");
+            return None;
+        }
+        if let Err(e) =
+            ensure_docker_mapping(&self.state.ports, self.state.iptables.as_ref(), &m).await
+        {
+            tracing::warn!(container.id = %container_id, mapping = ?m, error = %e,
+                "failed to ensure mapping, dropping");
+            return None;
+        }
+        Some(m)
+    }
+
+    /// Allocates and installs mappings for a container not tracked in persisted state.
+    async fn ensure_container_mappings(
+        &self,
+        container_id: &str,
+        discovered: Vec<DockerPortMap>,
+        max_id: &mut u64,
+    ) -> Vec<DockerPortMap> {
+        let state = &self.state;
+        let mut installed = Vec::new();
+        for mut m in discovered {
+            m.id = state.allocate_id();
+            if let Err(e) = ensure_docker_mapping(&state.ports, state.iptables.as_ref(), &m).await {
+                tracing::warn!(container.id = %container_id, mapping = ?m, error = %e,
+                    "failed to ensure mapping for untracked container");
+                continue;
+            }
+            *max_id = (*max_id).max(m.id);
+            installed.push(m);
+        }
+        installed
+    }
+
+    async fn reconcile_docker_portmaps(&self, daemon_state: &mut DaemonState) -> Result<()> {
+        if let Some(docker) = &self.state.docker {
             let opt = ListContainersOptionsBuilder::new().build();
             let running_ids: HashSet<String> = docker
                 .list_containers(Some(opt))
@@ -472,7 +549,6 @@ impl Daemon {
                     tracing::info!(container.id = %id, "container gone, removing mappings");
                     continue;
                 }
-                let mut kept = Vec::new();
 
                 // Re-inspect container to get current IPs (may have changed if
                 // Docker network was recreated while daemon was down)
@@ -489,42 +565,12 @@ impl Daemon {
                         .collect();
 
                 // iter port mappings for this container
-                for mut m in maps {
-                    let host_addr = m.request.host_addr;
-
-                    // Update container_addr from live Docker inspect if changed
-                    // (silently falls back to stored IP if inspect failed above)
-                    if let Some(&current_ctn_addr) = current_addrs.get(&host_addr) {
-                        let proto = m.request.proto;
-                        if reconcile_container_addr(
-                            &mut m.request,
-                            &DockerPortMapRequest {
-                                host_addr,
-                                container_addr: current_ctn_addr,
-                                proto,
-                            },
-                        ) {
-                            tracing::info!(
-                                container.id = %id, host.port = %host_addr.port(),
-                                "container IP changed on reload"
-                            );
-                        }
+                let mut kept = Vec::new();
+                for m in maps {
+                    if let Some(m) = self.reconcile_tracked_mapping(&id, m, &current_addrs).await {
+                        max_id = max_id.max(m.id);
+                        kept.push(m);
                     }
-
-                    // check this map
-                    if ports.is_allocated(host_addr).await {
-                        tracing::warn!(host.addr = %host_addr, "address already held, removing stale mapping");
-                        continue;
-                    }
-                    if let Err(e) = ports.allocate(host_addr, m.request.proto).await {
-                        tracing::warn!(host.addr = %host_addr, error = %e, "address in use, dropping mapping");
-                        continue;
-                    }
-
-                    // keep this port mapping
-                    let _ = iptables.install_dockermap(&m);
-                    max_id = max_id.max(m.id);
-                    kept.push(m);
                 }
                 if !kept.is_empty() {
                     new_docker.insert(id, kept);
@@ -538,31 +584,16 @@ impl Daemon {
                 let Ok(discovered) = docker::get_port_mappings(docker, id).await else {
                     continue;
                 };
-                let mut installed = Vec::new();
-                for mut m in discovered {
-                    m.id = state.allocate_id();
-                    let host_addr = m.request.host_addr;
-                    if let Err(e) = ports.allocate(host_addr, m.request.proto).await {
-                        tracing::warn!(host.addr = %host_addr, error = %e,
-                            "failed allocating port for untracked container");
-                        continue;
-                    }
-                    if let Err(e) = iptables.install_dockermap(&m) {
-                        tracing::error!(mapping = ?m, error = %e,
-                            "failed to install mapping for untracked container");
-                        ports.deallocate(host_addr).await;
-                        continue;
-                    }
-                    max_id = max_id.max(m.id);
-                    installed.push(m);
-                }
+                let installed = self
+                    .ensure_container_mappings(id, discovered, &mut max_id)
+                    .await;
                 if !installed.is_empty() {
                     new_docker.insert(id.to_string(), installed);
                 }
             }
 
             daemon_state.mapping = new_docker;
-            state
+            self.state
                 .next_id
                 .store(max_id.saturating_add(1), Ordering::SeqCst);
         }
@@ -572,18 +603,17 @@ impl Daemon {
     async fn reconcile_hairpins(&self, daemon_state: &mut DaemonState) {
         let mut keep = Vec::new();
         for config in daemon_state.hairpins.drain(..) {
-            if Self::should_reconcile(
-                &config.ports,
-                &config.ext_ip,
+            if let Err(e) = ensure_static_rule(
                 &self.state.ports,
-                config.proto,
+                self.state.iptables.as_ref(),
+                StaticRule::Hairpin(&config),
             )
             .await
             {
-                let _ = self.state.iptables.install_hairpin(&config);
-                keep.push(config);
+                tracing::warn!(hairpin = ?config, error = %e,
+                    "failed to reconcile hairpin rule, dropping");
             } else {
-                unbind_ports(self.state.ports.clone(), &config.ext_ip, &config.ports).await;
+                keep.push(config);
             }
         }
         daemon_state.hairpins = keep;
@@ -592,18 +622,17 @@ impl Daemon {
     async fn reconcile_dnats(&self, daemon_state: &mut DaemonState) {
         let mut keep = Vec::new();
         for config in daemon_state.dnats.drain(..) {
-            if Self::should_reconcile(
-                &config.ports,
-                &config.ext_ip,
+            if let Err(e) = ensure_static_rule(
                 &self.state.ports,
-                config.proto,
+                self.state.iptables.as_ref(),
+                StaticRule::Dnat(&config),
             )
             .await
             {
-                let _ = self.state.iptables.install_dnat(&config);
-                keep.push(config);
+                tracing::warn!(dnat = ?config, error = %e,
+                    "failed to reconcile dnat rule, dropping");
             } else {
-                unbind_ports(self.state.ports.clone(), &config.ext_ip, &config.ports).await;
+                keep.push(config);
             }
         }
         daemon_state.dnats = keep;
@@ -626,37 +655,82 @@ impl Daemon {
         }
         daemon_state.policy_routes = keep;
     }
+}
 
-    /// Check if this port can be reconciled.
-    async fn should_reconcile(
-        configs_ports: &str,
-        ext_ip: &str,
-        ports: &PortAllocator,
-        proto: TransportProtocol,
-    ) -> bool {
-        let ip = match ext_ip.parse() {
-            Ok(ip) => ip,
-            Err(e) => {
-                tracing::error!(ext.ip = %ext_ip, error = %e, "invalid IP");
-                return false;
-            }
-        };
+// --- Ensure primitives ---
 
-        for port in configs_ports
-            .split(',')
-            .filter_map(|p| p.trim().parse::<u16>().ok())
-        {
-            let addr = SocketAddr::new(ip, port);
-            if ports.is_allocated(addr).await {
-                continue;
-            }
-            if let Err(e) = ports.allocate(addr, proto).await {
-                tracing::warn!(port = %port, error = %e, "port in use, dropping");
-                return false;
-            }
-        }
-        true
+/// A static NAT rule whose ports must be reserved before installation.
+enum StaticRule<'a> {
+    /// Static DNAT rule.
+    Dnat(&'a DnatConfig),
+    /// Static hairpin rule.
+    Hairpin(&'a HairpinConfig),
+}
+
+/// Reserves the host port for a Docker mapping and installs its rules.
+///
+/// On install failure the reservation is released before the error is returned.
+async fn ensure_docker_mapping(
+    ports: &PortAllocator,
+    iptables: &dyn Iptables,
+    mapping: &DockerPortMap,
+) -> Result<()> {
+    let host_addr = mapping.request.host_addr;
+    ports
+        .allocate(host_addr, mapping.request.proto)
+        .await
+        .wrap_err("failed to reserve host port")?;
+    if let Err(e) = iptables.install_dockermap(mapping) {
+        ports.deallocate(host_addr).await;
+        return Err(e.wrap_err("failed to install docker mapping"));
     }
+    Ok(())
+}
+
+/// Reserves the ports for a static rule and installs its rules.
+///
+/// Ports already reserved elsewhere are skipped. On any failure all ports
+/// reserved by this call are released before the error is returned.
+async fn ensure_static_rule(
+    ports: &PortAllocator,
+    iptables: &dyn Iptables,
+    rule: StaticRule<'_>,
+) -> Result<()> {
+    let (ext_ip, ports_csv, proto) = match &rule {
+        StaticRule::Dnat(config) => (&config.ext_ip, &config.ports, config.proto),
+        StaticRule::Hairpin(config) => (&config.ext_ip, &config.ports, config.proto),
+    };
+    let ip: IpAddr = ext_ip.parse().wrap_err("invalid IP")?;
+
+    let mut reserved = Vec::new();
+    for port in ports_csv
+        .split(',')
+        .filter_map(|p| p.trim().parse::<u16>().ok())
+    {
+        let addr = SocketAddr::new(ip, port);
+        if ports.is_allocated(addr).await {
+            continue;
+        }
+        if let Err(e) = ports.allocate(addr, proto).await {
+            for reserved_addr in &reserved {
+                ports.deallocate(*reserved_addr).await;
+            }
+            return Err(e.wrap_err("failed to reserve port"));
+        }
+        reserved.push(addr);
+    }
+
+    let install = match rule {
+        StaticRule::Dnat(config) => iptables.install_dnat(config),
+        StaticRule::Hairpin(config) => iptables.install_hairpin(config),
+    };
+    if let Err(e) = install {
+        for addr in reserved {
+            ports.deallocate(addr).await;
+        }
+        return Err(e.wrap_err("failed to install static rule"));
+    }
+    Ok(())
 }
 
 /// Looks up whether `host_addr` is claimed by a container other than
@@ -708,39 +782,189 @@ fn reconcile_container_addr(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::collections::HashSet;
+    use std::net::IpAddr;
     use std::net::SocketAddr;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
     use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
 
     use axum::Router;
     use bollard::Docker;
     use bollard::models::EventActor;
     use bollard::models::EventMessage;
+    use color_eyre::eyre::eyre;
     use lab_ops_lab_lib::port::PortAllocator;
     use tokio::sync::RwLock;
     use tracing_test::traced_test;
 
     use super::AppState;
     use super::Daemon;
+    use super::StaticRule;
+    use super::ensure_docker_mapping;
+    use super::ensure_static_rule;
     use super::reconcile_container_addr;
     use super::resolve_stale_container;
     use super::untracked_container_ids;
+    use crate::iptables::Iptables;
     use crate::iptables::IptablesManager;
     use crate::models::DaemonState;
+    use crate::models::DnatConfig;
     use crate::models::DockerPortMap;
     use crate::models::DockerPortMapRequest;
+    use crate::models::HairpinConfig;
+    use crate::models::SnatConfig;
     use crate::models::TransportProtocol;
     use crate::policy_route::PolicyRouteManager;
+
+    /// Records iptables operations without touching the host firewall.
+    #[derive(Default)]
+    struct FakeIptables {
+        installed_mappings: Mutex<Vec<DockerPortMap>>,
+        removed_mappings: Mutex<Vec<DockerPortMap>>,
+        installed_dnats: Mutex<Vec<DnatConfig>>,
+        installed_hairpins: Mutex<Vec<HairpinConfig>>,
+        fail_dockermap: AtomicBool,
+        fail_dnat: AtomicBool,
+        fail_hairpin: AtomicBool,
+    }
+
+    impl FakeIptables {
+        fn installed_mappings(&self) -> Vec<DockerPortMap> {
+            self.installed_mappings.lock().unwrap().clone()
+        }
+
+        fn removed_mappings(&self) -> Vec<DockerPortMap> {
+            self.removed_mappings.lock().unwrap().clone()
+        }
+
+        fn installed_dnats(&self) -> Vec<DnatConfig> {
+            self.installed_dnats.lock().unwrap().clone()
+        }
+
+        fn installed_hairpins(&self) -> Vec<HairpinConfig> {
+            self.installed_hairpins.lock().unwrap().clone()
+        }
+
+        fn set_fail_dockermap(&self, fail: bool) {
+            self.fail_dockermap.store(fail, Ordering::SeqCst);
+        }
+
+        fn set_fail_dnat(&self, fail: bool) {
+            self.fail_dnat.store(fail, Ordering::SeqCst);
+        }
+
+        fn set_fail_hairpin(&self, fail: bool) {
+            self.fail_hairpin.store(fail, Ordering::SeqCst);
+        }
+    }
+
+    impl Iptables for FakeIptables {
+        fn setup(&self) -> color_eyre::Result<()> {
+            Ok(())
+        }
+
+        fn flush_all_natmap(&self) -> color_eyre::Result<()> {
+            Ok(())
+        }
+
+        fn install_dockermap(&self, map: &DockerPortMap) -> color_eyre::Result<()> {
+            if self.fail_dockermap.load(Ordering::SeqCst) {
+                return Err(eyre!("fake docker mapping install failure"));
+            }
+            self.installed_mappings.lock().unwrap().push(map.clone());
+            Ok(())
+        }
+
+        fn remove_mapping(&self, map: &DockerPortMap) -> color_eyre::Result<()> {
+            self.removed_mappings.lock().unwrap().push(map.clone());
+            Ok(())
+        }
+
+        fn install_dnat(&self, config: &DnatConfig) -> color_eyre::Result<()> {
+            if self.fail_dnat.load(Ordering::SeqCst) {
+                return Err(eyre!("fake dnat install failure"));
+            }
+            self.installed_dnats.lock().unwrap().push(config.clone());
+            Ok(())
+        }
+
+        fn remove_dnat(&self, _config: &DnatConfig) -> color_eyre::Result<()> {
+            Ok(())
+        }
+
+        fn install_snat(&self, _config: &SnatConfig) -> color_eyre::Result<()> {
+            Ok(())
+        }
+
+        fn remove_snat(&self, _config: &SnatConfig) -> color_eyre::Result<()> {
+            Ok(())
+        }
+
+        fn install_hairpin(&self, config: &HairpinConfig) -> color_eyre::Result<()> {
+            if self.fail_hairpin.load(Ordering::SeqCst) {
+                return Err(eyre!("fake hairpin install failure"));
+            }
+            self.installed_hairpins.lock().unwrap().push(config.clone());
+            Ok(())
+        }
+
+        fn remove_hairpin(&self, _config: &HairpinConfig) -> color_eyre::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn make_addr(port: u16) -> SocketAddr {
+        SocketAddr::new(IpAddr::from([127, 0, 0, 1]), port)
+    }
+
+    fn make_mapping(id: u64, host_port: u16, ctn_port: u16, container_id: &str) -> DockerPortMap {
+        DockerPortMap::new(
+            id,
+            DockerPortMapRequest {
+                host_addr: make_addr(host_port),
+                container_addr: make_addr(ctn_port),
+                proto: TransportProtocol::Tcp,
+            },
+            container_id.to_string(),
+            "test-container".to_string(),
+        )
+    }
+
+    fn make_dnat(ports: &str) -> DnatConfig {
+        DnatConfig {
+            ext_ip: "127.0.0.1".to_string(),
+            int_ip: "10.0.0.99".to_string(),
+            ports: ports.to_string(),
+            proto: TransportProtocol::Tcp,
+            ext_if: None,
+            preserve_src_ip: false,
+        }
+    }
+
+    fn make_hairpin(ports: &str) -> HairpinConfig {
+        HairpinConfig {
+            ext_ip: "127.0.0.1".to_string(),
+            int_ip: "10.0.0.99".to_string(),
+            ports: ports.to_string(),
+            proto: TransportProtocol::Tcp,
+            lan_cidr: None,
+        }
+    }
 
     fn id_set(ids: &[&str]) -> HashSet<String> {
         ids.iter().map(|&s| s.to_string()).collect()
     }
 
-    fn create_test_daemon(state_path: PathBuf) -> Daemon {
-        let iptables = Arc::new(IptablesManager::new());
-        let ports = Arc::new(PortAllocator::new());
+    fn test_daemon_with(
+        state_path: PathBuf,
+        iptables: Arc<dyn Iptables>,
+        ports: Arc<PortAllocator>,
+    ) -> Daemon {
         let daemon_state = Arc::new(RwLock::new(DaemonState::default()));
         let policy_route = Arc::new(PolicyRouteManager::new());
 
@@ -760,6 +984,14 @@ mod tests {
             state,
             app: Router::new(),
         }
+    }
+
+    fn create_test_daemon(state_path: PathBuf) -> Daemon {
+        test_daemon_with(
+            state_path,
+            Arc::new(IptablesManager::new()),
+            Arc::new(PortAllocator::new()),
+        )
     }
 
     #[tokio::test]
@@ -992,5 +1224,462 @@ mod tests {
             stored.container_addr,
             "10.0.0.2:80".parse::<SocketAddr>().unwrap()
         );
+    }
+
+    // --- Ensure docker mapping ---
+
+    #[tokio::test]
+    async fn ensure_docker_mapping_allocates_and_installs() {
+        let fake = Arc::new(FakeIptables::default());
+        let ports = Arc::new(PortAllocator::new());
+        let mapping = make_mapping(1, 39010, 8080, "c1");
+
+        ensure_docker_mapping(&ports, fake.as_ref(), &mapping)
+            .await
+            .unwrap();
+
+        assert_eq!(fake.installed_mappings(), vec![mapping]);
+        assert!(ports.is_allocated(make_addr(39010)).await);
+    }
+
+    #[tokio::test]
+    async fn ensure_docker_mapping_rolls_back_when_install_fails() {
+        let fake = Arc::new(FakeIptables::default());
+        let ports = Arc::new(PortAllocator::new());
+        fake.set_fail_dockermap(true);
+
+        let result =
+            ensure_docker_mapping(&ports, fake.as_ref(), &make_mapping(1, 39011, 8080, "c1")).await;
+
+        assert!(result.is_err());
+        assert!(fake.installed_mappings().is_empty());
+        assert!(!ports.is_allocated(make_addr(39011)).await);
+    }
+
+    #[tokio::test]
+    async fn ensure_docker_mapping_fails_when_port_held() {
+        let fake = Arc::new(FakeIptables::default());
+        let ports = Arc::new(PortAllocator::new());
+        ports
+            .allocate(make_addr(39012), TransportProtocol::Tcp)
+            .await
+            .unwrap();
+
+        let result =
+            ensure_docker_mapping(&ports, fake.as_ref(), &make_mapping(1, 39012, 8080, "c1")).await;
+
+        assert!(result.is_err());
+        assert!(fake.installed_mappings().is_empty());
+        assert!(ports.is_allocated(make_addr(39012)).await);
+    }
+
+    // --- Apply discovered mappings ---
+
+    #[tokio::test]
+    async fn apply_discovered_mappings_stale_deallocates_then_ensures() {
+        let fake = Arc::new(FakeIptables::default());
+        let ports = Arc::new(PortAllocator::new());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let daemon = test_daemon_with(
+            temp_dir.path().join("state.json"),
+            fake.clone(),
+            ports.clone(),
+        );
+        let stale = make_mapping(5, 39001, 8080, "old");
+        daemon
+            .state
+            .daemon_state
+            .write()
+            .await
+            .mapping
+            .insert("old".into(), vec![stale.clone()]);
+        ports
+            .allocate(make_addr(39001), TransportProtocol::Tcp)
+            .await
+            .unwrap();
+
+        let assigned = daemon
+            .apply_discovered_mappings("new", vec![make_mapping(0, 39001, 8080, "new")])
+            .await;
+
+        assert_eq!(fake.removed_mappings(), vec![stale]);
+        assert_eq!(
+            fake.installed_mappings(),
+            vec![make_mapping(1, 39001, 8080, "new")]
+        );
+        assert_eq!(assigned, vec![make_mapping(1, 39001, 8080, "new")]);
+        assert!(ports.is_allocated(make_addr(39001)).await);
+    }
+
+    #[tokio::test]
+    async fn apply_discovered_mappings_skips_when_port_held_by_active_container() {
+        let fake = Arc::new(FakeIptables::default());
+        let ports = Arc::new(PortAllocator::new());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let daemon = test_daemon_with(
+            temp_dir.path().join("state.json"),
+            fake.clone(),
+            ports.clone(),
+        );
+        ports
+            .allocate(make_addr(39002), TransportProtocol::Tcp)
+            .await
+            .unwrap();
+
+        let assigned = daemon
+            .apply_discovered_mappings("new", vec![make_mapping(0, 39002, 8080, "new")])
+            .await;
+
+        assert!(assigned.is_empty());
+        assert!(fake.installed_mappings().is_empty());
+        assert!(fake.removed_mappings().is_empty());
+    }
+
+    // --- Ensure container mappings ---
+
+    #[tokio::test]
+    async fn ensure_container_mappings_installs_untracked_container() {
+        let fake = Arc::new(FakeIptables::default());
+        let ports = Arc::new(PortAllocator::new());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let daemon = test_daemon_with(
+            temp_dir.path().join("state.json"),
+            fake.clone(),
+            ports.clone(),
+        );
+
+        let mut max_id = 0;
+        let installed = daemon
+            .ensure_container_mappings(
+                "c1",
+                vec![
+                    make_mapping(0, 39003, 8080, "c1"),
+                    make_mapping(0, 39004, 8081, "c1"),
+                ],
+                &mut max_id,
+            )
+            .await;
+
+        assert_eq!(
+            installed,
+            vec![
+                make_mapping(1, 39003, 8080, "c1"),
+                make_mapping(2, 39004, 8081, "c1"),
+            ]
+        );
+        assert_eq!(max_id, 2);
+        assert!(ports.is_allocated(make_addr(39003)).await);
+        assert!(ports.is_allocated(make_addr(39004)).await);
+    }
+
+    #[tokio::test]
+    async fn ensure_container_mappings_drops_when_install_fails() {
+        let fake = Arc::new(FakeIptables::default());
+        let ports = Arc::new(PortAllocator::new());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let daemon = test_daemon_with(
+            temp_dir.path().join("state.json"),
+            fake.clone(),
+            ports.clone(),
+        );
+        fake.set_fail_dockermap(true);
+
+        let mut max_id = 0;
+        let installed = daemon
+            .ensure_container_mappings("c1", vec![make_mapping(0, 39005, 8080, "c1")], &mut max_id)
+            .await;
+
+        assert!(installed.is_empty());
+        assert_eq!(max_id, 0);
+        assert!(!ports.is_allocated(make_addr(39005)).await);
+    }
+
+    // --- Reconcile tracked mapping ---
+
+    fn make_tracked_mapping(id: u64, host_port: u16, ctn_addr: &str) -> DockerPortMap {
+        DockerPortMap::new(
+            id,
+            DockerPortMapRequest {
+                host_addr: make_addr(host_port),
+                container_addr: ctn_addr.parse().unwrap(),
+                proto: TransportProtocol::Tcp,
+            },
+            "c1".into(),
+            "test-container".into(),
+        )
+    }
+
+    #[tokio::test]
+    async fn reconcile_tracked_mapping_reinstalls_reverified_ip() {
+        let fake = Arc::new(FakeIptables::default());
+        let ports = Arc::new(PortAllocator::new());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let daemon = test_daemon_with(
+            temp_dir.path().join("state.json"),
+            fake.clone(),
+            ports.clone(),
+        );
+        let stored = make_tracked_mapping(7, 39006, "10.0.0.2:8080");
+        let current_addrs = HashMap::from([(make_addr(39006), make_addr(8080))]);
+
+        let kept = daemon
+            .reconcile_tracked_mapping("c1", stored.clone(), &current_addrs)
+            .await
+            .unwrap();
+
+        assert_eq!(kept.request.container_addr, make_addr(8080));
+        assert_eq!(fake.installed_mappings(), vec![kept.clone()]);
+        assert!(ports.is_allocated(make_addr(39006)).await);
+    }
+
+    #[tokio::test]
+    async fn reconcile_tracked_mapping_drops_when_port_held() {
+        let fake = Arc::new(FakeIptables::default());
+        let ports = Arc::new(PortAllocator::new());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let daemon = test_daemon_with(
+            temp_dir.path().join("state.json"),
+            fake.clone(),
+            ports.clone(),
+        );
+        ports
+            .allocate(make_addr(39007), TransportProtocol::Tcp)
+            .await
+            .unwrap();
+        let stored = make_tracked_mapping(8, 39007, "10.0.0.2:8080");
+
+        let kept = daemon
+            .reconcile_tracked_mapping("c1", stored, &HashMap::new())
+            .await;
+
+        assert!(kept.is_none());
+        assert!(fake.installed_mappings().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reconcile_tracked_mapping_keeps_stored_ip_when_inspect_missing() {
+        let fake = Arc::new(FakeIptables::default());
+        let ports = Arc::new(PortAllocator::new());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let daemon = test_daemon_with(
+            temp_dir.path().join("state.json"),
+            fake.clone(),
+            ports.clone(),
+        );
+        let stored = make_tracked_mapping(9, 39008, "10.0.0.2:8080");
+
+        let kept = daemon
+            .reconcile_tracked_mapping("c1", stored.clone(), &HashMap::new())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            kept.request.container_addr,
+            "10.0.0.2:8080".parse().unwrap()
+        );
+        assert_eq!(fake.installed_mappings(), vec![kept]);
+    }
+
+    // --- Ensure static rule ---
+
+    #[tokio::test]
+    async fn ensure_static_rule_allocates_and_installs_dnat() {
+        let fake = Arc::new(FakeIptables::default());
+        let ports = Arc::new(PortAllocator::new());
+        let config = make_dnat("39020");
+
+        ensure_static_rule(&ports, fake.as_ref(), StaticRule::Dnat(&config))
+            .await
+            .unwrap();
+
+        assert_eq!(fake.installed_dnats(), vec![config]);
+        assert!(ports.is_allocated(make_addr(39020)).await);
+    }
+
+    #[tokio::test]
+    async fn ensure_static_rule_allocates_and_installs_hairpin() {
+        let fake = Arc::new(FakeIptables::default());
+        let ports = Arc::new(PortAllocator::new());
+        let config = make_hairpin("39021");
+
+        ensure_static_rule(&ports, fake.as_ref(), StaticRule::Hairpin(&config))
+            .await
+            .unwrap();
+
+        assert_eq!(fake.installed_hairpins(), vec![config]);
+        assert!(ports.is_allocated(make_addr(39021)).await);
+    }
+
+    #[tokio::test]
+    async fn ensure_static_rule_rolls_back_when_install_fails() {
+        let fake = Arc::new(FakeIptables::default());
+        let ports = Arc::new(PortAllocator::new());
+        fake.set_fail_dnat(true);
+
+        let result =
+            ensure_static_rule(&ports, fake.as_ref(), StaticRule::Dnat(&make_dnat("39022"))).await;
+
+        assert!(result.is_err());
+        assert!(fake.installed_dnats().is_empty());
+        assert!(!ports.is_allocated(make_addr(39022)).await);
+    }
+
+    #[tokio::test]
+    async fn ensure_static_rule_rolls_back_reserved_ports_when_later_port_held() {
+        let fake = Arc::new(FakeIptables::default());
+        let ports = Arc::new(PortAllocator::new());
+        // Hold the second port at the OS level (outside the allocator) so
+        // allocation fails mid-loop instead of being skipped.
+        let held = std::net::TcpListener::bind(make_addr(39034)).unwrap();
+        let _ = &held;
+
+        let result = ensure_static_rule(
+            &ports,
+            fake.as_ref(),
+            StaticRule::Dnat(&make_dnat("39033,39034")),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(fake.installed_dnats().is_empty());
+        assert!(
+            !ports.is_allocated(make_addr(39033)).await,
+            "reserved port must be released on mid-loop failure"
+        );
+        ports
+            .allocate(make_addr(39033), TransportProtocol::Tcp)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn ensure_static_rule_rolls_back_partial_when_later_port_held() {
+        let fake = Arc::new(FakeIptables::default());
+        let ports = Arc::new(PortAllocator::new());
+        ports
+            .allocate(make_addr(39024), TransportProtocol::Tcp)
+            .await
+            .unwrap();
+        fake.set_fail_dnat(true);
+
+        let result = ensure_static_rule(
+            &ports,
+            fake.as_ref(),
+            StaticRule::Dnat(&make_dnat("39023,39024")),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(fake.installed_dnats().is_empty());
+        assert!(
+            !ports.is_allocated(make_addr(39023)).await,
+            "newly reserved port must be released"
+        );
+        assert!(
+            ports.is_allocated(make_addr(39024)).await,
+            "pre-held port must be untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_static_rule_skips_allocated_port() {
+        let fake = Arc::new(FakeIptables::default());
+        let ports = Arc::new(PortAllocator::new());
+        ports
+            .allocate(make_addr(39025), TransportProtocol::Tcp)
+            .await
+            .unwrap();
+        let config = make_dnat("39025,39026");
+
+        ensure_static_rule(&ports, fake.as_ref(), StaticRule::Dnat(&config))
+            .await
+            .unwrap();
+
+        assert_eq!(fake.installed_dnats(), vec![config]);
+        assert!(ports.is_allocated(make_addr(39025)).await);
+        assert!(ports.is_allocated(make_addr(39026)).await);
+    }
+
+    #[tokio::test]
+    async fn ensure_static_rule_rejects_invalid_ip() {
+        let fake = Arc::new(FakeIptables::default());
+        let ports = Arc::new(PortAllocator::new());
+        let config = DnatConfig {
+            ext_ip: "not-an-ip".to_string(),
+            int_ip: "10.0.0.99".to_string(),
+            ports: "39027".to_string(),
+            proto: TransportProtocol::Tcp,
+            ext_if: None,
+            preserve_src_ip: false,
+        };
+
+        let result = ensure_static_rule(&ports, fake.as_ref(), StaticRule::Dnat(&config)).await;
+
+        assert!(result.is_err());
+        assert!(fake.installed_dnats().is_empty());
+        assert!(!ports.is_allocated(make_addr(39027)).await);
+    }
+
+    // --- Reconcile dnat / hairpin configs ---
+
+    #[tokio::test]
+    async fn reconcile_dnats_keeps_config_when_ensure_succeeds() {
+        let fake = Arc::new(FakeIptables::default());
+        let ports = Arc::new(PortAllocator::new());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let daemon = test_daemon_with(
+            temp_dir.path().join("state.json"),
+            fake.clone(),
+            ports.clone(),
+        );
+        let mut daemon_state = DaemonState::default();
+        daemon_state.dnats = vec![make_dnat("39030")];
+
+        daemon.reconcile_dnats(&mut daemon_state).await;
+
+        assert_eq!(daemon_state.dnats, vec![make_dnat("39030")]);
+        assert_eq!(fake.installed_dnats(), vec![make_dnat("39030")]);
+        assert!(ports.is_allocated(make_addr(39030)).await);
+    }
+
+    #[tokio::test]
+    async fn reconcile_dnats_drops_config_when_ensure_fails() {
+        let fake = Arc::new(FakeIptables::default());
+        let ports = Arc::new(PortAllocator::new());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let daemon = test_daemon_with(
+            temp_dir.path().join("state.json"),
+            fake.clone(),
+            ports.clone(),
+        );
+        fake.set_fail_dnat(true);
+        let mut daemon_state = DaemonState::default();
+        daemon_state.dnats = vec![make_dnat("39031")];
+
+        daemon.reconcile_dnats(&mut daemon_state).await;
+
+        assert!(daemon_state.dnats.is_empty());
+        assert!(fake.installed_dnats().is_empty());
+        assert!(!ports.is_allocated(make_addr(39031)).await);
+    }
+
+    #[tokio::test]
+    async fn reconcile_hairpins_routes_through_ensure_static_rule() {
+        let fake = Arc::new(FakeIptables::default());
+        let ports = Arc::new(PortAllocator::new());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let daemon = test_daemon_with(
+            temp_dir.path().join("state.json"),
+            fake.clone(),
+            ports.clone(),
+        );
+        let mut daemon_state = DaemonState::default();
+        daemon_state.hairpins = vec![make_hairpin("39032")];
+
+        daemon.reconcile_hairpins(&mut daemon_state).await;
+
+        assert_eq!(daemon_state.hairpins, vec![make_hairpin("39032")]);
+        assert_eq!(fake.installed_hairpins(), vec![make_hairpin("39032")]);
+        assert!(ports.is_allocated(make_addr(39032)).await);
     }
 }
