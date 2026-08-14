@@ -19,7 +19,9 @@ use serde::Deserialize;
 use serde::Serialize;
 
 /// Transport protocol (TCP or UDP).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash, Default,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum TransportProtocol {
     #[default]

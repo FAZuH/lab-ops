@@ -86,6 +86,9 @@ pub trait Iptables: Send + Sync {
 
     /// Removes a hairpin NAT rule (PREROUTING DNAT + POSTROUTING MASQUERADE).
     fn remove_hairpin(&self, config: &HairpinConfig) -> Result<()>;
+
+    /// Returns all natmap-commented rules across all tables.
+    fn list_rules(&self) -> Result<Vec<String>>;
 }
 
 // ── Pure argument builders (testable without iptables) ──
@@ -687,6 +690,20 @@ impl IptablesManager {
 
         Ok(rules)
     }
+
+    /// Returns all natmap-commented rules across all tables.
+    ///
+    /// Runs `iptables-save` (all tables) and filters for lines containing the
+    /// `natmap:` comment prefix. Fails when `iptables-save` exits non-zero.
+    pub fn list_rules(&self) -> Result<Vec<String>> {
+        let out = self.run_success("iptables-save", [] as [&str; 0])?;
+        let rules = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| l.contains("natmap:"))
+            .map(|l| l.to_string())
+            .collect();
+        Ok(rules)
+    }
 }
 
 impl Iptables for IptablesManager {
@@ -728,6 +745,10 @@ impl Iptables for IptablesManager {
 
     fn remove_hairpin(&self, config: &HairpinConfig) -> Result<()> {
         IptablesManager::remove_hairpin(self, config)
+    }
+
+    fn list_rules(&self) -> Result<Vec<String>> {
+        IptablesManager::list_rules(self)
     }
 }
 

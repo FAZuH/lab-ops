@@ -46,6 +46,7 @@ use crate::api::add_policy_route;
 use crate::api::add_snat;
 use crate::api::clear_all;
 use crate::api::list_mappings;
+use crate::api::list_rules;
 use crate::api::remap_port;
 use crate::api::remove_dnat;
 use crate::api::remove_hairpin;
@@ -118,6 +119,7 @@ pub struct ErrorResponse {
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/mappings", get(list_mappings))
+        .route("/rules", get(list_rules))
         .route("/remap/:container_id", put(remap_port))
         .route("/mapping/:container_id", post(add_mapping))
         .route("/mapping/{container_id}/{port}", delete(remove_mapping))
@@ -781,7 +783,7 @@ fn reconcile_container_addr(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::HashMap;
     use std::collections::HashSet;
     use std::net::IpAddr;
@@ -823,17 +825,23 @@ mod tests {
 
     /// Records iptables operations without touching the host firewall.
     #[derive(Default)]
-    struct FakeIptables {
+    pub(crate) struct FakeIptables {
         installed_mappings: Mutex<Vec<DockerPortMap>>,
         removed_mappings: Mutex<Vec<DockerPortMap>>,
         installed_dnats: Mutex<Vec<DnatConfig>>,
         installed_hairpins: Mutex<Vec<HairpinConfig>>,
+        rules_lines: Mutex<Vec<String>>,
         fail_dockermap: AtomicBool,
         fail_dnat: AtomicBool,
         fail_hairpin: AtomicBool,
     }
 
     impl FakeIptables {
+        /// Sets the iptables-save output lines the fake will report.
+        pub(crate) fn set_rules_lines(&self, lines: Vec<String>) {
+            *self.rules_lines.lock().unwrap() = lines;
+        }
+
         fn installed_mappings(&self) -> Vec<DockerPortMap> {
             self.installed_mappings.lock().unwrap().clone()
         }
@@ -916,6 +924,10 @@ mod tests {
         fn remove_hairpin(&self, _config: &HairpinConfig) -> color_eyre::Result<()> {
             Ok(())
         }
+
+        fn list_rules(&self) -> color_eyre::Result<Vec<String>> {
+            Ok(self.rules_lines.lock().unwrap().clone())
+        }
     }
 
     fn make_addr(port: u16) -> SocketAddr {
@@ -983,6 +995,24 @@ mod tests {
         Daemon {
             state,
             app: Router::new(),
+        }
+    }
+
+    /// Builds an [`AppState`] backed by the given iptables fake.
+    pub(crate) fn test_app_state_with(iptables: Arc<dyn Iptables>) -> AppState {
+        let daemon_state = Arc::new(RwLock::new(DaemonState::default()));
+        let policy_route = Arc::new(PolicyRouteManager::new());
+
+        AppState {
+            daemon_state,
+            iptables,
+            policy_route,
+            docker: None,
+            state_path: PathBuf::from("/tmp/natmap-test-state.json"),
+            next_id: Arc::new(AtomicU64::new(1)),
+            ports: Arc::new(PortAllocator::new()),
+            socket_group: "root".to_string(),
+            socket_path: PathBuf::from("/tmp/natmap.sock"),
         }
     }
 

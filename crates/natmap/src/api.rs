@@ -21,8 +21,10 @@ use crate::models::DockerRemapRequest;
 use crate::models::HairpinConfig;
 use crate::models::HairpinRequest;
 use crate::models::ListResponse;
+use crate::models::LiveRule;
 use crate::models::PolicyRouteConfig;
 use crate::models::PolicyRouteRequest;
+use crate::models::RuleKind;
 use crate::models::SnatConfig;
 use crate::models::SnatRequest;
 use crate::models::TransportProtocol;
@@ -40,6 +42,29 @@ pub async fn list_mappings(State(state): State<AppState>) -> Json<ListResponse> 
         hairpins: state.hairpins.clone(),
         policy_routes: state.policy_routes.clone(),
     })
+}
+
+/// `GET /rules` — Returns all live NAT rules installed in iptables.
+///
+/// Parsed from the daemon's rule listing (all tables, natmap-commented lines
+/// only). The daemon is the authority on what is actually installed.
+/// Deterministic: rules are sorted and deduplicated.
+#[tracing::instrument(skip_all)]
+pub async fn list_rules(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<LiveRule>>, (StatusCode, Json<ErrorResponse>)> {
+    let lines = state.iptables.list_rules().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+    let mut rules: Vec<LiveRule> = lines.iter().filter_map(|l| parse_live_rule(l)).collect();
+    rules.sort();
+    rules.dedup();
+    Ok(Json(rules))
 }
 
 // --- Static NAT handlers ---
@@ -721,6 +746,152 @@ fn parse_socket_addrs(
         .collect()
 }
 
+/// Parses a natmap-commented `iptables-save` line into a [`LiveRule`].
+///
+/// Returns `None` for lines that are not natmap-managed NAT rules (e.g.
+/// FORWARD ACCEPT rules for Docker mappings) or that lack the fields a rule
+/// kind requires. Rule kind is attributed from the `natmap:*` comment prefix.
+fn parse_live_rule(line: &str) -> Option<LiveRule> {
+    let comment = line.split_once("--comment ")?;
+    let comment = comment.1.trim().trim_matches('"');
+
+    let (kind, rest) = if let Some(rest) = comment.strip_prefix("natmap:dnat:") {
+        (RuleKind::Dnat, rest)
+    } else if let Some(rest) = comment.strip_prefix("natmap:hairpin:") {
+        (RuleKind::Hairpin, rest)
+    } else if let Some(rest) = comment.strip_prefix("natmap:snat:") {
+        (RuleKind::Snat, rest)
+    } else if let Some(rest) = comment.strip_prefix("natmap:") {
+        (RuleKind::Mapping, rest)
+    } else {
+        return None;
+    };
+
+    let proto = match line.split(" -p ").nth(1) {
+        Some(rest) => rest
+            .split_whitespace()
+            .next()?
+            .parse::<TransportProtocol>()
+            .ok()?,
+        // SNAT rules carry no protocol; the daemon defaults to TCP.
+        None => TransportProtocol::Tcp,
+    };
+
+    match kind {
+        RuleKind::Dnat => {
+            if !line.contains("-j DNAT") {
+                return None;
+            }
+            let mut fields = rest.split(':');
+            let ext_ip = fields.next()?.to_string();
+            let ports = parse_ports_csv(fields.next()?)?;
+            let int_ip = line
+                .split("--to-destination ")
+                .nth(1)?
+                .split_whitespace()
+                .next()?
+                .split(':')
+                .next()?
+                .to_string();
+            Some(LiveRule {
+                kind,
+                ext_ip,
+                int_ip,
+                ports,
+                proto,
+            })
+        }
+        RuleKind::Hairpin => {
+            if !(line.contains("-j DNAT") || line.contains("-j MASQUERADE")) {
+                return None;
+            }
+            let mut fields = rest.split(':');
+            let ext_ip = fields.next()?.to_string();
+            let int_ip = fields.next()?.to_string();
+            let ports = parse_ports_csv(fields.next()?)?;
+            Some(LiveRule {
+                kind,
+                ext_ip,
+                int_ip,
+                ports,
+                proto,
+            })
+        }
+        RuleKind::Snat => {
+            if !line.contains("-j SNAT") {
+                return None;
+            }
+            let int_ip = line
+                .split(" -s ")
+                .nth(1)?
+                .split_whitespace()
+                .next()?
+                .split('/')
+                .next()?
+                .to_string();
+            let ext_ip = line
+                .split("--to-source ")
+                .nth(1)?
+                .split_whitespace()
+                .next()?
+                .to_string();
+            Some(LiveRule {
+                kind,
+                ext_ip,
+                int_ip,
+                ports: Vec::new(),
+                proto,
+            })
+        }
+        RuleKind::Mapping => {
+            if !line.contains("-j DNAT") {
+                return None;
+            }
+            let ext_ip = line
+                .split(" -d ")
+                .nth(1)
+                .and_then(|rest| rest.split_whitespace().next())
+                .map(|ip| ip.split('/').next().unwrap_or("0.0.0.0").to_string())
+                .unwrap_or_else(|| "0.0.0.0".to_string());
+            let int_ip = line
+                .split("--to-destination ")
+                .nth(1)?
+                .split_whitespace()
+                .next()?
+                .split(':')
+                .next()?
+                .to_string();
+            let ports = parse_ports(line)?;
+            Some(LiveRule {
+                kind,
+                ext_ip,
+                int_ip,
+                ports,
+                proto,
+            })
+        }
+    }
+}
+
+/// Extracts ports from an iptables line, preferring multiport `--dports`.
+///
+/// `--dports ` (with the trailing space) is not a substring of `--dport `,
+/// so checking multiport first is unambiguous.
+fn parse_ports(line: &str) -> Option<Vec<u16>> {
+    if let Some(rest) = line.split(" --dports ").nth(1) {
+        return parse_ports_csv(rest.split_whitespace().next()?);
+    }
+    if let Some(rest) = line.split(" --dport ").nth(1) {
+        return parse_ports_csv(rest.split_whitespace().next()?);
+    }
+    None
+}
+
+/// Parses a comma-separated port list into `u16`s, skipping invalid entries.
+fn parse_ports_csv(csv: &str) -> Option<Vec<u16>> {
+    Some(csv.split(',').filter_map(|p| p.parse().ok()).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::IpAddr;
@@ -729,6 +900,8 @@ mod tests {
     use std::sync::atomic::AtomicU64;
 
     use super::*;
+    use crate::daemon::tests::FakeIptables;
+    use crate::daemon::tests::test_app_state_with;
     use crate::iptables::IptablesManager;
     use crate::models::*;
     use crate::policy_route::PolicyRouteManager;
@@ -997,5 +1170,107 @@ mod tests {
         };
         let result = remove_policy_route(State(state), Json(req)).await;
         assert!(result.is_ok());
+    }
+
+    // --- parse_live_rule ---
+
+    #[test]
+    fn parse_ports_csv_skips_invalid_entries() {
+        assert_eq!(parse_ports_csv("80,abc,443"), Some(vec![80, 443]));
+        assert_eq!(parse_ports_csv("abc"), Some(vec![]));
+    }
+
+    #[test]
+    fn parse_live_rule_single_port_dnat() {
+        let line = r#"-A PREROUTING -d 203.0.113.50/32 -p tcp -m tcp --dport 36000 -j DNAT --to-destination 10.0.0.99:36000 -m comment --comment "natmap:dnat:203.0.113.50:36000""#;
+        let rule = parse_live_rule(line).unwrap();
+        assert_eq!(rule.kind, RuleKind::Dnat);
+        assert_eq!(rule.ext_ip, "203.0.113.50");
+        assert_eq!(rule.int_ip, "10.0.0.99");
+        assert_eq!(rule.ports, vec![36000]);
+        assert_eq!(rule.proto, TransportProtocol::Tcp);
+    }
+
+    #[test]
+    fn parse_live_rule_multiport_dnat() {
+        let line = r#"-A PREROUTING -d 203.0.113.50/32 -p tcp -m multiport --dports 80,443 -j DNAT --to-destination 10.0.0.99 -m comment --comment "natmap:dnat:203.0.113.50:80,443""#;
+        let rule = parse_live_rule(line).unwrap();
+        assert_eq!(rule.kind, RuleKind::Dnat);
+        assert_eq!(rule.ext_ip, "203.0.113.50");
+        assert_eq!(rule.int_ip, "10.0.0.99");
+        assert_eq!(rule.ports, vec![80, 443]);
+        assert_eq!(rule.proto, TransportProtocol::Tcp);
+    }
+
+    #[test]
+    fn parse_live_rule_hairpin_dnat_form() {
+        let line = r#"-A PREROUTING -s 10.0.0.99/32 -d 203.0.113.50/32 -p tcp -m tcp --dport 80 -j DNAT --to-destination 10.0.0.99 -m comment --comment "natmap:hairpin:203.0.113.50:10.0.0.99:80""#;
+        let rule = parse_live_rule(line).unwrap();
+        assert_eq!(rule.kind, RuleKind::Hairpin);
+        assert_eq!(rule.ext_ip, "203.0.113.50");
+        assert_eq!(rule.int_ip, "10.0.0.99");
+        assert_eq!(rule.ports, vec![80]);
+        assert_eq!(rule.proto, TransportProtocol::Tcp);
+    }
+
+    #[test]
+    fn parse_live_rule_hairpin_masquerade_form() {
+        let line = r#"-A POSTROUTING -s 10.0.0.0/24 -d 10.0.0.99/32 -p tcp -m tcp --dport 80 -j MASQUERADE -m comment --comment "natmap:hairpin:203.0.113.50:10.0.0.99:80""#;
+        let rule = parse_live_rule(line).unwrap();
+        assert_eq!(rule.kind, RuleKind::Hairpin);
+        assert_eq!(rule.ext_ip, "203.0.113.50");
+        assert_eq!(rule.int_ip, "10.0.0.99");
+        assert_eq!(rule.ports, vec![80]);
+        assert_eq!(rule.proto, TransportProtocol::Tcp);
+    }
+
+    #[test]
+    fn parse_live_rule_docker_mapping() {
+        let line = r#"-A NATMAP -p tcp -d 100.64.0.10/32 -m tcp --dport 8080 -j DNAT --to-destination 10.0.0.2:80 -m comment --comment "natmap:c1:8080""#;
+        let rule = parse_live_rule(line).unwrap();
+        assert_eq!(rule.kind, RuleKind::Mapping);
+        assert_eq!(rule.ext_ip, "100.64.0.10");
+        assert_eq!(rule.int_ip, "10.0.0.2");
+        assert_eq!(rule.ports, vec![8080]);
+        assert_eq!(rule.proto, TransportProtocol::Tcp);
+    }
+
+    #[test]
+    fn parse_live_rule_snat() {
+        let line = r#"-A POSTROUTING -s 10.0.0.1/32 -o eth0 -j SNAT --to-source 203.0.113.50 -m comment --comment "natmap:snat:10.0.0.1:203.0.113.50""#;
+        let rule = parse_live_rule(line).unwrap();
+        assert_eq!(rule.kind, RuleKind::Snat);
+        assert_eq!(rule.ext_ip, "203.0.113.50");
+        assert_eq!(rule.int_ip, "10.0.0.1");
+        assert!(rule.ports.is_empty());
+        assert_eq!(rule.proto, TransportProtocol::Tcp);
+    }
+
+    #[test]
+    fn parse_live_rule_forward_accept_returns_none() {
+        let line = r#"-A NATMAP -d 172.17.0.3/32 -p tcp -m tcp --dport 8080 -j ACCEPT -m comment --comment "natmap:c1:8080""#;
+        assert!(parse_live_rule(line).is_none());
+    }
+
+    #[test]
+    fn parse_live_rule_non_natmap_comment_returns_none() {
+        let line = r#"-A PREROUTING -p tcp -m tcp --dport 22 -j DNAT --to-destination 10.0.0.5:22 -m comment --comment "docker:custom""#;
+        assert!(parse_live_rule(line).is_none());
+    }
+
+    #[tokio::test]
+    async fn list_rules_dedups_parsed_rules() {
+        let fake = Arc::new(FakeIptables::default());
+        fake.set_rules_lines(vec![
+            r#"-A PREROUTING -d 203.0.113.50/32 -p tcp -m tcp --dport 36000 -j DNAT --to-destination 10.0.0.99:36000 -m comment --comment "natmap:dnat:203.0.113.50:36000""#.into(),
+            r#"-A PREROUTING -d 203.0.113.50/32 -p tcp -m tcp --dport 36000 -j DNAT --to-destination 10.0.0.99:36000 -m comment --comment "natmap:dnat:203.0.113.50:36000""#.into(),
+            r#"-A NATMAP -d 172.17.0.3/32 -p tcp -m tcp --dport 8080 -j ACCEPT -m comment --comment "natmap:c1:8080""#.into(),
+        ]);
+        let state = test_app_state_with(fake);
+        let res = list_rules(State(state)).await.unwrap();
+        assert_eq!(res.0.len(), 1);
+        assert_eq!(res.0[0].kind, RuleKind::Dnat);
+        assert_eq!(res.0[0].ext_ip, "203.0.113.50");
+        assert_eq!(res.0[0].int_ip, "10.0.0.99");
     }
 }
