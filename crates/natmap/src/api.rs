@@ -697,7 +697,7 @@ pub async fn clear_all(
 
 /// Lower bound of the ephemeral port range the daemon allocates from.
 ///
-/// Duplicated with lab-lib's private `PORT_RANGE_START` — keep both in sync.
+/// The natmap daemon is the single authority for this range.
 pub(crate) const EPHEMERAL_PORT_START: u16 = 32768;
 /// Upper bound of the ephemeral port range the daemon allocates from.
 pub(crate) const EPHEMERAL_PORT_END: u16 = 61000;

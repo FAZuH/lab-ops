@@ -18,5 +18,4 @@ pub use docker::parse_container_inspect;
 pub use docker::parse_port_mappings;
 pub use docker::trim_container_name;
 pub use port::PortAllocator;
-pub use port::PortAssignments;
 pub use protocol::TransportProtocol;
