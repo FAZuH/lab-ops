@@ -6,7 +6,6 @@ use std::sync::Arc;
 use color_eyre::Result;
 use color_eyre::eyre::WrapErr;
 use color_eyre::eyre::bail;
-use lab_ops_lab_lib::port::PortAssignments;
 use lab_ops_natmap::client::NatmapClient;
 use lab_ops_natmap::client::NatmapError;
 use lab_ops_natmap::models::DockerAddMapRequest;
@@ -146,6 +145,7 @@ pub struct DiscoveryDaemon {
     consul: Arc<dyn ConsulOps>,
     natmap: Arc<dyn NatmapOps>,
     docker: Option<Arc<dyn DockerOps>>,
+    #[allow(dead_code)]
     state_dir: PathBuf,
 }
 
@@ -162,15 +162,18 @@ enum ServiceTarget<'a> {
     },
 }
 
-/// Outcome of the port-decision step. `Skip` means the service gets no
-/// mapping and no registration this pass (e.g. no free ports available).
-enum PortDecision {
-    Map {
-        host_port: u16,
-        container_port: u16,
-        skip_natmap: bool,
-    },
-    Skip,
+/// The mapping a sync pass asks the natmap daemon for.
+///
+/// `host_port` is `0` when the daemon should allocate an ephemeral port and
+/// report the chosen port in its response. `needs_mapping` is `false` for
+/// RProxy local targets, which register in Consul without any natmap mapping.
+struct PortDecision {
+    /// Host port to request from the daemon (`0` = daemon allocates).
+    host_port: u16,
+    /// Port on the target container or local service.
+    container_port: u16,
+    /// Whether a natmap mapping should be created at all.
+    needs_mapping: bool,
 }
 
 impl DiscoveryDaemon {
@@ -203,8 +206,6 @@ impl DiscoveryDaemon {
             .await
             .wrap_err("Docker API error")?;
 
-        let ports_path = self.state_dir.join("ports.json");
-        let mut port_assignments = PortAssignments::load(&ports_path);
         let mut current_service_ids = Vec::new();
         let mut sync_errors: usize = 0;
 
@@ -222,17 +223,10 @@ impl DiscoveryDaemon {
                     for container in matching_containers {
                         let target = ServiceTarget::Container { info: container };
                         match self
-                            .sync_service(
-                                &target,
-                                resolved,
-                                &server_name,
-                                &generation_id,
-                                &mut port_assignments,
-                            )
+                            .sync_service(&target, resolved, &server_name, &generation_id)
                             .await
                         {
-                            Ok(Some(id)) => ids.push(id),
-                            Ok(None) => {}
+                            Ok(id) => ids.push(id),
                             Err(e) => {
                                 sync_errors += 1;
                                 tracing::error!(
@@ -261,24 +255,18 @@ impl DiscoveryDaemon {
                                 .to_string(),
                             service_id_prefix: &resolved.service_id_prefix,
                         };
-                        self.sync_service(
-                            &target,
-                            resolved,
-                            &server_name,
-                            &generation_id,
-                            &mut port_assignments,
-                        )
-                        .await
-                        .map(|id| id.into_iter().collect::<Vec<_>>())
-                        .map_err(|e| {
-                            sync_errors += 1;
-                            tracing::error!(
-                                service.id_prefix = %resolved.service_id_prefix,
-                                error = %e,
-                                "failed to sync local service"
-                            );
-                            e
-                        })
+                        self.sync_service(&target, resolved, &server_name, &generation_id)
+                            .await
+                            .map(|id| vec![id])
+                            .map_err(|e| {
+                                sync_errors += 1;
+                                tracing::error!(
+                                    service.id_prefix = %resolved.service_id_prefix,
+                                    error = %e,
+                                    "failed to sync local service"
+                                );
+                                e
+                            })
                     }
                 }
             };
@@ -286,11 +274,6 @@ impl DiscoveryDaemon {
                 current_service_ids.extend(ids);
             }
         }
-
-        port_assignments
-            .save(&ports_path)
-            .map_err(|e| tracing::warn!(error = %e, "failed to save port assignments"))
-            .ok();
 
         // The sweep guard is fail-closed by design: a non-total failure with
         // zero registrations (e.g. some docker services absent plus one errored
@@ -329,8 +312,7 @@ impl DiscoveryDaemon {
         resolved: &ResolvedService,
         server_name: &str,
         generation_id: &str,
-        port_assignments: &mut PortAssignments,
-    ) -> Result<Option<String>> {
+    ) -> Result<String> {
         // Resolve the target's identity first. For containers this is the
         // Consul IP; for local services it is the configured local address.
         let (container_id, consul_ip, local_ip) = match target {
@@ -348,28 +330,24 @@ impl DiscoveryDaemon {
             ),
         };
 
-        let decision = self.decide_ports(target, resolved, port_assignments)?;
-        let PortDecision::Map {
-            host_port,
-            container_port,
-            skip_natmap,
-        } = decision
-        else {
-            return Ok(None);
-        };
+        let decision = self.decide_ports(target, resolved);
 
-        if !skip_natmap {
+        // The port to register with: the daemon's reported port when a mapping
+        // was created, or the decision's host port for mapping-free services.
+        let host_port = if decision.needs_mapping {
             let natmap_bind_ip = get_natmap_bind_ip(resolved);
             self.ensure_docker_mapping(
                 container_id,
                 natmap_bind_ip.as_deref(),
-                host_port,
-                container_port,
+                decision.host_port,
+                decision.container_port,
                 resolved.protocol,
                 local_ip,
             )
-            .await?;
-        }
+            .await?
+        } else {
+            decision.host_port
+        };
 
         if let ResolvedPortType::ForwardRemote {
             preserve_src_ip: true,
@@ -409,71 +387,50 @@ impl DiscoveryDaemon {
             .await
             .wrap_err("Consul API error")?;
 
-        Ok(Some(registration.id))
+        Ok(registration.id)
     }
 
-    /// Decide which host port (if any) a service gets this pass.
+    /// Translate a resolved service's intent into a natmap mapping request.
     ///
-    /// This is the internal port-decision seam: a future single port
-    /// authority will attach here.
-    fn decide_ports(
-        &self,
-        target: &ServiceTarget<'_>,
-        resolved: &ResolvedService,
-        port_assignments: &mut PortAssignments,
-    ) -> Result<PortDecision> {
-        let port_key = format!("{}-{}", resolved.service_id_prefix, resolved.container_port);
+    /// Availability is not decided here: explicit ports are sent as requested
+    /// and the daemon arbitrates (409 on conflict); dynamic ports are sent as
+    /// `host_port: 0` and the daemon reports the chosen port in its response.
+    fn decide_ports(&self, target: &ServiceTarget<'_>, resolved: &ResolvedService) -> PortDecision {
+        let container_port = resolved.container_port;
 
         match &resolved.port_type {
-            ResolvedPortType::ForwardRemote { ext_ports, .. } => {
-                let host_port = ext_ports[0];
-                // ForwardRemote needs a local natmap mapping so traffic from the
-                // proxy's DNAT rule can reach the target. Always attempt to
-                // create one — if another target has this port mapped, the
-                // natmap daemon will return 409 (handled gracefully as a warning
-                // by the client). For local targets, skip the mapping when the
-                // host port is already taken on the natmap bind IP.
-                let skip_natmap = match target {
-                    ServiceTarget::Container { .. } => false,
-                    ServiceTarget::Local { .. } => {
-                        let natmap_bind_ip = get_natmap_bind_ip(resolved);
-                        let check_ip = natmap_bind_ip.as_deref().unwrap_or("0.0.0.0");
-                        !lab_ops_lab_lib::port::is_port_free(format!("{check_ip}:{host_port}"))
-                    }
-                };
-                Ok(PortDecision::Map {
-                    host_port,
-                    container_port: resolved.container_port,
-                    skip_natmap,
-                })
-            }
+            ResolvedPortType::ForwardRemote { ext_ports, .. } => PortDecision {
+                host_port: ext_ports[0],
+                container_port,
+                needs_mapping: true,
+            },
             ResolvedPortType::ForwardLocal {
                 bind_port: Some(bp),
-            } => Ok(PortDecision::Map {
+            } => PortDecision {
                 host_port: *bp,
-                container_port: resolved.container_port,
-                skip_natmap: false,
-            }),
-            ResolvedPortType::ForwardLocal { bind_port: None } => Ok(allocate_port_decision(
-                port_assignments,
-                &port_key,
-                resolved,
-            )),
+                container_port,
+                needs_mapping: true,
+            },
+            ResolvedPortType::ForwardLocal { bind_port: None } => PortDecision {
+                host_port: 0,
+                container_port,
+                needs_mapping: true,
+            },
             ResolvedPortType::RProxyLocal { .. } | ResolvedPortType::RProxyRemote { .. } => {
                 match target {
                     // RProxy local targets need no natmap mapping — the proxy
                     // talks to the local service directly.
-                    ServiceTarget::Local { .. } => Ok(PortDecision::Map {
-                        host_port: resolved.container_port,
-                        container_port: resolved.container_port,
-                        skip_natmap: true,
-                    }),
+                    ServiceTarget::Local { .. } => PortDecision {
+                        host_port: container_port,
+                        container_port,
+                        needs_mapping: false,
+                    },
                     // RProxy container targets get a dynamic natmap mapping.
-                    ServiceTarget::Container { .. } => Ok(allocate_port_decision(
-                        port_assignments,
-                        &port_key,
-                        resolved,
-                    )),
+                    ServiceTarget::Container { .. } => PortDecision {
+                        host_port: 0,
+                        container_port,
+                        needs_mapping: true,
+                    },
                 }
             }
         }
@@ -534,19 +491,10 @@ impl DiscoveryDaemon {
         let config_hash = self.compute_config_hash(&config);
         let generation_id = compute_generation_id(&server_name, &config_hash);
 
-        let ports_path = self.state_dir.join("ports.json");
-        let mut port_assignments = PortAssignments::load(&ports_path);
-
         for resolved in &resolved_services {
             let target = ServiceTarget::Container { info: &cinfo };
             if let Err(e) = self
-                .sync_service(
-                    &target,
-                    resolved,
-                    &server_name,
-                    &generation_id,
-                    &mut port_assignments,
-                )
+                .sync_service(&target, resolved, &server_name, &generation_id)
                 .await
             {
                 tracing::error!(
@@ -558,7 +506,6 @@ impl DiscoveryDaemon {
             }
         }
 
-        port_assignments.save(&ports_path).ok();
         Ok(())
     }
 
@@ -606,8 +553,16 @@ impl DiscoveryDaemon {
         Ok(())
     }
 
-    /// Adds a Docker port mapping via the natmap daemon, treating an existing
-    /// mapping (409) or a missing container (404) as non-fatal.
+    /// Adds a Docker port mapping via the natmap daemon and returns the
+    /// effective host port the service should register with.
+    ///
+    /// On success this is the port reported by the daemon
+    /// (`mapping.request.host_addr.port()`); for a dynamic request
+    /// (`host_port: 0`) the daemon allocates and reports it. For an explicit
+    /// host port, an existing mapping (409) or a missing container (404) is
+    /// non-fatal — the requested host port is returned so the service still
+    /// registers (skip-but-register). A dynamic request that the daemon
+    /// rejects (409/404) fails the sync: there is no port to register.
     ///
     /// Span fields: `host.port`, `container.port`, `proto`.
     #[tracing::instrument(skip_all, fields(host.port = %host_port, container.port = %container_port, proto = %proto))]
@@ -619,7 +574,7 @@ impl DiscoveryDaemon {
         container_port: u16,
         proto: lab_ops_lab_lib::TransportProtocol,
         target_ip: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<u16> {
         let req = DockerAddMapRequest {
             host_ip: host_ip.unwrap_or("0.0.0.0").to_string(),
             host_port,
@@ -628,14 +583,25 @@ impl DiscoveryDaemon {
             proto,
         };
         match self.natmap.add_mapping(container_id, req).await {
-            Ok(_) => Ok(()),
+            Ok(mapping) => Ok(mapping.request.host_addr.port()),
+            // A dynamic request (`host_port: 0`) has no requested port to
+            // fall back to — the daemon's rejection is fatal.
+            Err(e @ NatmapError::Conflict(_)) if host_port == 0 => {
+                Err(e).wrap_err("natmap rejected dynamic port allocation")
+            }
+            Err(e @ NatmapError::NotFound(_)) if host_port == 0 => {
+                Err(e).wrap_err("container not found for dynamic port allocation")
+            }
             Err(NatmapError::Conflict(e)) => {
-                tracing::warn!(error = %e, "natmap mapping already exists (409), continuing");
-                Ok(())
+                tracing::warn!(
+                    error = %e,
+                    "natmap mapping already exists (409), registering with requested port"
+                );
+                Ok(host_port)
             }
             Err(NatmapError::NotFound(e)) => {
-                tracing::warn!(error = %e, "container not found, continuing");
-                Ok(())
+                tracing::warn!(error = %e, "container not found, registering with requested port");
+                Ok(host_port)
             }
             Err(e) => Err(e).wrap_err("natmap command failed"),
         }
@@ -665,29 +631,6 @@ impl DiscoveryDaemon {
         hasher.update(yaml.as_bytes());
         let result = hasher.finalize();
         hex::encode(&result[..16])
-    }
-}
-
-/// Allocate a dynamic host port for a service, or report `Skip` when the
-/// port range is exhausted.
-fn allocate_port_decision(
-    port_assignments: &mut PortAssignments,
-    port_key: &str,
-    resolved: &ResolvedService,
-) -> PortDecision {
-    match port_assignments.get_or_allocate(port_key) {
-        Some(host_port) => PortDecision::Map {
-            host_port,
-            container_port: resolved.container_port,
-            skip_natmap: false,
-        },
-        None => {
-            tracing::warn!(
-                service.id_prefix = %resolved.service_id_prefix,
-                "no free ports for service"
-            );
-            PortDecision::Skip
-        }
     }
 }
 
@@ -777,7 +720,6 @@ pub fn resolve_interface_ip(iface_name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::net::TcpListener;
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
@@ -844,12 +786,16 @@ mod tests {
 
     // --- Fake adapters ---
 
+    /// Port the fake daemon reports when asked to allocate (`host_port: 0`).
+    const FAKE_ALLOCATED_PORT: u16 = 40000;
+
     #[derive(Default)]
     struct FakeNatmap {
         add_mappings: Mutex<Vec<(String, DockerAddMapRequest)>>,
         policy_routes: Mutex<Vec<(PolicyRouteConfig, bool)>>,
         fail_add_mapping: AtomicBool,
         conflict_add_mapping: AtomicBool,
+        not_found_add_mapping: AtomicBool,
     }
 
     impl FakeNatmap {
@@ -876,13 +822,33 @@ mod tests {
                 if self.conflict_add_mapping.load(Ordering::SeqCst) {
                     return Err(NatmapError::Conflict("fake conflict".into()));
                 }
-                self.add_mappings.lock().unwrap().push((container_id, req));
+                if self.not_found_add_mapping.load(Ordering::SeqCst) {
+                    return Err(NatmapError::NotFound("fake not found".into()));
+                }
+                self.add_mappings
+                    .lock()
+                    .unwrap()
+                    .push((container_id, req.clone()));
+                // Echo the request back like the real daemon: explicit ports
+                // come back as requested, dynamic requests (`host_port: 0`)
+                // are answered with a deterministic allocated port.
+                let host_port = if req.host_port == 0 {
+                    FAKE_ALLOCATED_PORT
+                } else {
+                    req.host_port
+                };
+                let container_ip = req
+                    .target_ip
+                    .clone()
+                    .unwrap_or_else(|| "0.0.0.0".to_string());
                 Ok(DockerPortMap {
                     id: 1,
                     request: DockerPortMapRequest {
-                        host_addr: "0.0.0.0:0".parse().unwrap(),
-                        container_addr: "0.0.0.0:0".parse().unwrap(),
-                        proto: TransportProtocol::Tcp,
+                        host_addr: format!("{}:{}", req.host_ip, host_port).parse().unwrap(),
+                        container_addr: format!("{}:{}", container_ip, req.container_port)
+                            .parse()
+                            .unwrap(),
+                        proto: req.proto,
                     },
                     container_id: String::new(),
                     container_name: String::new(),
@@ -1081,17 +1047,14 @@ mod tests {
         );
         resolved.bind_ip = Some("10.0.0.5".into());
 
-        let mut port_assignments = PortAssignments::default();
         let id = daemon
             .sync_service(
                 &make_container_target(&info),
                 &resolved,
                 "test-node",
                 "gen-1",
-                &mut port_assignments,
             )
             .await
-            .unwrap()
             .unwrap();
 
         assert_eq!(id, "test-node-web-38080");
@@ -1128,17 +1091,14 @@ mod tests {
             },
         );
 
-        let mut port_assignments = PortAssignments::default();
         let id = daemon
             .sync_service(
                 &make_local_target("loc", "10.0.0.99"),
                 &resolved,
                 "test-node",
                 "gen-1",
-                &mut port_assignments,
             )
             .await
-            .unwrap()
             .unwrap();
 
         assert_eq!(id, "test-node-loc-39090");
@@ -1174,17 +1134,14 @@ mod tests {
         );
         resolved.bind_ip = Some("10.0.0.5".into());
 
-        let mut port_assignments = PortAssignments::default();
         let id = daemon
             .sync_service(
                 &make_container_target(&info),
                 &resolved,
                 "test-node",
                 "gen-1",
-                &mut port_assignments,
             )
             .await
-            .unwrap()
             .unwrap();
 
         assert!(!id.is_empty());
@@ -1212,17 +1169,14 @@ mod tests {
             make_forward_remote(vec![39002], false, None, None),
         );
 
-        let mut port_assignments = PortAssignments::default();
         let id = daemon
             .sync_service(
                 &make_local_target("loc", "10.0.0.99"),
                 &resolved,
                 "test-node",
                 "gen-1",
-                &mut port_assignments,
             )
             .await
-            .unwrap()
             .unwrap();
 
         assert!(!id.is_empty());
@@ -1233,10 +1187,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_service_local_forward_remote_skips_mapping_when_port_taken() {
-        let _held = TcpListener::bind("0.0.0.0:39003").unwrap();
+    async fn sync_service_local_forward_remote_conflict_skips_mapping_but_registers() {
         let dir = tempfile::tempdir().unwrap();
         let natmap = Arc::new(FakeNatmap::default());
+        natmap.conflict_add_mapping.store(true, Ordering::SeqCst);
         let consul = Arc::new(FakeConsul::default());
         let daemon = make_daemon(
             &dir,
@@ -1251,21 +1205,20 @@ mod tests {
             make_forward_remote(vec![39003], false, None, None),
         );
 
-        let mut port_assignments = PortAssignments::default();
         let id = daemon
             .sync_service(
                 &make_local_target("loc", "10.0.0.99"),
                 &resolved,
                 "test-node",
                 "gen-1",
-                &mut port_assignments,
             )
             .await
-            .unwrap()
             .unwrap();
 
         assert!(!id.is_empty());
+        // The daemon arbitrated the conflict: no mapping was installed.
         assert!(natmap.mappings().is_empty());
+        // Skip-but-register: the service still registers with the requested port.
         let regs = consul.registrations();
         assert_eq!(regs.len(), 1);
         assert_eq!(regs[0].port, 39003);
@@ -1294,17 +1247,14 @@ mod tests {
             },
         );
 
-        let mut port_assignments = PortAssignments::default();
         let id = daemon
             .sync_service(
                 &make_local_target("web", "10.0.0.99"),
                 &resolved,
                 "test-node",
                 "gen-1",
-                &mut port_assignments,
             )
             .await
-            .unwrap()
             .unwrap();
 
         assert_eq!(id, "test-node-web-example-com-8080");
@@ -1340,27 +1290,101 @@ mod tests {
         );
         resolved.bind_ip = Some("10.0.0.5".into());
 
-        let mut port_assignments = PortAssignments::default();
         let id = daemon
             .sync_service(
                 &make_container_target(&info),
                 &resolved,
                 "test-node",
                 "gen-1",
-                &mut port_assignments,
             )
             .await
-            .unwrap()
+            .unwrap();
+
+        assert!(!id.is_empty());
+        // The container target delegates allocation to the daemon.
+        let mappings = natmap.mappings();
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].1.host_port, 0);
+        // The registration uses the port the daemon allocated and reported.
+        let regs = consul.registrations();
+        assert_eq!(regs.len(), 1);
+        assert_eq!(regs[0].port, FAKE_ALLOCATED_PORT);
+        assert_eq!(regs[0].address, "10.0.0.5");
+    }
+
+    #[tokio::test]
+    async fn sync_service_docker_forward_local_dynamic_requests_zero_host_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let natmap = Arc::new(FakeNatmap::default());
+        let consul = Arc::new(FakeConsul::default());
+        let daemon = make_daemon(
+            &dir,
+            natmap.clone(),
+            consul.clone(),
+            Arc::new(FakeDocker::with_running(vec![])),
+        );
+
+        let info = make_container_info("abc123def456", "web", None);
+        let mut resolved = make_resolved(
+            "web",
+            8080,
+            ResolvedPortType::ForwardLocal { bind_port: None },
+        );
+        resolved.bind_ip = Some("10.0.0.5".into());
+
+        let id = daemon
+            .sync_service(
+                &make_container_target(&info),
+                &resolved,
+                "test-node",
+                "gen-1",
+            )
+            .await
             .unwrap();
 
         assert!(!id.is_empty());
         let mappings = natmap.mappings();
         assert_eq!(mappings.len(), 1);
-        assert!((32768..=61000).contains(&mappings[0].1.host_port));
+        assert_eq!(mappings[0].1.host_port, 0);
         let regs = consul.registrations();
         assert_eq!(regs.len(), 1);
-        assert_eq!(regs[0].port, mappings[0].1.host_port);
-        assert_eq!(regs[0].address, "10.0.0.5");
+        assert_eq!(regs[0].port, FAKE_ALLOCATED_PORT);
+    }
+
+    #[tokio::test]
+    async fn sync_service_dynamic_mapping_not_found_is_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let natmap = Arc::new(FakeNatmap::default());
+        natmap.not_found_add_mapping.store(true, Ordering::SeqCst);
+        let consul = Arc::new(FakeConsul::default());
+        let daemon = make_daemon(
+            &dir,
+            natmap.clone(),
+            consul.clone(),
+            Arc::new(FakeDocker::with_running(vec![])),
+        );
+
+        let info = make_container_info("abc123def456", "web", None);
+        let mut resolved = make_resolved(
+            "web",
+            8080,
+            ResolvedPortType::ForwardLocal { bind_port: None },
+        );
+        resolved.bind_ip = Some("10.0.0.5".into());
+
+        // A dynamic request has no requested port to fall back to — the
+        // daemon's 404 must fail the sync rather than register port 0.
+        let result = daemon
+            .sync_service(
+                &make_container_target(&info),
+                &resolved,
+                "test-node",
+                "gen-1",
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(consul.registrations().is_empty());
     }
 
     #[tokio::test]
@@ -1383,17 +1407,14 @@ mod tests {
         );
         resolved.bind_ip = Some("10.0.0.5".into());
 
-        let mut port_assignments = PortAssignments::default();
         let id = daemon
             .sync_service(
                 &make_container_target(&info),
                 &resolved,
                 "test-node",
                 "gen-1",
-                &mut port_assignments,
             )
             .await
-            .unwrap()
             .unwrap();
 
         assert!(!id.is_empty());
@@ -1423,17 +1444,14 @@ mod tests {
             make_forward_remote(vec![30002], true, Some("192.168.1.1"), None),
         );
 
-        let mut port_assignments = PortAssignments::default();
         let id = daemon
             .sync_service(
                 &make_local_target("loc", "10.0.0.99"),
                 &resolved,
                 "test-node",
                 "gen-1",
-                &mut port_assignments,
             )
             .await
-            .unwrap()
             .unwrap();
 
         assert!(!id.is_empty());
@@ -1465,14 +1483,12 @@ mod tests {
         );
         resolved.bind_ip = Some("10.0.0.5".into());
 
-        let mut port_assignments = PortAssignments::default();
         let result = daemon
             .sync_service(
                 &make_container_target(&info),
                 &resolved,
                 "test-node",
                 "gen-1",
-                &mut port_assignments,
             )
             .await;
 
@@ -1504,17 +1520,14 @@ mod tests {
         );
         resolved.bind_ip = Some("10.0.0.5".into());
 
-        let mut port_assignments = PortAssignments::default();
         let id = daemon
             .sync_service(
                 &make_container_target(&info),
                 &resolved,
                 "test-node",
                 "gen-1",
-                &mut port_assignments,
             )
             .await
-            .unwrap()
             .unwrap();
 
         assert!(!id.is_empty());

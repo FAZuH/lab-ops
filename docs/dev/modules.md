@@ -32,11 +32,10 @@ The canonical `TransportProtocol` enum (`Tcp` / `Udp`) with serde, `Display`, an
 
 ### `port.rs` — Port Utilities & Management
 
-Consolidated from the old `natmap/src/port.rs` and `auto-discover/src/port.rs`. Three layers:
+Consolidated from the old `natmap/src/port.rs` and `auto-discover/src/port.rs`. Two layers:
 
 **Low-level socket utilities:**
 - `create_freebind_socket(addr, Type) -> io::Result<Socket>` — Creates a `socket2::Socket` with `SO_REUSEADDR`, `IP_FREEBIND`, and the given socket type (`STREAM` for TCP, `DGRAM` for UDP).
-- `is_port_free(addr: A) -> bool` where `A: ToSocketAddrs` — Checks if a TCP port is free using the robust freebind socket. Generic over any type that can resolve to a socket address.
 
 **`PortAllocator`** — Runtime TCP/UDP pre-bind reservation (used by `natmap` daemon):
 - Holds `HashMap<SocketAddr, ReservedSocket>` where `ReservedSocket` is an enum with `Tcp(TcpListener)` and `Udp(UdpSocket)` variants.
@@ -44,12 +43,6 @@ Consolidated from the old `natmap/src/port.rs` and `auto-discover/src/port.rs`. 
 - `deallocate(addr)` — Remove from map, drop reservation (releases port)
 - `is_allocated(addr)` — Check if `addr` has an active reservation
 - `deallocate_all()` — Clear all reservations
-
-**`PortAssignments`** — Persistent ephemeral port allocation (used by `auto-discover`):
-- `get(key) / set(key, port) / remove(key)` — CRUD for port assignments
-- `load(path) / save(path)` — Persist assignments to JSON (for crash recovery)
-- `get_or_allocate(key)` — Look up existing assignment or allocate from ephemeral range
-- `allocate_port(assignments)` — Find first free port in range 32768-61000 using `is_port_free`
 
 ## `crates/natmap/src/`
 
@@ -234,7 +227,7 @@ Orchestrates the full discovery lifecycle:
 - `handle_container_start()` — Match started container to network entries, allocate ports, register
 - `handle_container_die()` — Deregister stale services
 - `run_config_watcher()` — Watch `discovery.yaml` for file changes and re-sync
-- `ensure_docker_mapping()` — Adds a Docker mapping via `lab_ops_natmap::client::NatmapClient`, swallowing `NatmapError::Conflict`/`NotFound` (mapping already exists / container missing) as non-fatal
+- `ensure_docker_mapping()` — Adds a Docker mapping via `lab_ops_natmap::client::NatmapClient` and returns the daemon-reported host port. A `Conflict`/`NotFound` response is non-fatal only for explicit host ports. A rejected dynamic request (`host_port: 0`) fails the sync
 
 ### `docker.rs` — Docker Client
 
@@ -249,8 +242,6 @@ Proxy-side DNAT management:
 - `sync_forwarding_rules()` — Query Consul for forwarding services, apply DNAT rules via `lab_ops_natmap::client::NatmapClient`
 - `parse_group_proto(proto)` — Parses a forwarding group's protocol string, rejecting invalid values so a misconfigured service fails the sync instead of silently installing a TCP rule
 - `get_lan_cidr(ip)` — Determine the LAN subnet CIDR containing the given IP by querying the routing table (used for LAN-limited hairpin when `preserve_src_ip` is true)
-
-<!-- PortAssignments moved to lab_lib::port; see port.rs section in lab-lib crate above -->
 
 ## `src/` (Root Crate)
 
