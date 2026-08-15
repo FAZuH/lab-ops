@@ -1,3 +1,18 @@
+## [Unreleased]
+
+### Added
+
+- Added `GET /rules` endpoint to natmap daemon that returns live NAT rules.
+- Added value `0` to `host_port`, which asks the natmap daemon for a free host port.
+
+### Changed
+
+- Changed host-port allocation so the natmap daemon assigns the ports.
+
+### Fixed
+
+- Fixed full sync failure removing services that were already registered.
+
 ## 0.1.28 (2026-07-12)
 
 
