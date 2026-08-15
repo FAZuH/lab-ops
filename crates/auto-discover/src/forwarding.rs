@@ -14,10 +14,56 @@ use color_eyre::eyre::WrapErr;
 use color_eyre::eyre::bail;
 use lab_ops_lab_lib::TransportProtocol;
 use lab_ops_natmap::client::NatmapClient;
+use lab_ops_natmap::client::NatmapError;
 use lab_ops_natmap::models::DnatConfig;
 use lab_ops_natmap::models::HairpinConfig;
+use lab_ops_natmap::models::LiveRule;
+use lab_ops_natmap::models::RuleKind;
 
 use crate::consul::ConsulClient;
+
+/// Interface for the natmap operations forwarding sync relies on.
+///
+/// Local to this crate (plan decision #2): auto-discover does not share
+/// primitives with natmap, only the reported [`LiveRule`] wire format.
+trait NatmapOps {
+    /// Fetches the daemon-reported live rules.
+    async fn rules(&self) -> Result<Vec<LiveRule>, NatmapError>;
+    /// Installs or deletes a static DNAT rule.
+    async fn dnat(
+        &self,
+        config: DnatConfig,
+        delete: bool,
+    ) -> Result<Option<DnatConfig>, NatmapError>;
+    /// Installs or deletes a static hairpin rule.
+    async fn hairpin(
+        &self,
+        config: HairpinConfig,
+        delete: bool,
+    ) -> Result<Option<HairpinConfig>, NatmapError>;
+}
+
+impl NatmapOps for NatmapClient {
+    async fn rules(&self) -> Result<Vec<LiveRule>, NatmapError> {
+        self.rules().await
+    }
+
+    async fn dnat(
+        &self,
+        config: DnatConfig,
+        delete: bool,
+    ) -> Result<Option<DnatConfig>, NatmapError> {
+        self.dnat(config, delete).await
+    }
+
+    async fn hairpin(
+        &self,
+        config: HairpinConfig,
+        delete: bool,
+    ) -> Result<Option<HairpinConfig>, NatmapError> {
+        self.hairpin(config, delete).await
+    }
+}
 
 /// Parses a forwarding group's protocol string into a typed
 /// [`TransportProtocol`].
@@ -97,73 +143,176 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
     let consul = ConsulClient::new(consul_addr.to_string());
     let groups = query_forwarding_services(&consul).await?;
     let natmap = NatmapClient::default_socket();
+    reconcile_forwarding_rules(&natmap, &groups).await
+}
 
-    if groups.is_empty() {
-        tracing::info!("No forwarding services found in Consul; cleaning up stale rules");
-        let stale = find_stale_rules(&groups)?;
-        tracing::Span::current().record("rule.count", stale.len());
-        for stale_group in stale {
-            let proto = parse_group_proto(&stale_group.proto)?;
-            let ports_csv = stale_group
-                .ports
-                .iter()
-                .map(|p| p.to_string())
-                .collect::<Vec<_>>()
-                .join(",");
-            natmap
-                .dnat(
-                    DnatConfig {
-                        ext_ip: stale_group.ext_ip.clone(),
-                        int_ip: stale_group.int_ip.clone(),
-                        ports: ports_csv,
-                        proto,
-                        ext_if: None,
-                        preserve_src_ip: stale_group.preserve_src_ip,
-                    },
-                    true,
-                )
-                .await
-                .ok();
-        }
-        return Ok(());
-    }
+/// Applies the desired forwarding groups and deletes rules reported by the
+/// natmap daemon that no longer match any desired group.
+///
+/// The daemon's reported live rules are the source of truth for what exists;
+/// a rule is stale when its `(ext_ip, int_ip, protocol)` is not desired.
+///
+/// Span fields: `rule.count` (desired groups + stale rules).
+async fn reconcile_forwarding_rules(
+    natmap: &impl NatmapOps,
+    groups: &[ForwardingGroup],
+) -> Result<()> {
+    let reported = natmap
+        .rules()
+        .await
+        .wrap_err("failed to fetch live rules from natmap daemon")?;
 
-    let stale = find_stale_rules(&groups)?;
+    // Validates every group's protocol up-front so a misconfigured service
+    // aborts the sync before any rule is applied.
+    let desired_keys: HashSet<(String, String, TransportProtocol)> = groups
+        .iter()
+        .map(|g| {
+            Ok((
+                g.ext_ip.clone(),
+                g.int_ip.clone(),
+                parse_group_proto(&g.proto)?,
+            ))
+        })
+        .collect::<Result<_>>()?;
+
+    let stale = stale_forwarding_rules(&reported, &desired_keys);
     tracing::Span::current().record("rule.count", groups.len() + stale.len());
 
-    for group in &groups {
-        let proto = parse_group_proto(&group.proto)?;
-        let ports_csv: String = group
-            .ports
-            .iter()
-            .map(|p| p.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
+    if groups.is_empty() {
+        tracing::info!("no forwarding services found in Consul; cleaning up stale rules");
+    }
 
-        natmap
-            .dnat(
-                DnatConfig {
+    for group in groups {
+        apply_forwarding_group(natmap, group).await?;
+    }
+    for rule in stale {
+        delete_stale_rule(natmap, rule).await;
+    }
+    Ok(())
+}
+
+/// Returns the reported rules that are no longer desired.
+///
+/// Only DNAT and hairpin rules are forwarding-managed; SNAT and Docker
+/// mapping rules are never considered stale here.
+fn stale_forwarding_rules<'a>(
+    reported: &'a [LiveRule],
+    desired_keys: &HashSet<(String, String, TransportProtocol)>,
+) -> Vec<&'a LiveRule> {
+    reported
+        .iter()
+        .filter(|r| {
+            matches!(r.kind, RuleKind::Dnat | RuleKind::Hairpin)
+                && !desired_keys.contains(&(r.ext_ip.clone(), r.int_ip.clone(), r.proto))
+        })
+        .collect()
+}
+
+/// Applies one forwarding group's DNAT (and optional hairpin) rules.
+///
+/// Delete-before-create avoids duplicates. Deletes and creates are both
+/// non-fatal (warn + continue) — a failed DNAT create does NOT skip the
+/// hairpin install, and a successful sync still returns `Ok`.
+async fn apply_forwarding_group(natmap: &impl NatmapOps, group: &ForwardingGroup) -> Result<()> {
+    let proto = parse_group_proto(&group.proto)?;
+    let ports_csv = ports_csv(&group.ports);
+
+    if let Err(e) = natmap
+        .dnat(
+            DnatConfig {
+                ext_ip: group.ext_ip.clone(),
+                int_ip: group.int_ip.clone(),
+                ports: ports_csv.clone(),
+                proto,
+                ext_if: None,
+                preserve_src_ip: group.preserve_src_ip,
+            },
+            true,
+        )
+        .await
+    {
+        tracing::warn!(
+            ext.ip = %group.ext_ip,
+            int.ip = %group.int_ip,
+            ports = %ports_csv,
+            proto = %group.proto,
+            error = %e,
+            "failed to delete existing dnat rule"
+        );
+    }
+
+    if let Err(e) = natmap
+        .dnat(
+            DnatConfig {
+                ext_ip: group.ext_ip.clone(),
+                int_ip: group.int_ip.clone(),
+                ports: ports_csv.clone(),
+                proto,
+                ext_if: None,
+                preserve_src_ip: group.preserve_src_ip,
+            },
+            false,
+        )
+        .await
+    {
+        tracing::warn!(
+            ext.ip = %group.ext_ip,
+            int.ip = %group.int_ip,
+            ports = %ports_csv,
+            proto = %group.proto,
+            error = %e,
+            "failed to create dnat rule"
+        );
+    }
+
+    if group.hairpin {
+        let lan_cidr = if group.preserve_src_ip {
+            match get_lan_cidr(&group.int_ip) {
+                Ok(cidr) => Some(cidr),
+                Err(e) => {
+                    tracing::warn!(
+                        int.ip = %group.int_ip,
+                        error = %e,
+                        "failed to detect LAN CIDR, skipping hairpin source restriction"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        if let Err(e) = natmap
+            .hairpin(
+                HairpinConfig {
                     ext_ip: group.ext_ip.clone(),
                     int_ip: group.int_ip.clone(),
                     ports: ports_csv.clone(),
                     proto,
-                    ext_if: None,
-                    preserve_src_ip: group.preserve_src_ip,
+                    lan_cidr: lan_cidr.clone(),
                 },
                 true,
             )
             .await
-            .ok();
+        {
+            tracing::warn!(
+                ext.ip = %group.ext_ip,
+                int.ip = %group.int_ip,
+                ports = %ports_csv,
+                proto = %group.proto,
+                error = %e,
+                "failed to delete existing hairpin rule"
+            );
+        }
 
         if let Err(e) = natmap
-            .dnat(
-                DnatConfig {
+            .hairpin(
+                HairpinConfig {
                     ext_ip: group.ext_ip.clone(),
                     int_ip: group.int_ip.clone(),
                     ports: ports_csv.clone(),
                     proto,
-                    ext_if: None,
-                    preserve_src_ip: group.preserve_src_ip,
+                    lan_cidr: lan_cidr.clone(),
                 },
                 false,
             )
@@ -175,100 +324,79 @@ pub async fn sync_forwarding_rules(consul_addr: &str) -> Result<()> {
                 ports = %ports_csv,
                 proto = %group.proto,
                 error = %e,
-                "dnat creation failed, skipping group"
+                "hairpin creation failed (non-fatal)"
             );
-            continue;
         }
-
-        if group.hairpin {
-            let lan_cidr = if group.preserve_src_ip {
-                match get_lan_cidr(&group.int_ip) {
-                    Ok(cidr) => Some(cidr),
-                    Err(e) => {
-                        tracing::warn!(
-                            "failed to detect LAN CIDR for {}, skipping hairpin: {}",
-                            group.int_ip,
-                            e
-                        );
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-
-            // Delete first to avoid duplicates
-            natmap
-                .hairpin(
-                    HairpinConfig {
-                        ext_ip: group.ext_ip.clone(),
-                        int_ip: group.int_ip.clone(),
-                        ports: ports_csv.clone(),
-                        proto,
-                        lan_cidr: lan_cidr.clone(),
-                    },
-                    true,
-                )
-                .await
-                .ok();
-
-            if let Err(e) = natmap
-                .hairpin(
-                    HairpinConfig {
-                        ext_ip: group.ext_ip.clone(),
-                        int_ip: group.int_ip.clone(),
-                        ports: ports_csv.clone(),
-                        proto,
-                        lan_cidr: lan_cidr.clone(),
-                    },
-                    false,
-                )
-                .await
-            {
-                tracing::warn!(
-                    "hairpin for {} -> {} failed (non-fatal): {}",
-                    group.ext_ip,
-                    group.int_ip,
-                    e
-                );
-            }
-        }
-
-        tracing::info!(
-            ext.ip = %group.ext_ip,
-            int.ip = %group.int_ip,
-            ports = %ports_csv,
-            proto = %group.proto,
-            hairpin = group.hairpin,
-            "applied forwarding"
-        );
     }
 
-    for stale_group in stale {
-        let proto = parse_group_proto(&stale_group.proto)?;
-        let ports_csv = stale_group
-            .ports
-            .iter()
-            .map(|p| p.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        natmap
+    tracing::info!(
+        ext.ip = %group.ext_ip,
+        int.ip = %group.int_ip,
+        ports = %ports_csv,
+        proto = %group.proto,
+        hairpin = group.hairpin,
+        "applied forwarding"
+    );
+    Ok(())
+}
+
+/// Deletes one stale forwarding rule reported by the daemon.
+///
+/// SNAT and Docker mapping rules are not forwarding-managed and are skipped.
+/// A failed delete is logged (warn) but does not fail the sync — the stale
+/// rule will be retried on the next sync.
+async fn delete_stale_rule(natmap: &impl NatmapOps, rule: &LiveRule) {
+    let ports_csv = ports_csv(&rule.ports);
+    let result = match rule.kind {
+        RuleKind::Dnat => natmap
             .dnat(
                 DnatConfig {
-                    ext_ip: stale_group.ext_ip.clone(),
-                    int_ip: stale_group.int_ip.clone(),
-                    ports: ports_csv,
-                    proto,
+                    ext_ip: rule.ext_ip.clone(),
+                    int_ip: rule.int_ip.clone(),
+                    ports: ports_csv.clone(),
+                    proto: rule.proto,
                     ext_if: None,
-                    preserve_src_ip: stale_group.preserve_src_ip,
+                    preserve_src_ip: false,
                 },
                 true,
             )
             .await
-            .ok();
+            .map(|_| ()),
+        RuleKind::Hairpin => natmap
+            .hairpin(
+                HairpinConfig {
+                    ext_ip: rule.ext_ip.clone(),
+                    int_ip: rule.int_ip.clone(),
+                    ports: ports_csv.clone(),
+                    proto: rule.proto,
+                    lan_cidr: None,
+                },
+                true,
+            )
+            .await
+            .map(|_| ()),
+        RuleKind::Snat | RuleKind::Mapping => return,
+    };
+    if let Err(e) = result {
+        tracing::warn!(
+            kind = ?rule.kind,
+            ext.ip = %rule.ext_ip,
+            int.ip = %rule.int_ip,
+            ports = %ports_csv,
+            proto = %rule.proto,
+            error = %e,
+            "failed to delete stale forwarding rule"
+        );
     }
+}
 
-    Ok(())
+/// Joins ports into the comma-separated form used by natmap configs.
+fn ports_csv(ports: &[u16]) -> String {
+    ports
+        .iter()
+        .map(|p| p.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Query the Consul catalog for all services with `Meta.forwarding=="true"`,
@@ -364,91 +492,15 @@ fn group_forwarding_services(services: Vec<serde_json::Value>) -> Vec<Forwarding
         .collect()
 }
 
-/// Compare existing natmap DNAT rules against the desired state and return
-/// groups that should be deleted.
-fn find_stale_rules(current: &[ForwardingGroup]) -> Result<Vec<ForwardingGroup>> {
-    let desired: HashSet<(String, String, String)> = current
-        .iter()
-        .map(|g| (g.ext_ip.clone(), g.int_ip.clone(), g.proto.clone()))
-        .collect();
-
-    let output = Command::new("iptables-save")
-        .arg("-t")
-        .arg("nat")
-        .output()
-        .wrap_err("failed to run iptables-save")?;
-
-    if !output.status.success() {
-        bail!("iptables-save failed");
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut stale_groups: HashMap<(String, String, String), Vec<u16>> = HashMap::new();
-
-    for line in stdout.lines() {
-        if let Some((ext_ip, int_ip, port, proto)) = parse_dnat_rule(line) {
-            let key = (ext_ip, int_ip, proto);
-            if !desired.contains(&key) {
-                stale_groups.entry(key).or_default().push(port);
-            }
-        }
-    }
-
-    let stale: Vec<ForwardingGroup> = stale_groups
-        .into_iter()
-        .map(|((ext_ip, int_ip, proto), ports)| ForwardingGroup {
-            ext_ip,
-            int_ip,
-            ports,
-            proto,
-            hairpin: true,          // conservative default for cleanup
-            preserve_src_ip: false, // conservative default for cleanup
-        })
-        .collect();
-
-    Ok(stale)
-}
-
-/// Parse a DNAT rule from `iptables-save -t nat` output.
-///
-/// Format: `-A PREROUTING -d <ext_ip>/32 -p <proto> ... -j DNAT --to-destination <int_ip>:<port>`
-fn parse_dnat_rule(line: &str) -> Option<(String, String, u16, String)> {
-    let line = line.trim();
-    if !line.starts_with("-A PREROUTING") || !line.contains("-j DNAT") {
-        return None;
-    }
-
-    let ext_ip = line.split(" -d ").nth(1)?.split('/').next()?.to_string();
-
-    let proto = line
-        .split(" -p ")
-        .nth(1)?
-        .split_whitespace()
-        .next()?
-        .to_string();
-
-    let port = line
-        .split("--dport ")
-        .nth(1)?
-        .split_whitespace()
-        .next()?
-        .parse::<u16>()
-        .ok()?;
-
-    let int_ip = line
-        .split("--to-destination ")
-        .nth(1)?
-        .split(':')
-        .next()?
-        .to_string();
-
-    Some((ext_ip, int_ip, port, proto))
-}
-
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+
     use proptest::prelude::*;
     use serde_json::json;
+    use tracing_test::traced_test;
 
     use super::*;
 
@@ -851,42 +903,233 @@ mod tests {
         assert!(!groups[0].preserve_src_ip);
     }
 
-    // ── parse_dnat_rule tests ──
+    // --- FakeNatmap in-memory adapter ---
+
+    /// In-memory [`NatmapOps`] recording every call for assertions.
+    struct FakeNatmap {
+        reported: Mutex<Vec<LiveRule>>,
+        dnat_deletes: Mutex<Vec<DnatConfig>>,
+        dnat_creates: Mutex<Vec<DnatConfig>>,
+        hairpin_deletes: Mutex<Vec<HairpinConfig>>,
+        hairpin_creates: Mutex<Vec<HairpinConfig>>,
+        fail_dnat_create: AtomicBool,
+        fail_hairpin_create: AtomicBool,
+        fail_dnat_delete: AtomicBool,
+    }
+
+    impl FakeNatmap {
+        fn new(reported: Vec<LiveRule>) -> Self {
+            Self {
+                reported: Mutex::new(reported),
+                dnat_deletes: Mutex::new(Vec::new()),
+                dnat_creates: Mutex::new(Vec::new()),
+                hairpin_deletes: Mutex::new(Vec::new()),
+                hairpin_creates: Mutex::new(Vec::new()),
+                fail_dnat_create: AtomicBool::new(false),
+                fail_hairpin_create: AtomicBool::new(false),
+                fail_dnat_delete: AtomicBool::new(false),
+            }
+        }
+
+        fn set_fail_dnat_create(&self, fail: bool) {
+            self.fail_dnat_create.store(fail, Ordering::SeqCst);
+        }
+
+        fn set_fail_dnat_delete(&self, fail: bool) {
+            self.fail_dnat_delete.store(fail, Ordering::SeqCst);
+        }
+    }
+
+    impl NatmapOps for FakeNatmap {
+        async fn rules(&self) -> Result<Vec<LiveRule>, NatmapError> {
+            Ok(self.reported.lock().unwrap().clone())
+        }
+
+        async fn dnat(
+            &self,
+            config: DnatConfig,
+            delete: bool,
+        ) -> Result<Option<DnatConfig>, NatmapError> {
+            if delete {
+                if self.fail_dnat_delete.load(Ordering::SeqCst) {
+                    return Err(NatmapError::Internal("fake dnat delete failure".into()));
+                }
+                self.dnat_deletes.lock().unwrap().push(config);
+            } else {
+                if self.fail_dnat_create.load(Ordering::SeqCst) {
+                    return Err(NatmapError::Internal("fake dnat create failure".into()));
+                }
+                self.dnat_creates.lock().unwrap().push(config);
+            }
+            Ok(None)
+        }
+
+        async fn hairpin(
+            &self,
+            config: HairpinConfig,
+            delete: bool,
+        ) -> Result<Option<HairpinConfig>, NatmapError> {
+            if delete {
+                self.hairpin_deletes.lock().unwrap().push(config);
+            } else {
+                if self.fail_hairpin_create.load(Ordering::SeqCst) {
+                    return Err(NatmapError::Internal("fake hairpin create failure".into()));
+                }
+                self.hairpin_creates.lock().unwrap().push(config);
+            }
+            Ok(None)
+        }
+    }
+
+    fn make_live_dnat(ext_ip: &str, int_ip: &str, ports: &[u16]) -> LiveRule {
+        LiveRule {
+            kind: RuleKind::Dnat,
+            ext_ip: ext_ip.to_string(),
+            int_ip: int_ip.to_string(),
+            ports: ports.to_vec(),
+            proto: TransportProtocol::Tcp,
+        }
+    }
+
+    fn make_live_hairpin(ext_ip: &str, int_ip: &str, ports: &[u16]) -> LiveRule {
+        LiveRule {
+            kind: RuleKind::Hairpin,
+            ext_ip: ext_ip.to_string(),
+            int_ip: int_ip.to_string(),
+            ports: ports.to_vec(),
+            proto: TransportProtocol::Tcp,
+        }
+    }
+
+    fn make_group(ext_ip: &str, int_ip: &str, ports: &[u16], hairpin: bool) -> ForwardingGroup {
+        ForwardingGroup {
+            ext_ip: ext_ip.to_string(),
+            int_ip: int_ip.to_string(),
+            ports: ports.to_vec(),
+            proto: "tcp".to_string(),
+            hairpin,
+            preserve_src_ip: false,
+        }
+    }
+
+    // --- stale_forwarding_rules tests ---
 
     #[test]
-    fn parse_dnat_rule_tcp_basic() {
-        let line = "-A PREROUTING -d 203.0.113.50/32 -p tcp -m tcp --dport 36000 -j DNAT --to-destination 10.0.0.99:36000";
-        let (ext_ip, int_ip, port, proto) = parse_dnat_rule(line).unwrap();
-        assert_eq!(ext_ip, "203.0.113.50");
-        assert_eq!(int_ip, "10.0.0.99");
-        assert_eq!(port, 36000);
-        assert_eq!(proto, "tcp");
+    fn stale_forwarding_rules_marks_multiport_dnat_when_not_desired() {
+        let reported = vec![make_live_dnat("203.0.113.50", "10.0.0.99", &[80, 443])];
+        let desired: HashSet<(String, String, TransportProtocol)> = HashSet::new();
+        let stale = stale_forwarding_rules(&reported, &desired);
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].ports, vec![80, 443]);
     }
 
     #[test]
-    fn parse_dnat_rule_udp() {
-        let line = "-A PREROUTING -d 10.10.10.102/32 -p udp -m udp --dport 19132 -j DNAT --to-destination 10.10.10.102:19132";
-        let (ext_ip, int_ip, port, proto) = parse_dnat_rule(line).unwrap();
-        assert_eq!(ext_ip, "10.10.10.102");
-        assert_eq!(int_ip, "10.10.10.102");
-        assert_eq!(port, 19132);
-        assert_eq!(proto, "udp");
+    fn stale_forwarding_rules_keeps_desired_rules() {
+        let reported = vec![
+            make_live_dnat("203.0.113.50", "10.0.0.99", &[80]),
+            make_live_hairpin("203.0.113.50", "10.0.0.99", &[80]),
+        ];
+        let desired: HashSet<(String, String, TransportProtocol)> = [(
+            "203.0.113.50".to_string(),
+            "10.0.0.99".to_string(),
+            TransportProtocol::Tcp,
+        )]
+        .into();
+        assert!(stale_forwarding_rules(&reported, &desired).is_empty());
     }
 
     #[test]
-    fn parse_dnat_rule_non_dnat_returns_none() {
-        assert!(parse_dnat_rule("-A POSTROUTING -s 10.0.0.0/24 -j MASQUERADE").is_none());
-        assert!(
-            parse_dnat_rule("-A PREROUTING -d 1.2.3.4/32 -p tcp --dport 80 -j ACCEPT").is_none()
-        );
-        assert!(parse_dnat_rule("").is_none());
+    fn stale_forwarding_rules_ignores_mapping_and_snat() {
+        let mapping = LiveRule {
+            kind: RuleKind::Mapping,
+            ext_ip: "203.0.113.50".to_string(),
+            int_ip: "10.0.0.99".to_string(),
+            ports: vec![80],
+            proto: TransportProtocol::Tcp,
+        };
+        let snat = LiveRule {
+            kind: RuleKind::Snat,
+            ext_ip: "10.0.0.99".to_string(),
+            int_ip: "10.0.0.99".to_string(),
+            ports: vec![],
+            proto: TransportProtocol::Tcp,
+        };
+        let reported = vec![mapping, snat];
+        let desired: HashSet<(String, String, TransportProtocol)> = HashSet::new();
+        assert!(stale_forwarding_rules(&reported, &desired).is_empty());
     }
 
-    #[test]
-    fn parse_dnat_rule_missing_fields() {
-        assert!(parse_dnat_rule("-A PREROUTING -j DNAT").is_none());
-        assert!(
-            parse_dnat_rule("-A PREROUTING -p tcp -j DNAT --to-destination 10.0.0.1:80").is_none()
-        );
+    // --- reconcile_forwarding_rules tests ---
+
+    #[tokio::test]
+    async fn reconcile_forwarding_rules_deletes_stale_with_real_attributes() {
+        let natmap = FakeNatmap::new(vec![make_live_dnat(
+            "203.0.113.50",
+            "10.0.0.99",
+            &[80, 443],
+        )]);
+        let groups = vec![make_group("198.51.100.7", "10.0.0.99", &[8080], false)];
+        reconcile_forwarding_rules(&natmap, &groups).await.unwrap();
+
+        let deletes = natmap.dnat_deletes.lock().unwrap();
+        // Delete-first for the desired group + one stale delete.
+        assert_eq!(deletes.len(), 2);
+        let stale = deletes.iter().find(|c| c.ext_ip == "203.0.113.50").unwrap();
+        assert_eq!(stale.int_ip, "10.0.0.99");
+        assert_eq!(stale.ports, "80,443");
+        assert_eq!(stale.proto, TransportProtocol::Tcp);
+    }
+
+    #[tokio::test]
+    async fn reconcile_forwarding_rules_keeps_desired_rules() {
+        let natmap = FakeNatmap::new(vec![make_live_dnat("198.51.100.7", "10.0.0.99", &[8080])]);
+        let groups = vec![make_group("198.51.100.7", "10.0.0.99", &[8080], false)];
+        reconcile_forwarding_rules(&natmap, &groups).await.unwrap();
+
+        // Only the group's own delete-first delete; no stale delete.
+        let deletes = natmap.dnat_deletes.lock().unwrap();
+        assert_eq!(deletes.len(), 1);
+        assert_eq!(deletes[0].ext_ip, "198.51.100.7");
+        assert_eq!(natmap.dnat_creates.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn reconcile_forwarding_rules_create_failure_does_not_skip_hairpin() {
+        let natmap = FakeNatmap::new(vec![]);
+        natmap.set_fail_dnat_create(true);
+        let groups = vec![make_group("198.51.100.7", "10.0.0.99", &[8080], true)];
+        reconcile_forwarding_rules(&natmap, &groups).await.unwrap();
+
+        assert!(logs_contain("failed to create dnat rule"));
+        assert_eq!(natmap.hairpin_creates.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn reconcile_forwarding_rules_delete_failure_is_logged_not_swallowed() {
+        let natmap = FakeNatmap::new(vec![make_live_dnat("203.0.113.50", "10.0.0.99", &[80])]);
+        natmap.set_fail_dnat_delete(true);
+        let groups = vec![make_group("198.51.100.7", "10.0.0.99", &[8080], false)];
+        reconcile_forwarding_rules(&natmap, &groups).await.unwrap();
+
+        assert!(logs_contain("failed to delete stale forwarding rule"));
+        // The sync must still apply the desired group despite the failed delete.
+        assert_eq!(natmap.dnat_creates.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn reconcile_forwarding_rules_empty_groups_deletes_all() {
+        let natmap = FakeNatmap::new(vec![
+            make_live_dnat("203.0.113.50", "10.0.0.99", &[80]),
+            make_live_hairpin("203.0.113.51", "10.0.0.98", &[443]),
+        ]);
+        reconcile_forwarding_rules(&natmap, &[]).await.unwrap();
+
+        assert!(logs_contain("no forwarding services found in Consul"));
+        assert_eq!(natmap.dnat_deletes.lock().unwrap().len(), 1);
+        assert_eq!(natmap.hairpin_deletes.lock().unwrap().len(), 1);
+        assert!(natmap.dnat_creates.lock().unwrap().is_empty());
     }
 }

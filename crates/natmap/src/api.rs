@@ -21,8 +21,10 @@ use crate::models::DockerRemapRequest;
 use crate::models::HairpinConfig;
 use crate::models::HairpinRequest;
 use crate::models::ListResponse;
+use crate::models::LiveRule;
 use crate::models::PolicyRouteConfig;
 use crate::models::PolicyRouteRequest;
+use crate::models::RuleKind;
 use crate::models::SnatConfig;
 use crate::models::SnatRequest;
 use crate::models::TransportProtocol;
@@ -40,6 +42,29 @@ pub async fn list_mappings(State(state): State<AppState>) -> Json<ListResponse> 
         hairpins: state.hairpins.clone(),
         policy_routes: state.policy_routes.clone(),
     })
+}
+
+/// `GET /rules` — Returns all live NAT rules installed in iptables.
+///
+/// Parsed from the daemon's rule listing (all tables, natmap-commented lines
+/// only). The daemon is the authority on what is actually installed.
+/// Deterministic: rules are sorted and deduplicated.
+#[tracing::instrument(skip_all)]
+pub async fn list_rules(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<LiveRule>>, (StatusCode, Json<ErrorResponse>)> {
+    let lines = state.iptables.list_rules().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+    let mut rules: Vec<LiveRule> = lines.iter().filter_map(|l| parse_live_rule(l)).collect();
+    rules.sort();
+    rules.dedup();
+    Ok(Json(rules))
 }
 
 // --- Static NAT handlers ---
@@ -516,8 +541,21 @@ pub async fn add_mapping(
             }),
         )
     })?;
-    let host_addr = SocketAddr::new(host_ip, req.host_port);
     let container_addr = SocketAddr::new(container_ip, req.container_port);
+    let host_addr = if req.host_port == 0 {
+        allocate_free_port(&state.ports, host_ip, proto).await?
+    } else {
+        let addr = SocketAddr::new(host_ip, req.host_port);
+        state.ports.allocate(addr, proto).await.map_err(|e| {
+            (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+        addr
+    };
 
     let span = tracing::Span::current();
     span.record("host.addr", tracing::field::display(host_addr));
@@ -531,14 +569,6 @@ pub async fn add_mapping(
     let id = state.allocate_id();
     let mapping = DockerPortMap::new(id, request, container_id.clone(), container_name);
 
-    state.ports.allocate(host_addr, proto).await.map_err(|e| {
-        (
-            StatusCode::CONFLICT,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-    })?;
     if let Err(e) = state.iptables.install_dockermap(&mapping) {
         state.ports.deallocate(host_addr).await;
         return Err((
@@ -665,6 +695,37 @@ pub async fn clear_all(
 
 // --- Internal helpers ---
 
+/// Lower bound of the ephemeral port range the daemon allocates from.
+///
+/// The natmap daemon is the single authority for this range.
+pub(crate) const EPHEMERAL_PORT_START: u16 = 32768;
+/// Upper bound of the ephemeral port range the daemon allocates from.
+pub(crate) const EPHEMERAL_PORT_END: u16 = 61000;
+
+/// Reserves the first free host port on `host_ip` from the ephemeral range.
+///
+/// Each candidate is reserved directly so a concurrent claim of the same port
+/// is detected by the bind itself; on success the port is held by the caller
+/// until it deallocates it.
+async fn allocate_free_port(
+    ports: &PortAllocator,
+    host_ip: IpAddr,
+    proto: TransportProtocol,
+) -> Result<SocketAddr, (StatusCode, Json<ErrorResponse>)> {
+    for port in EPHEMERAL_PORT_START..=EPHEMERAL_PORT_END {
+        let addr = SocketAddr::new(host_ip, port);
+        if ports.allocate(addr, proto).await.is_ok() {
+            return Ok(addr);
+        }
+    }
+    Err((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(ErrorResponse {
+            error: "no free host port available in ephemeral range".into(),
+        }),
+    ))
+}
+
 pub async fn bind_ports(
     ports: Arc<PortAllocator>,
     ip: &str,
@@ -721,6 +782,156 @@ fn parse_socket_addrs(
         .collect()
 }
 
+/// Parses a natmap-commented `iptables-save` line into a [`LiveRule`].
+///
+/// Returns `None` for lines that are not natmap-managed NAT rules (e.g.
+/// FORWARD ACCEPT rules for Docker mappings) or that lack the fields a rule
+/// kind requires. Rule kind is attributed from the `natmap:*` comment prefix.
+fn parse_live_rule(line: &str) -> Option<LiveRule> {
+    let comment = line.split_once("--comment ")?;
+    let comment = comment.1.trim();
+    let comment = match comment.strip_prefix('"') {
+        Some(inner) => inner.split('"').next().unwrap_or(comment),
+        None => comment,
+    };
+
+    let (kind, rest) = if let Some(rest) = comment.strip_prefix("natmap:dnat:") {
+        (RuleKind::Dnat, rest)
+    } else if let Some(rest) = comment.strip_prefix("natmap:hairpin:") {
+        (RuleKind::Hairpin, rest)
+    } else if let Some(rest) = comment.strip_prefix("natmap:snat:") {
+        (RuleKind::Snat, rest)
+    } else if let Some(rest) = comment.strip_prefix("natmap:") {
+        (RuleKind::Mapping, rest)
+    } else {
+        return None;
+    };
+
+    let proto = match line.split(" -p ").nth(1) {
+        Some(rest) => rest
+            .split_whitespace()
+            .next()?
+            .parse::<TransportProtocol>()
+            .ok()?,
+        // SNAT rules carry no protocol; the daemon defaults to TCP.
+        None => TransportProtocol::Tcp,
+    };
+
+    match kind {
+        RuleKind::Dnat => {
+            if !line.contains("-j DNAT") {
+                return None;
+            }
+            let mut fields = rest.split(':');
+            let ext_ip = fields.next()?.to_string();
+            let ports = parse_ports_csv(fields.next()?)?;
+            let int_ip = line
+                .split("--to-destination ")
+                .nth(1)?
+                .split_whitespace()
+                .next()?
+                .split(':')
+                .next()?
+                .to_string();
+            Some(LiveRule {
+                kind,
+                ext_ip,
+                int_ip,
+                ports,
+                proto,
+            })
+        }
+        RuleKind::Hairpin => {
+            if !(line.contains("-j DNAT") || line.contains("-j MASQUERADE")) {
+                return None;
+            }
+            let mut fields = rest.split(':');
+            let ext_ip = fields.next()?.to_string();
+            let int_ip = fields.next()?.to_string();
+            let ports = parse_ports_csv(fields.next()?)?;
+            Some(LiveRule {
+                kind,
+                ext_ip,
+                int_ip,
+                ports,
+                proto,
+            })
+        }
+        RuleKind::Snat => {
+            if !line.contains("-j SNAT") {
+                return None;
+            }
+            let int_ip = line
+                .split(" -s ")
+                .nth(1)?
+                .split_whitespace()
+                .next()?
+                .split('/')
+                .next()?
+                .to_string();
+            let ext_ip = line
+                .split("--to-source ")
+                .nth(1)?
+                .split_whitespace()
+                .next()?
+                .to_string();
+            Some(LiveRule {
+                kind,
+                ext_ip,
+                int_ip,
+                ports: Vec::new(),
+                proto,
+            })
+        }
+        RuleKind::Mapping => {
+            if !line.contains("-j DNAT") {
+                return None;
+            }
+            let ext_ip = line
+                .split(" -d ")
+                .nth(1)
+                .and_then(|rest| rest.split_whitespace().next())
+                .map(|ip| ip.split('/').next().unwrap_or("0.0.0.0").to_string())
+                .unwrap_or_else(|| "0.0.0.0".to_string());
+            let int_ip = line
+                .split("--to-destination ")
+                .nth(1)?
+                .split_whitespace()
+                .next()?
+                .split(':')
+                .next()?
+                .to_string();
+            let ports = parse_ports(line)?;
+            Some(LiveRule {
+                kind,
+                ext_ip,
+                int_ip,
+                ports,
+                proto,
+            })
+        }
+    }
+}
+
+/// Extracts ports from an iptables line, preferring multiport `--dports`.
+///
+/// `--dports ` (with the trailing space) is not a substring of `--dport `,
+/// so checking multiport first is unambiguous.
+fn parse_ports(line: &str) -> Option<Vec<u16>> {
+    if let Some(rest) = line.split(" --dports ").nth(1) {
+        return parse_ports_csv(rest.split_whitespace().next()?);
+    }
+    if let Some(rest) = line.split(" --dport ").nth(1) {
+        return parse_ports_csv(rest.split_whitespace().next()?);
+    }
+    None
+}
+
+/// Parses a comma-separated port list into `u16`s, skipping invalid entries.
+fn parse_ports_csv(csv: &str) -> Option<Vec<u16>> {
+    Some(csv.split(',').filter_map(|p| p.parse().ok()).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::IpAddr;
@@ -729,6 +940,8 @@ mod tests {
     use std::sync::atomic::AtomicU64;
 
     use super::*;
+    use crate::daemon::tests::FakeIptables;
+    use crate::daemon::tests::test_app_state_with;
     use crate::iptables::IptablesManager;
     use crate::models::*;
     use crate::policy_route::PolicyRouteManager;
@@ -745,6 +958,10 @@ mod tests {
             socket_group: "root".to_string(),
             socket_path: std::path::PathBuf::from("/tmp/natmap.sock"),
         }
+    }
+
+    fn make_addr(port: u16) -> SocketAddr {
+        SocketAddr::new(IpAddr::from([127, 0, 0, 1]), port)
     }
 
     #[test]
@@ -937,19 +1154,163 @@ mod tests {
         let state = test_app_state();
         let req = DockerAddMapRequest {
             host_ip: "127.0.0.1".into(),
-            host_port: 0,
+            host_port: 39050,
             container_port: 80,
             target_ip: Some("10.0.0.2".into()),
             proto: TransportProtocol::Tcp,
         };
         let result = add_mapping(State(state.clone()), Path("test123".into()), Json(req)).await;
         if result.is_err() {
-            // port 0 allocation or iptables may fail — skip
+            // real iptables may fail — skip
             return;
         }
         assert!(result.is_ok());
         let mapping = result.unwrap().0;
         assert_eq!(mapping.container_id, "test123");
+    }
+
+    // --- Add mapping allocation ---
+
+    #[tokio::test]
+    async fn add_mapping_no_host_port_allocates_and_returns_port() {
+        let fake = Arc::new(FakeIptables::default());
+        let state = test_app_state_with(fake.clone());
+        let req = DockerAddMapRequest {
+            host_ip: "127.0.0.2".into(),
+            host_port: 0,
+            container_port: 80,
+            target_ip: Some("10.0.0.2".into()),
+            proto: TransportProtocol::Tcp,
+        };
+
+        let result = add_mapping(State(state.clone()), Path("c1".into()), Json(req)).await;
+        let mapping = result.unwrap().0;
+
+        let host_addr = mapping.request.host_addr;
+        assert_eq!(host_addr.ip(), IpAddr::from_str("127.0.0.2").unwrap());
+        assert!(
+            (super::EPHEMERAL_PORT_START..=super::EPHEMERAL_PORT_END).contains(&host_addr.port())
+        );
+        assert_eq!(fake.installed_mappings(), vec![mapping.clone()]);
+        assert!(state.ports.is_allocated(host_addr).await);
+    }
+
+    #[tokio::test]
+    async fn add_mapping_taken_host_port_returns_conflict() {
+        let fake = Arc::new(FakeIptables::default());
+        let state = test_app_state_with(fake.clone());
+        let addr = make_addr(39040);
+        if state
+            .ports
+            .allocate(addr, TransportProtocol::Tcp)
+            .await
+            .is_err()
+        {
+            // OS ephemeral traffic may transiently hold the port — skip
+            return;
+        }
+        let req = DockerAddMapRequest {
+            host_ip: "127.0.0.1".into(),
+            host_port: 39040,
+            container_port: 80,
+            target_ip: Some("10.0.0.2".into()),
+            proto: TransportProtocol::Tcp,
+        };
+
+        let result = add_mapping(State(state.clone()), Path("c1".into()), Json(req)).await;
+
+        assert_eq!(result.unwrap_err().0, StatusCode::CONFLICT);
+        assert!(fake.installed_mappings().is_empty());
+    }
+
+    #[tokio::test]
+    async fn add_mapping_install_failure_releases_allocated_port() {
+        let fake = Arc::new(FakeIptables::default());
+        fake.set_fail_dockermap(true);
+        let state = test_app_state_with(fake.clone());
+        let req = DockerAddMapRequest {
+            host_ip: "127.0.0.4".into(),
+            host_port: 0,
+            container_port: 80,
+            target_ip: Some("10.0.0.2".into()),
+            proto: TransportProtocol::Tcp,
+        };
+
+        let result = add_mapping(State(state.clone()), Path("c1".into()), Json(req.clone())).await;
+        assert_eq!(result.unwrap_err().0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(fake.installed_mappings().is_empty());
+
+        // The port the daemon allocated for the scan must have been released.
+        // Check the allocator map directly (external OS ephemeral traffic never
+        // touches it), so the assertion is immune to port contention in the
+        // OS ephemeral range (32768..=60999) that overlaps the scan range.
+        let leaked: Vec<u16> = {
+            let mut leaked = Vec::new();
+            for port in super::EPHEMERAL_PORT_START..=super::EPHEMERAL_PORT_START + 12 {
+                let addr = SocketAddr::new(IpAddr::from_str("127.0.0.4").unwrap(), port);
+                if state.ports.is_allocated(addr).await {
+                    leaked.push(port);
+                }
+            }
+            leaked
+        };
+        assert!(
+            leaked.is_empty(),
+            "allocated port must be released on install failure; still held: {leaked:?}"
+        );
+
+        // The released port is immediately re-allocatable by the next request.
+        fake.set_fail_dockermap(false);
+        let mapping = add_mapping(State(state.clone()), Path("c1".into()), Json(req))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(
+            mapping.request.host_addr.ip(),
+            IpAddr::from_str("127.0.0.4").unwrap()
+        );
+        assert!(
+            (super::EPHEMERAL_PORT_START..=super::EPHEMERAL_PORT_END)
+                .contains(&mapping.request.host_addr.port())
+        );
+        assert!(state.ports.is_allocated(mapping.request.host_addr).await);
+    }
+
+    #[tokio::test]
+    async fn add_mapping_explicit_port_install_failure_releases_allocated_port() {
+        let fake = Arc::new(FakeIptables::default());
+        fake.set_fail_dockermap(true);
+        let state = test_app_state_with(fake.clone());
+        let req = DockerAddMapRequest {
+            host_ip: "127.0.0.4".into(),
+            host_port: 39040,
+            container_port: 80,
+            target_ip: Some("10.0.0.2".into()),
+            proto: TransportProtocol::Tcp,
+        };
+
+        let result = add_mapping(State(state.clone()), Path("c1".into()), Json(req.clone())).await;
+        assert_eq!(result.unwrap_err().0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(fake.installed_mappings().is_empty());
+
+        // The explicitly requested port must have been released on install
+        // failure. Check the allocator map directly (external OS ephemeral
+        // traffic never touches it), so the assertion is immune to port
+        // contention in the OS ephemeral range.
+        let addr = SocketAddr::new(IpAddr::from_str("127.0.0.4").unwrap(), 39040);
+        assert!(
+            !state.ports.is_allocated(addr).await,
+            "explicitly requested port must be released on install failure"
+        );
+
+        // The released port is immediately re-allocatable by the next request.
+        fake.set_fail_dockermap(false);
+        let mapping = add_mapping(State(state.clone()), Path("c1".into()), Json(req))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(mapping.request.host_addr.port(), 39040);
+        assert!(state.ports.is_allocated(mapping.request.host_addr).await);
     }
 
     #[tokio::test]
@@ -997,5 +1358,152 @@ mod tests {
         };
         let result = remove_policy_route(State(state), Json(req)).await;
         assert!(result.is_ok());
+    }
+
+    // --- parse_live_rule ---
+
+    #[test]
+    fn parse_ports_csv_skips_invalid_entries() {
+        assert_eq!(parse_ports_csv("80,abc,443"), Some(vec![80, 443]));
+        assert_eq!(parse_ports_csv("abc"), Some(vec![]));
+    }
+
+    #[test]
+    fn parse_live_rule_single_port_dnat() {
+        let line = r#"-A PREROUTING -d 203.0.113.50/32 -p tcp -m tcp --dport 36000 -j DNAT --to-destination 10.0.0.99:36000 -m comment --comment "natmap:dnat:203.0.113.50:36000""#;
+        let rule = parse_live_rule(line).unwrap();
+        assert_eq!(rule.kind, RuleKind::Dnat);
+        assert_eq!(rule.ext_ip, "203.0.113.50");
+        assert_eq!(rule.int_ip, "10.0.0.99");
+        assert_eq!(rule.ports, vec![36000]);
+        assert_eq!(rule.proto, TransportProtocol::Tcp);
+    }
+
+    #[test]
+    fn parse_live_rule_multiport_dnat() {
+        let line = r#"-A PREROUTING -d 203.0.113.50/32 -p tcp -m multiport --dports 80,443 -j DNAT --to-destination 10.0.0.99 -m comment --comment "natmap:dnat:203.0.113.50:80,443""#;
+        let rule = parse_live_rule(line).unwrap();
+        assert_eq!(rule.kind, RuleKind::Dnat);
+        assert_eq!(rule.ext_ip, "203.0.113.50");
+        assert_eq!(rule.int_ip, "10.0.0.99");
+        assert_eq!(rule.ports, vec![80, 443]);
+        assert_eq!(rule.proto, TransportProtocol::Tcp);
+    }
+
+    #[test]
+    fn parse_live_rule_hairpin_dnat_form() {
+        let line = r#"-A PREROUTING -s 10.0.0.99/32 -d 203.0.113.50/32 -p tcp -m tcp --dport 80 -j DNAT --to-destination 10.0.0.99 -m comment --comment "natmap:hairpin:203.0.113.50:10.0.0.99:80""#;
+        let rule = parse_live_rule(line).unwrap();
+        assert_eq!(rule.kind, RuleKind::Hairpin);
+        assert_eq!(rule.ext_ip, "203.0.113.50");
+        assert_eq!(rule.int_ip, "10.0.0.99");
+        assert_eq!(rule.ports, vec![80]);
+        assert_eq!(rule.proto, TransportProtocol::Tcp);
+    }
+
+    #[test]
+    fn parse_live_rule_hairpin_masquerade_form() {
+        let line = r#"-A POSTROUTING -s 10.0.0.0/24 -d 10.0.0.99/32 -p tcp -m tcp --dport 80 -j MASQUERADE -m comment --comment "natmap:hairpin:203.0.113.50:10.0.0.99:80""#;
+        let rule = parse_live_rule(line).unwrap();
+        assert_eq!(rule.kind, RuleKind::Hairpin);
+        assert_eq!(rule.ext_ip, "203.0.113.50");
+        assert_eq!(rule.int_ip, "10.0.0.99");
+        assert_eq!(rule.ports, vec![80]);
+        assert_eq!(rule.proto, TransportProtocol::Tcp);
+    }
+
+    #[test]
+    fn parse_live_rule_docker_mapping() {
+        let line = r#"-A NATMAP -p tcp -d 100.64.0.10/32 -m tcp --dport 8080 -j DNAT --to-destination 10.0.0.2:80 -m comment --comment "natmap:c1:8080""#;
+        let rule = parse_live_rule(line).unwrap();
+        assert_eq!(rule.kind, RuleKind::Mapping);
+        assert_eq!(rule.ext_ip, "100.64.0.10");
+        assert_eq!(rule.int_ip, "10.0.0.2");
+        assert_eq!(rule.ports, vec![8080]);
+        assert_eq!(rule.proto, TransportProtocol::Tcp);
+    }
+
+    #[test]
+    fn parse_live_rule_snat() {
+        let line = r#"-A POSTROUTING -s 10.0.0.1/32 -o eth0 -j SNAT --to-source 203.0.113.50 -m comment --comment "natmap:snat:10.0.0.1:203.0.113.50""#;
+        let rule = parse_live_rule(line).unwrap();
+        assert_eq!(rule.kind, RuleKind::Snat);
+        assert_eq!(rule.ext_ip, "203.0.113.50");
+        assert_eq!(rule.int_ip, "10.0.0.1");
+        assert!(rule.ports.is_empty());
+        assert_eq!(rule.proto, TransportProtocol::Tcp);
+    }
+
+    #[test]
+    fn parse_live_rule_forward_accept_returns_none() {
+        let line = r#"-A NATMAP -d 172.17.0.3/32 -p tcp -m tcp --dport 8080 -j ACCEPT -m comment --comment "natmap:c1:8080""#;
+        assert!(parse_live_rule(line).is_none());
+    }
+
+    #[test]
+    fn parse_live_rule_non_natmap_comment_returns_none() {
+        let line = r#"-A PREROUTING -p tcp -m tcp --dport 22 -j DNAT --to-destination 10.0.0.5:22 -m comment --comment "docker:custom""#;
+        assert!(parse_live_rule(line).is_none());
+    }
+
+    #[test]
+    fn parse_live_rule_single_port_dnat_iptables_save_order() {
+        // Real `iptables-save` renders the comment BEFORE the jump target.
+        let line = r#"-A PREROUTING -d 203.0.113.50/32 -p tcp -m tcp --dport 36002 -m comment --comment "natmap:dnat:203.0.113.50:36002" -j DNAT --to-destination 10.0.0.99:36002"#;
+        let rule = parse_live_rule(line).unwrap();
+        assert_eq!(rule.kind, RuleKind::Dnat);
+        assert_eq!(rule.ext_ip, "203.0.113.50");
+        assert_eq!(rule.int_ip, "10.0.0.99");
+        assert_eq!(rule.ports, vec![36002]);
+        assert_eq!(rule.proto, TransportProtocol::Tcp);
+    }
+
+    #[test]
+    fn parse_live_rule_multiport_dnat_iptables_save_order() {
+        let line = r#"-A PREROUTING -d 203.0.113.50/32 -p tcp -m multiport --dports 80,443 -m comment --comment "natmap:dnat:203.0.113.50:80,443" -j DNAT --to-destination 10.0.0.99"#;
+        let rule = parse_live_rule(line).unwrap();
+        assert_eq!(rule.kind, RuleKind::Dnat);
+        assert_eq!(rule.ext_ip, "203.0.113.50");
+        assert_eq!(rule.int_ip, "10.0.0.99");
+        assert_eq!(rule.ports, vec![80, 443]);
+        assert_eq!(rule.proto, TransportProtocol::Tcp);
+    }
+
+    #[test]
+    fn parse_live_rule_hairpin_dnat_iptables_save_order() {
+        let line = r#"-A PREROUTING -s 10.0.0.99/32 -d 203.0.113.50/32 -p tcp -m tcp --dport 80 -m comment --comment "natmap:hairpin:203.0.113.50:10.0.0.99:80" -j DNAT --to-destination 10.0.0.99"#;
+        let rule = parse_live_rule(line).unwrap();
+        assert_eq!(rule.kind, RuleKind::Hairpin);
+        assert_eq!(rule.ext_ip, "203.0.113.50");
+        assert_eq!(rule.int_ip, "10.0.0.99");
+        assert_eq!(rule.ports, vec![80]);
+        assert_eq!(rule.proto, TransportProtocol::Tcp);
+    }
+
+    #[test]
+    fn parse_live_rule_docker_mapping_iptables_save_order() {
+        let line = r#"-A NATMAP -p tcp -d 100.64.0.10/32 -m tcp --dport 8080 -m comment --comment "natmap:c1:8080" -j DNAT --to-destination 10.0.0.2:80"#;
+        let rule = parse_live_rule(line).unwrap();
+        assert_eq!(rule.kind, RuleKind::Mapping);
+        assert_eq!(rule.ext_ip, "100.64.0.10");
+        assert_eq!(rule.int_ip, "10.0.0.2");
+        assert_eq!(rule.ports, vec![8080]);
+        assert_eq!(rule.proto, TransportProtocol::Tcp);
+    }
+
+    #[tokio::test]
+    async fn list_rules_dedups_parsed_rules() {
+        let fake = Arc::new(FakeIptables::default());
+        fake.set_rules_lines(vec![
+            r#"-A PREROUTING -d 203.0.113.50/32 -p tcp -m tcp --dport 36000 -j DNAT --to-destination 10.0.0.99:36000 -m comment --comment "natmap:dnat:203.0.113.50:36000""#.into(),
+            r#"-A PREROUTING -d 203.0.113.50/32 -p tcp -m tcp --dport 36000 -j DNAT --to-destination 10.0.0.99:36000 -m comment --comment "natmap:dnat:203.0.113.50:36000""#.into(),
+            r#"-A NATMAP -d 172.17.0.3/32 -p tcp -m tcp --dport 8080 -j ACCEPT -m comment --comment "natmap:c1:8080""#.into(),
+        ]);
+        let state = test_app_state_with(fake);
+        let res = list_rules(State(state)).await.unwrap();
+        assert_eq!(res.0.len(), 1);
+        assert_eq!(res.0[0].kind, RuleKind::Dnat);
+        assert_eq!(res.0[0].ext_ip, "203.0.113.50");
+        assert_eq!(res.0[0].int_ip, "10.0.0.99");
     }
 }

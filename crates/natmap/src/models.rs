@@ -106,7 +106,8 @@ pub struct DockerAddMapRequest {
     /// Host IP to bind to (defaults to `0.0.0.0`).
     #[serde(default = "default_host_ip")]
     pub host_ip: String,
-    /// Port on the host.
+    /// Port on the host. `0` asks the daemon to allocate a free port from its
+    /// ephemeral range and report the chosen port in the response.
     pub host_port: u16,
     /// Port on the target (container or local service).
     pub container_port: u16,
@@ -199,6 +200,41 @@ impl HairpinConfig {
             self.ext_ip, self.int_ip, self.ports
         )
     }
+}
+
+// --- Live rules (daemon-reported) ---
+
+/// The kind of a NAT rule reported by the daemon's live rule listing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuleKind {
+    /// Static DNAT rule (`natmap:dnat:<ext_ip>:<ports>`).
+    Dnat,
+    /// Static hairpin rule (`natmap:hairpin:<ext_ip>:<int_ip>:<ports>`).
+    Hairpin,
+    /// Static SNAT rule (`natmap:snat:<int_ip>:<ext_ip>`).
+    Snat,
+    /// Docker container port mapping (`natmap:<container>:<port>`).
+    Mapping,
+}
+
+/// A single NAT rule installed in iptables, as reported by the daemon.
+///
+/// Parsed from the daemon's live rule listing; the daemon is the authority
+/// on what is actually installed. `Ord` is derived so handlers can produce
+/// a deterministic, deduplicated listing.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct LiveRule {
+    /// Kind of rule.
+    pub kind: RuleKind,
+    /// External IP address.
+    pub ext_ip: String,
+    /// Internal IP address.
+    pub int_ip: String,
+    /// Ports matched by the rule (empty for rules without ports).
+    pub ports: Vec<u16>,
+    /// Transport protocol.
+    pub proto: TransportProtocol,
 }
 
 // --- API request types ---

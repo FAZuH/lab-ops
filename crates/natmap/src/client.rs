@@ -21,6 +21,7 @@ use crate::models::DockerRemapRequest;
 use crate::models::HairpinConfig;
 use crate::models::HairpinRequest;
 use crate::models::ListResponse;
+use crate::models::LiveRule;
 use crate::models::PolicyRouteConfig;
 use crate::models::PolicyRouteRequest;
 use crate::models::SnatConfig;
@@ -175,6 +176,14 @@ impl NatmapClient {
         request_json(&self.socket, Method::GET, "/mappings", None::<()>).await
     }
 
+    /// Lists all live NAT rules currently installed in iptables.
+    ///
+    /// Unlike [`Self::list_mappings`], these reflect what the daemon actually
+    /// installed (parsed from `iptables-save`), not the persisted daemon state.
+    pub async fn rules(&self) -> Result<Vec<LiveRule>, NatmapError> {
+        request_json(&self.socket, Method::GET, "/rules", None::<()>).await
+    }
+
     /// Removes all managed NAT rules and resets daemon state.
     pub async fn clear(&self) -> Result<(), NatmapError> {
         request_json(&self.socket, Method::DELETE, "/clear", None::<()>).await
@@ -186,39 +195,27 @@ mod tests {
     use std::net::SocketAddr;
     use std::path::PathBuf;
     use std::sync::Arc;
-    use std::sync::atomic::AtomicU64;
 
     use hyper_util::rt::TokioExecutor;
     use hyper_util::rt::TokioIo;
     use hyper_util::server::conn::auto::Builder;
     use lab_ops_lab_lib::TransportProtocol;
-    use lab_ops_lab_lib::port::PortAllocator;
     use tokio::net::UnixListener;
-    use tokio::sync::RwLock;
     use tower_service::Service;
 
     use super::*;
     use crate::daemon::AppState;
     use crate::daemon::build_router;
+    use crate::daemon::tests::FakeIptables;
+    use crate::daemon::tests::test_app_state_with;
     use crate::iptables::IptablesManager;
-    use crate::models::DaemonState;
     use crate::models::DockerAddMapRequest;
     use crate::models::DockerRemapRequest;
     use crate::models::PolicyRouteConfig;
-    use crate::policy_route::PolicyRouteManager;
+    use crate::models::RuleKind;
 
     fn test_app_state() -> AppState {
-        AppState {
-            daemon_state: Arc::new(RwLock::new(DaemonState::default())),
-            iptables: Arc::new(IptablesManager::new()),
-            policy_route: Arc::new(PolicyRouteManager::new()),
-            docker: None,
-            state_path: PathBuf::from("/tmp/natmap-test-state.json"),
-            next_id: Arc::new(AtomicU64::new(1)),
-            ports: Arc::new(PortAllocator::new()),
-            socket_group: "root".to_string(),
-            socket_path: PathBuf::from("/tmp/natmap.sock"),
-        }
+        test_app_state_with(Arc::new(IptablesManager::new()))
     }
 
     /// Serves the daemon router over a real Unix socket in a background task.
@@ -338,6 +335,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn add_mapping_no_host_port_roundtrips_allocated_port() {
+        let fake = Arc::new(FakeIptables::default());
+        let (_dir, socket) = spawn_daemon(test_app_state_with(fake)).await;
+        let client = NatmapClient::new(socket);
+
+        let req = DockerAddMapRequest {
+            host_ip: "127.0.0.3".into(),
+            host_port: 0,
+            container_port: 80,
+            target_ip: Some("10.0.0.2".into()),
+            proto: TransportProtocol::Tcp,
+        };
+        let mapping = client.add_mapping("c1", req).await.unwrap();
+
+        assert_eq!(mapping.container_id, "c1");
+        assert_eq!(mapping.request.host_addr.ip().to_string(), "127.0.0.3");
+        assert!(
+            (crate::api::EPHEMERAL_PORT_START..=crate::api::EPHEMERAL_PORT_END)
+                .contains(&mapping.request.host_addr.port()),
+            "daemon must report the allocated port, got {}",
+            mapping.request.host_addr.port()
+        );
+    }
+
+    #[tokio::test]
     async fn remove_mapping_not_found_maps_not_found() {
         let (_dir, socket) = spawn_daemon(test_app_state()).await;
         let client = NatmapClient::new(socket);
@@ -390,6 +412,24 @@ mod tests {
         let client = NatmapClient::new(socket);
 
         assert!(client.clear().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn rules_returns_parsed_live_rules() {
+        let fake = Arc::new(FakeIptables::default());
+        fake.set_rules_lines(vec![
+            r#"-A PREROUTING -d 203.0.113.50/32 -p tcp -m multiport --dports 80,443 -j DNAT --to-destination 10.0.0.99 -m comment --comment "natmap:dnat:203.0.113.50:80,443""#.into(),
+        ]);
+        let (_dir, socket) = spawn_daemon(test_app_state_with(fake)).await;
+        let client = NatmapClient::new(socket);
+
+        let rules = client.rules().await.unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].kind, RuleKind::Dnat);
+        assert_eq!(rules[0].ext_ip, "203.0.113.50");
+        assert_eq!(rules[0].int_ip, "10.0.0.99");
+        assert_eq!(rules[0].ports, vec![80, 443]);
+        assert_eq!(rules[0].proto, TransportProtocol::Tcp);
     }
 
     #[tokio::test]

@@ -46,6 +46,7 @@ use crate::api::add_policy_route;
 use crate::api::add_snat;
 use crate::api::clear_all;
 use crate::api::list_mappings;
+use crate::api::list_rules;
 use crate::api::remap_port;
 use crate::api::remove_dnat;
 use crate::api::remove_hairpin;
@@ -118,6 +119,7 @@ pub struct ErrorResponse {
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/mappings", get(list_mappings))
+        .route("/rules", get(list_rules))
         .route("/remap/:container_id", put(remap_port))
         .route("/mapping/:container_id", post(add_mapping))
         .route("/mapping/{container_id}/{port}", delete(remove_mapping))
@@ -781,7 +783,7 @@ fn reconcile_container_addr(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::HashMap;
     use std::collections::HashSet;
     use std::net::IpAddr;
@@ -823,18 +825,24 @@ mod tests {
 
     /// Records iptables operations without touching the host firewall.
     #[derive(Default)]
-    struct FakeIptables {
+    pub(crate) struct FakeIptables {
         installed_mappings: Mutex<Vec<DockerPortMap>>,
         removed_mappings: Mutex<Vec<DockerPortMap>>,
         installed_dnats: Mutex<Vec<DnatConfig>>,
         installed_hairpins: Mutex<Vec<HairpinConfig>>,
+        rules_lines: Mutex<Vec<String>>,
         fail_dockermap: AtomicBool,
         fail_dnat: AtomicBool,
         fail_hairpin: AtomicBool,
     }
 
     impl FakeIptables {
-        fn installed_mappings(&self) -> Vec<DockerPortMap> {
+        /// Sets the iptables-save output lines the fake will report.
+        pub(crate) fn set_rules_lines(&self, lines: Vec<String>) {
+            *self.rules_lines.lock().unwrap() = lines;
+        }
+
+        pub(crate) fn installed_mappings(&self) -> Vec<DockerPortMap> {
             self.installed_mappings.lock().unwrap().clone()
         }
 
@@ -850,16 +858,12 @@ mod tests {
             self.installed_hairpins.lock().unwrap().clone()
         }
 
-        fn set_fail_dockermap(&self, fail: bool) {
+        pub(crate) fn set_fail_dockermap(&self, fail: bool) {
             self.fail_dockermap.store(fail, Ordering::SeqCst);
         }
 
         fn set_fail_dnat(&self, fail: bool) {
             self.fail_dnat.store(fail, Ordering::SeqCst);
-        }
-
-        fn set_fail_hairpin(&self, fail: bool) {
-            self.fail_hairpin.store(fail, Ordering::SeqCst);
         }
     }
 
@@ -915,6 +919,10 @@ mod tests {
 
         fn remove_hairpin(&self, _config: &HairpinConfig) -> color_eyre::Result<()> {
             Ok(())
+        }
+
+        fn list_rules(&self) -> color_eyre::Result<Vec<String>> {
+            Ok(self.rules_lines.lock().unwrap().clone())
         }
     }
 
@@ -983,6 +991,24 @@ mod tests {
         Daemon {
             state,
             app: Router::new(),
+        }
+    }
+
+    /// Builds an [`AppState`] backed by the given iptables fake.
+    pub(crate) fn test_app_state_with(iptables: Arc<dyn Iptables>) -> AppState {
+        let daemon_state = Arc::new(RwLock::new(DaemonState::default()));
+        let policy_route = Arc::new(PolicyRouteManager::new());
+
+        AppState {
+            daemon_state,
+            iptables,
+            policy_route,
+            docker: None,
+            state_path: PathBuf::from("/tmp/natmap-test-state.json"),
+            next_id: Arc::new(AtomicU64::new(1)),
+            ports: Arc::new(PortAllocator::new()),
+            socket_group: "root".to_string(),
+            socket_path: PathBuf::from("/tmp/natmap.sock"),
         }
     }
 
@@ -1632,8 +1658,10 @@ mod tests {
             fake.clone(),
             ports.clone(),
         );
-        let mut daemon_state = DaemonState::default();
-        daemon_state.dnats = vec![make_dnat("39030")];
+        let mut daemon_state = DaemonState {
+            dnats: vec![make_dnat("39030")],
+            ..Default::default()
+        };
 
         daemon.reconcile_dnats(&mut daemon_state).await;
 
@@ -1653,8 +1681,10 @@ mod tests {
             ports.clone(),
         );
         fake.set_fail_dnat(true);
-        let mut daemon_state = DaemonState::default();
-        daemon_state.dnats = vec![make_dnat("39031")];
+        let mut daemon_state = DaemonState {
+            dnats: vec![make_dnat("39031")],
+            ..Default::default()
+        };
 
         daemon.reconcile_dnats(&mut daemon_state).await;
 
@@ -1673,8 +1703,10 @@ mod tests {
             fake.clone(),
             ports.clone(),
         );
-        let mut daemon_state = DaemonState::default();
-        daemon_state.hairpins = vec![make_hairpin("39032")];
+        let mut daemon_state = DaemonState {
+            hairpins: vec![make_hairpin("39032")],
+            ..Default::default()
+        };
 
         daemon.reconcile_hairpins(&mut daemon_state).await;
 
