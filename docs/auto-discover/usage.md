@@ -47,7 +47,7 @@ Consul Agent ──────────────────────�
 ```
 
 **Nginx config generation**:
-- Service nodes: `lab-ops auto-discover daemon` discovers Docker containers, allocates host ports, registers services with Consul, and creates NAT mappings via natmap
+- Service nodes: `lab-ops auto-discover daemon` discovers Docker containers, registers services with Consul, and creates NAT mappings via natmap, which allocates the host ports
 - Proxy server: `lab-ops auto-discover daemon` watches Consul for forwarding services and applies DNAT rules via natmap
 
 ### Route flow
@@ -232,7 +232,7 @@ Each entry in `services.<name>.forwardlocal[]` defines a kernel-level NAT port t
 | `proto` | No | Protocol for the iptables DNAT rule. Defaults to `tcp` |
 | `bind_ip` | No | Override for the natmap bind IP on this forwarding entry. Cascades from service-level `bind_ip` |
 | `bind_interface` | No | Override for the interface on this forwarding entry. Cascades from service-level `bind_interface` |
-| `bind_port` | No | Static host port. When set, uses this port directly (no ephemeral allocation). When absent, allocates from the ephemeral pool |
+| `bind_port` | No | Static host port. When set, uses this port directly (no ephemeral allocation). When absent, the natmap daemon allocates an ephemeral port |
 
 **ForwardRemote Config (`services.<name>.forwardremote[]`):**
 
@@ -297,7 +297,7 @@ services:
 
 **How it works (ForwardLocal):**
 
-1. **Service node**: The daemon uses `bind_port` as a static host port (or allocates from ephemeral pool if unset). Always calls natmap to create the DNAT rule on the service node.
+1. **Service node**: The daemon uses `bind_port` as a static host port. If `bind_port` is unset, the daemon sends `host_port: 0` and natmap allocates the port. The daemon always calls natmap to create the DNAT rule on the service node.
 2. **Service node**: Registers in Consul with `forwarding=true`, `forwarding_type=local`. No `ext_ip`, `ext_ports`, or `hairpin` metadata.
 3. **No proxy-server DNAT sync**: ForwardLocal does NOT participate in the proxy-server forwarding daemon. DNAT is local to the service node.
 
@@ -419,8 +419,8 @@ For `sync()`, containers are matched via the match config criteria. Docker event
    - Determine bind IP via the resolution chain (service bind_ip → bind_interface → defaults → container IP)
    - **ForwardRemote**: Use `ext_ports[0]` as the Consul registration port. No local natmap mapping or port check is performed.
    - **ForwardLocal (with `bind_port`)**: Use the static `bind_port` directly. Call natmap to create the local DNAT rule.
-   - **ForwardLocal (no `bind_port`)**: Allocate an ephemeral port from the pool. Call natmap to create the local DNAT rule.
-   - **Non-forwarding service**: Allocate a persistent free host port from the ephemeral range (32768-60999). Call natmap to create the Docker mapping.
+   - **ForwardLocal (no `bind_port`)**: Send a mapping request with `host_port: 0`. The natmap daemon allocates the port and creates the local DNAT rule.
+   - **Non-forwarding service**: Send a mapping request with `host_port: 0`. The natmap daemon allocates a free port from its ephemeral range and reports it in the response. Auto-discover registers the service with the reported port.
    - Register the service to Consul with all metadata (including forwarding meta when applicable)
 
 3. **On Docker event (die)**:
@@ -479,9 +479,9 @@ lab-ops auto-discover --version
 
 ## Port Management
 
-Ports are allocated from the range 32768-60999 and persisted to `/var/lib/auto-discover/ports.json`. The port mapping is managed by `lab-ops natmap docker add/rm` which handles the iptables rules.
+The natmap daemon owns ephemeral port allocation. Auto-discover sends `host_port: 0` in the mapping request when it does not specify a host port. The daemon allocates a port from its own ephemeral range (32768-61000) and reports the assigned port in the response. Auto-discover uses the reported port for the Consul registration. Auto-discover persists no port state and does not check ports locally.
 
-**ForwardRemote services** use static ports from `ext_ports[0]` instead of ephemeral allocation. These ports are NOT persisted to `ports.json` (they're static, not from the pool). The `port_is_free` check still verifies no other process holds the port before assigning it.
+**ForwardRemote services** use static ports from `ext_ports[0]` instead of ephemeral allocation. If the port is already mapped, the daemon rejects the request with a conflict. Auto-discover then registers the service with the requested port.
 
 ## Generation Tracking
 
