@@ -6,6 +6,8 @@ use std::sync::Arc;
 use color_eyre::Result;
 use color_eyre::eyre::WrapErr;
 use color_eyre::eyre::bail;
+use lab_ops_lab_lib::docker::ContainerInfo;
+use lab_ops_lab_lib::docker::DockerClient;
 use lab_ops_natmap::client::NatmapClient;
 use lab_ops_natmap::client::NatmapError;
 use lab_ops_natmap::models::DockerAddMapRequest;
@@ -21,8 +23,6 @@ use crate::config::ServiceType;
 use crate::consul::ConsulClient;
 use crate::consul::ConsulServiceRegistration;
 use crate::consul::compute_generation_id;
-use crate::docker::DockerClient;
-use crate::model::ContainerInfo;
 
 // --- Adapter seams ---
 
@@ -317,7 +317,7 @@ impl DiscoveryDaemon {
         // Consul IP; for local services it is the configured local address.
         let (container_id, consul_ip, local_ip) = match target {
             ServiceTarget::Container { info } => {
-                let consul_ip = self.determine_consul_ip(resolved, &info.id).await?;
+                let consul_ip = self.determine_consul_ip(resolved, info).await?;
                 (info.id.as_str(), consul_ip, None)
             }
             ServiceTarget::Local {
@@ -610,7 +610,7 @@ impl DiscoveryDaemon {
     async fn determine_consul_ip(
         &self,
         resolved: &ResolvedService,
-        container_id: &str,
+        info: &ContainerInfo,
     ) -> Result<String> {
         if let Some(ref ip) = resolved.bind_ip {
             return Ok(ip.clone());
@@ -620,9 +620,10 @@ impl DiscoveryDaemon {
         {
             return Ok(ip);
         }
-        crate::docker::get_container_ip(container_id)
-            .map(|ip| ip.to_string())
-            .wrap_err("failed to get container IP")
+        let Some(ip) = info.ip else {
+            bail!("no IP address found for container {}", info.id);
+        };
+        Ok(ip.to_string())
     }
 
     fn compute_config_hash(&self, config: &DiscoveryConfig) -> String {
@@ -720,12 +721,15 @@ pub fn resolve_interface_ip(iface_name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::net::IpAddr;
+    use std::str::FromStr;
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::Ordering;
 
     use lab_ops_lab_lib::TransportProtocol;
+    use lab_ops_lab_lib::docker::ContainerNetwork;
     use lab_ops_natmap::models::DockerAddMapRequest;
     use lab_ops_natmap::models::DockerPortMap;
     use lab_ops_natmap::models::DockerPortMapRequest;
@@ -967,10 +971,19 @@ mod tests {
     }
 
     fn make_container_info(id: &str, name: &str, project: Option<&str>) -> ContainerInfo {
+        let networks = vec![ContainerNetwork {
+            name: "bridge".to_string(),
+            ip: Some(IpAddr::from_str("172.17.0.2").unwrap()),
+            gateway: Some(IpAddr::from_str("172.17.0.1").unwrap()),
+        }];
         ContainerInfo {
             id: id.to_string(),
             name: name.to_string(),
             compose_project: project.map(str::to_string),
+            // Mirrors lab-lib's primary-IP selection: the first network
+            // (sorted by name) with an address.
+            ip: networks.iter().find_map(|n| n.ip),
+            networks,
         }
     }
 
@@ -1608,6 +1621,75 @@ services:
         let regs = consul.registrations();
         assert_eq!(regs.len(), 1);
         assert_eq!(regs[0].meta.get("container_id").unwrap(), "abc123def456");
+    }
+
+    #[tokio::test]
+    async fn sync_falls_back_to_container_ip_without_bind() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = r#"
+node:
+  name: test-node
+services:
+  web:
+    type: docker
+    match:
+      project: myproj
+    forwardlocal:
+      - port: 8080
+        bind_port: 38080
+"#;
+        std::fs::write(dir.path().join("discovery.yaml"), config).unwrap();
+        let natmap = Arc::new(FakeNatmap::default());
+        let consul = Arc::new(FakeConsul::default());
+        let info = make_container_info("abc123def456", "web", Some("myproj"));
+        let expected_ip = info.ip.unwrap().to_string();
+        let daemon = make_daemon(
+            &dir,
+            natmap.clone(),
+            consul.clone(),
+            Arc::new(FakeDocker::with_running(vec![info])),
+        );
+
+        daemon.sync().await.unwrap();
+
+        let regs = consul.registrations();
+        assert_eq!(regs.len(), 1);
+        // No bind_ip / bind_interface configured: the Consul IP falls back to
+        // the container's primary IP from the shared inspect shape.
+        assert_eq!(regs[0].address, expected_ip);
+    }
+
+    #[tokio::test]
+    async fn sync_without_bind_ip_errors_when_container_has_no_ip() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = r#"
+node:
+  name: test-node
+services:
+  web:
+    type: docker
+    match:
+      project: myproj
+    forwardlocal:
+      - port: 8080
+        bind_port: 38080
+"#;
+        std::fs::write(dir.path().join("discovery.yaml"), config).unwrap();
+        let natmap = Arc::new(FakeNatmap::default());
+        let consul = Arc::new(FakeConsul::default());
+        let no_ip = ContainerInfo {
+            ip: None,
+            networks: vec![],
+            ..make_container_info("abc123def456", "web", Some("myproj"))
+        };
+        let daemon = make_daemon(
+            &dir,
+            natmap.clone(),
+            consul.clone(),
+            Arc::new(FakeDocker::with_running(vec![no_ip])),
+        );
+
+        assert!(daemon.sync().await.is_err());
     }
 
     #[tokio::test]

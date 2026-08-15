@@ -20,7 +20,7 @@ lab-ops/
 │   │   └── src/
 │   │       ├── lib.rs             # Module declarations
 │   │       ├── consts.rs          # Shared constants (NATMAP_SOCKET, etc.)
-│   │       ├── docker.rs          # Docker connect + name trimming helpers
+│   │       ├── docker.rs          # Docker client + shared inspect: parse_container_inspect → ContainerInfo, parse_port_mappings → PortMapping
 │   │       ├── port.rs            # Port availability checking (SO_REUSEADDR, IP_FREEBIND)
 │   │       └── protocol.rs        # TransportProtocol enum (TCP/UDP)
 │   ├── natmap/                   # NAT management crate
@@ -43,9 +43,7 @@ lab-ops/
 │           ├── config.rs         # YAML config parsing
 │           ├── consul.rs         # Consul service registration
 │           ├── daemon.rs         # Core discovery daemon
-│           ├── docker.rs         # Docker API client
 │           ├── forwarding.rs     # Proxy-side DNAT rule sync
-│           ├── model.rs          # ContainerInfo data type
 
 │           └── port.rs           # Port assignment persistence + allocation
 ├── tests/                        # Integration tests
