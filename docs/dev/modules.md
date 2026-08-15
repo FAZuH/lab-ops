@@ -163,7 +163,7 @@ Stateless manager for iptables operations. Key methods:
 
 Wraps the `bollard` Docker API crate:
 - `connect()` — Creates a bollard Docker client (delegates to [`lab_lib::docker::connect()`])
-- `get_port_mappings()` — Inspects a container and extracts its port bindings
+- `get_port_mappings()` — Inspects a container via bollard, then delegates parsing to [`lab_lib::docker::parse_container_inspect`] and [`lab_lib::docker::parse_port_mappings`]. Converts each shared `PortMapping` into a natmap `DockerPortMap`. Preserves the `"unknown"` name fallback. Keeps the passed container id for the rule comment (`natmap:<container_id>:<host_port>`)
 
 ### `install.rs` — Systemd Installer
 

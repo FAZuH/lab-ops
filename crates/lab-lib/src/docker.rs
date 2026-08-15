@@ -714,4 +714,284 @@ mod tests {
 
         assert!(mappings.is_empty());
     }
+
+    #[test]
+    fn parse_port_mappings_uppercase_proto() {
+        let inspect = make_inspect(
+            r#"{
+                "Id": "upper-proto-id",
+                "NetworkSettings": {
+                    "Ports": {
+                        "443/TCP": [
+                            { "HostIp": "127.0.0.1", "HostPort": "8443" }
+                        ]
+                    },
+                    "Networks": {
+                        "bridge": { "IPAddress": "172.17.0.8" }
+                    }
+                }
+            }"#,
+        );
+
+        let mappings = parse_port_mappings(&inspect);
+
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].proto, TransportProtocol::Tcp);
+        assert_eq!(mappings[0].host_addr.port(), 8443);
+        assert_eq!(mappings[0].container_addr.port(), 443);
+    }
+
+    #[test]
+    fn parse_port_mappings_invalid_proto_skipped() {
+        let inspect = make_inspect(
+            r#"{
+                "Id": "bad-proto-id",
+                "NetworkSettings": {
+                    "Ports": {
+                        "80/xyz": [
+                            { "HostIp": "0.0.0.0", "HostPort": "8080" }
+                        ]
+                    },
+                    "Networks": {
+                        "bridge": { "IPAddress": "172.17.0.9" }
+                    }
+                }
+            }"#,
+        );
+
+        let mappings = parse_port_mappings(&inspect);
+
+        assert!(mappings.is_empty());
+    }
+
+    #[test]
+    fn parse_port_mappings_invalid_container_port_skipped() {
+        let inspect = make_inspect(
+            r#"{
+                "Id": "bad-port-id",
+                "NetworkSettings": {
+                    "Ports": {
+                        "abc/tcp": [
+                            { "HostIp": "0.0.0.0", "HostPort": "8080" }
+                        ]
+                    },
+                    "Networks": {
+                        "bridge": { "IPAddress": "172.17.0.10" }
+                    }
+                }
+            }"#,
+        );
+
+        let mappings = parse_port_mappings(&inspect);
+
+        assert!(mappings.is_empty());
+    }
+
+    #[test]
+    fn parse_port_mappings_missing_slash_skipped() {
+        let inspect = make_inspect(
+            r#"{
+                "Id": "no-slash-id",
+                "NetworkSettings": {
+                    "Ports": {
+                        "80": [
+                            { "HostIp": "0.0.0.0", "HostPort": "8080" }
+                        ]
+                    },
+                    "Networks": {
+                        "bridge": { "IPAddress": "172.17.0.11" }
+                    }
+                }
+            }"#,
+        );
+
+        let mappings = parse_port_mappings(&inspect);
+
+        assert!(mappings.is_empty());
+    }
+
+    #[test]
+    fn parse_port_mappings_container_port_zero() {
+        let inspect = make_inspect(
+            r#"{
+                "Id": "port-zero-id",
+                "NetworkSettings": {
+                    "Ports": {
+                        "0/udp": [
+                            { "HostIp": "127.0.0.1", "HostPort": "5000" }
+                        ]
+                    },
+                    "Networks": {
+                        "bridge": { "IPAddress": "172.17.0.12" }
+                    }
+                }
+            }"#,
+        );
+
+        let mappings = parse_port_mappings(&inspect);
+
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].container_addr.port(), 0);
+        assert_eq!(mappings[0].host_addr.port(), 5000);
+        assert_eq!(mappings[0].proto, TransportProtocol::Udp);
+    }
+
+    #[test]
+    fn parse_port_mappings_max_container_port() {
+        let inspect = make_inspect(
+            r#"{
+                "Id": "max-port-id",
+                "NetworkSettings": {
+                    "Ports": {
+                        "65535/tcp": [
+                            { "HostIp": "127.0.0.1", "HostPort": "65535" }
+                        ]
+                    },
+                    "Networks": {
+                        "bridge": { "IPAddress": "172.17.0.13" }
+                    }
+                }
+            }"#,
+        );
+
+        let mappings = parse_port_mappings(&inspect);
+
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].container_addr.port(), 65535);
+        assert_eq!(mappings[0].host_addr.port(), 65535);
+        assert_eq!(mappings[0].proto, TransportProtocol::Tcp);
+    }
+
+    #[test]
+    fn parse_port_mappings_host_port_zero() {
+        let inspect = make_inspect(
+            r#"{
+                "Id": "host-zero-id",
+                "NetworkSettings": {
+                    "Ports": {
+                        "80/tcp": [
+                            { "HostIp": "127.0.0.1", "HostPort": "0" }
+                        ]
+                    },
+                    "Networks": {
+                        "bridge": { "IPAddress": "172.17.0.14" }
+                    }
+                }
+            }"#,
+        );
+
+        let mappings = parse_port_mappings(&inspect);
+
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(
+            mappings[0].host_addr,
+            SocketAddr::new(IpAddr::from_str("127.0.0.1").unwrap(), 0)
+        );
+    }
+
+    #[test]
+    fn parse_port_mappings_host_port_range_from_zero() {
+        let inspect = make_inspect(
+            r#"{
+                "Id": "host-range-zero-id",
+                "NetworkSettings": {
+                    "Ports": {
+                        "80/tcp": [
+                            { "HostIp": "127.0.0.1", "HostPort": "0-1023" }
+                        ]
+                    },
+                    "Networks": {
+                        "bridge": { "IPAddress": "172.17.0.15" }
+                    }
+                }
+            }"#,
+        );
+
+        let mappings = parse_port_mappings(&inspect);
+
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].host_addr.port(), 0);
+    }
+
+    #[test]
+    fn parse_port_mappings_invalid_host_port_skipped() {
+        let inspect = make_inspect(
+            r#"{
+                "Id": "bad-host-port-id",
+                "NetworkSettings": {
+                    "Ports": {
+                        "80/tcp": [
+                            { "HostIp": "0.0.0.0", "HostPort": "abc" }
+                        ]
+                    },
+                    "Networks": {
+                        "bridge": { "IPAddress": "172.17.0.16" }
+                    }
+                }
+            }"#,
+        );
+
+        let mappings = parse_port_mappings(&inspect);
+
+        assert!(mappings.is_empty());
+    }
+
+    #[test]
+    fn parse_port_mappings_empty_host_ip_returns_v4_and_v6() {
+        let inspect = make_inspect(
+            r#"{
+                "Id": "empty-host-ip-id",
+                "NetworkSettings": {
+                    "Ports": {
+                        "80/tcp": [
+                            { "HostIp": "", "HostPort": "8080" }
+                        ]
+                    },
+                    "Networks": {
+                        "bridge": { "IPAddress": "172.17.0.17" }
+                    }
+                }
+            }"#,
+        );
+
+        let mappings = parse_port_mappings(&inspect);
+
+        assert_eq!(mappings.len(), 2);
+        assert_eq!(
+            mappings[0].host_addr,
+            SocketAddr::new(IpAddr::from_str("0.0.0.0").unwrap(), 8080)
+        );
+        assert_eq!(
+            mappings[1].host_addr,
+            SocketAddr::new(IpAddr::from_str("::").unwrap(), 8080)
+        );
+    }
+
+    #[test]
+    fn parse_port_mappings_specific_ipv6_host_single() {
+        let inspect = make_inspect(
+            r#"{
+                "Id": "v6-host-id",
+                "NetworkSettings": {
+                    "Ports": {
+                        "80/tcp": [
+                            { "HostIp": "::1", "HostPort": "8080" }
+                        ]
+                    },
+                    "Networks": {
+                        "bridge": { "IPAddress": "172.17.0.18" }
+                    }
+                }
+            }"#,
+        );
+
+        let mappings = parse_port_mappings(&inspect);
+
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(
+            mappings[0].host_addr,
+            SocketAddr::new(IpAddr::from_str("::1").unwrap(), 8080)
+        );
+        assert_eq!(mappings[0].container_addr.port(), 80);
+    }
 }
