@@ -935,10 +935,6 @@ mod tests {
             self.fail_dnat_create.store(fail, Ordering::SeqCst);
         }
 
-        fn set_fail_hairpin_create(&self, fail: bool) {
-            self.fail_hairpin_create.store(fail, Ordering::SeqCst);
-        }
-
         fn set_fail_dnat_delete(&self, fail: bool) {
             self.fail_dnat_delete.store(fail, Ordering::SeqCst);
         }

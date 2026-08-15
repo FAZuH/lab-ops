@@ -865,10 +865,6 @@ pub(crate) mod tests {
         fn set_fail_dnat(&self, fail: bool) {
             self.fail_dnat.store(fail, Ordering::SeqCst);
         }
-
-        fn set_fail_hairpin(&self, fail: bool) {
-            self.fail_hairpin.store(fail, Ordering::SeqCst);
-        }
     }
 
     impl Iptables for FakeIptables {
@@ -1662,8 +1658,10 @@ pub(crate) mod tests {
             fake.clone(),
             ports.clone(),
         );
-        let mut daemon_state = DaemonState::default();
-        daemon_state.dnats = vec![make_dnat("39030")];
+        let mut daemon_state = DaemonState {
+            dnats: vec![make_dnat("39030")],
+            ..Default::default()
+        };
 
         daemon.reconcile_dnats(&mut daemon_state).await;
 
@@ -1683,8 +1681,10 @@ pub(crate) mod tests {
             ports.clone(),
         );
         fake.set_fail_dnat(true);
-        let mut daemon_state = DaemonState::default();
-        daemon_state.dnats = vec![make_dnat("39031")];
+        let mut daemon_state = DaemonState {
+            dnats: vec![make_dnat("39031")],
+            ..Default::default()
+        };
 
         daemon.reconcile_dnats(&mut daemon_state).await;
 
@@ -1703,8 +1703,10 @@ pub(crate) mod tests {
             fake.clone(),
             ports.clone(),
         );
-        let mut daemon_state = DaemonState::default();
-        daemon_state.hairpins = vec![make_hairpin("39032")];
+        let mut daemon_state = DaemonState {
+            hairpins: vec![make_hairpin("39032")],
+            ..Default::default()
+        };
 
         daemon.reconcile_hairpins(&mut daemon_state).await;
 
