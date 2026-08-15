@@ -15,7 +15,7 @@ services:
 
     let script = format!(
         r#"{setup}
-
+{wait}
 PORT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-local-app") | .value.Port')
 if [ -z "$PORT" ] || [ "$PORT" = "null" ]; then echo "FAIL: not registered with Consul" >&2; cat /tmp/discovery.log; exit 1; fi
 if [ "$PORT" != "3000" ]; then echo "FAIL: expected port 3000, got $PORT" >&2; exit 1; fi
@@ -28,6 +28,7 @@ kill %3 %2 %1 2>/dev/null || true
 sleep 1
 "#,
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
+        wait = wait_for_consul_service("it-local-app", 15),
     );
     let out = run(&script);
     assert_pass(&out, "local_service");
@@ -49,7 +50,7 @@ services:
 
     let script = format!(
         r#"{setup}
-
+{wait}
 PORT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-local-fwd") | .value.Port')
 if [ -z "$PORT" ] || [ "$PORT" = "null" ]; then echo "FAIL: not registered with Consul" >&2; exit 1; fi
 if [ "$PORT" != "40000" ]; then echo "FAIL: expected static port 40000, got $PORT" >&2; exit 1; fi
@@ -72,6 +73,7 @@ kill %3 %2 %1 2>/dev/null || true
 sleep 1
 "#,
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
+        wait = wait_for_consul_service("it-local-fwd", 15),
     );
     let out = run(&script);
     assert_pass(&out, "local_forwarding_remote");
