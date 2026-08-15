@@ -1,233 +1,125 @@
 //! Docker client helpers for discovering and inspecting container port mappings.
-
-use std::net::IpAddr;
-use std::net::SocketAddr;
-use std::str::FromStr;
+//!
+//! [`get_port_mappings`] is a thin wrapper over the shared lab-lib inspect
+//! API: lab-lib owns the inspect parsing, and this module converts the shared
+//! [`lab_ops_lab_lib::docker::PortMapping`] shape into natmap's [`DockerPortMap`] view.
 
 use bollard::Docker;
 use color_eyre::Result;
 
 use crate::models::DockerPortMap;
 use crate::models::DockerPortMapRequest;
-use crate::models::TransportProtocol;
 
 /// Connects to the local Docker daemon via its default Unix socket.
 pub fn connect() -> Result<Docker> {
     lab_ops_lab_lib::docker::connect()
 }
 
-/// Resolves a Docker host IP string into the list of IP addresses to bind.
-///
-/// When the host IP is empty or `"0.0.0.0"`, returns both `"0.0.0.0"` and
-/// `"::"` so that the mapping works for both IPv4 and IPv6 traffic.
-fn resolve_host_ips(host_ip: &str) -> Vec<&str> {
-    if host_ip.is_empty() || host_ip == "0.0.0.0" {
-        vec!["0.0.0.0", "::"]
-    } else {
-        vec![host_ip]
-    }
-}
-
-/// Parses a Docker container port/protocol string (e.g. `"80/tcp"`).
-fn parse_container_port_proto(s: &str) -> Option<(u16, TransportProtocol)> {
-    let (port_str, proto_str) = s.split_once('/')?;
-
-    let port = port_str.parse().ok()?;
-    let proto = proto_str.to_lowercase().parse().ok()?;
-    Some((port, proto))
-}
-
-/// Parses a host port string from a Docker `PortBinding`, handling ranges.
-///
-/// When the string contains a range (e.g. `"3000-3005"`), returns the first
-/// port in the range.
-fn parse_host_port(s: &str) -> Option<u16> {
-    s.split('-').next().and_then(|p| p.parse().ok())
-}
-
 /// Discovers all published port mappings for a container.
 ///
-/// Inspects the container's network settings and parses its exposed ports
-/// into [`DockerPortMap`] entries. Handles both IPv4 and IPv6 host
-/// bindings when the host IP is unspecified (`0.0.0.0`).
+/// Inspects the container via the shared lab-lib inspect API and converts each
+/// shared [`lab_ops_lab_lib::docker::PortMapping`] into a natmap [`DockerPortMap`].
 pub async fn get_port_mappings(docker: &Docker, c_id: &str) -> Result<Vec<DockerPortMap>> {
     let inspect = docker.inspect_container(c_id, None).await?;
-    let c_name = inspect
-        .name
-        .as_deref()
-        .map(lab_ops_lab_lib::docker::trim_container_name)
-        .unwrap_or("unknown")
-        .to_string();
+    let name = lab_ops_lab_lib::docker::parse_container_inspect(&inspect).name;
 
-    let Some(network_settings) = inspect.network_settings else {
-        return Ok(vec![]);
+    Ok(lab_ops_lab_lib::docker::parse_port_mappings(&inspect)
+        .into_iter()
+        .map(|mapping| mapping_from_port_mapping(mapping, c_id, &name))
+        .collect())
+}
+
+/// Converts a shared lab-lib [`lab_ops_lab_lib::docker::PortMapping`] into
+/// natmap's [`DockerPortMap`].
+///
+/// An empty container name falls back to `"unknown"`. The container ID in the
+/// map is the passed `c_id` — the rule comment format
+/// (`natmap:<container_id>:<host_port>`) depends on it.
+fn mapping_from_port_mapping(
+    mapping: lab_ops_lab_lib::docker::PortMapping,
+    c_id: &str,
+    name: &str,
+) -> DockerPortMap {
+    let container_name = if name.is_empty() {
+        "unknown".to_string()
+    } else {
+        name.to_string()
     };
-
-    // Find the primary container IP address. We check networks attached.
-    let Some(c_ip) = network_settings.networks.as_ref().and_then(|networks| {
-        networks.values().find_map(|net| {
-            net.ip_address
-                .as_ref()
-                .filter(|ip| !ip.is_empty())
-                .and_then(|ip| IpAddr::from_str(ip).ok())
-        })
-    }) else {
-        tracing::debug!(container.id = %c_id, "container has no IP address, skipping ports");
-        return Ok(vec![]);
-    };
-
-    let Some(ports) = network_settings.ports else {
-        return Ok(vec![]);
-    };
-
-    let mut mappings = vec![];
-    for (port_proto, bindings) in ports {
-        let Some(bindings) = bindings else { continue };
-
-        let Some((c_port, proto)) = parse_container_port_proto(&port_proto) else {
-            continue;
-        };
-
-        let container_addr = SocketAddr::new(c_ip, c_port);
-
-        for bind in bindings {
-            let Some(host_port) = bind.host_port.as_deref().and_then(parse_host_port) else {
-                continue;
-            };
-
-            let host_ip_str = bind.host_ip.as_deref().unwrap_or_default();
-            let ips = resolve_host_ips(host_ip_str);
-            mappings.extend(ips.iter().filter_map(|ip| {
-                let host_ip = IpAddr::from_str(ip).ok()?;
-                let req = DockerPortMapRequest {
-                    host_addr: SocketAddr::new(host_ip, host_port),
-                    container_addr,
-                    proto,
-                };
-                Some(DockerPortMap::new(0, req, c_id.to_string(), c_name.clone()))
-            }));
-        }
-    }
-
-    Ok(mappings)
+    DockerPortMap::new(
+        0,
+        DockerPortMapRequest {
+            host_addr: mapping.host_addr,
+            container_addr: mapping.container_addr,
+            proto: mapping.proto,
+        },
+        c_id.to_string(),
+        container_name,
+    )
 }
 
 #[cfg(test)]
 mod tests {
+    use std::net::IpAddr;
+    use std::net::SocketAddr;
+    use std::str::FromStr;
+
+    use lab_ops_lab_lib::docker::PortMapping;
+
     use super::*;
+    use crate::models::TransportProtocol;
 
-    // ── resolve_host_ips ──
+    // ── mapping_from_port_mapping ──
 
-    #[test]
-    fn resolve_ips_empty_returns_both() {
-        assert_eq!(resolve_host_ips(""), vec!["0.0.0.0", "::"]);
+    fn make_mapping() -> PortMapping {
+        PortMapping {
+            host_addr: SocketAddr::new(IpAddr::from_str("0.0.0.0").unwrap(), 8080),
+            container_addr: SocketAddr::new(IpAddr::from_str("172.17.0.2").unwrap(), 80),
+            proto: TransportProtocol::Tcp,
+        }
     }
 
     #[test]
-    fn resolve_ips_unspecified_ipv4_returns_both() {
-        assert_eq!(resolve_host_ips("0.0.0.0"), vec!["0.0.0.0", "::"]);
+    fn mapping_carries_fields_and_comment_uses_c_id() {
+        let m = mapping_from_port_mapping(make_mapping(), "abc123", "my-nginx");
+
+        assert_eq!(m.id, 0);
+        assert_eq!(m.container_id, "abc123");
+        assert_eq!(m.container_name, "my-nginx");
+        assert_eq!(m.rule_comment, "natmap:abc123:8080");
+        assert_eq!(
+            m.request.host_addr,
+            SocketAddr::new(IpAddr::from_str("0.0.0.0").unwrap(), 8080)
+        );
+        assert_eq!(
+            m.request.container_addr,
+            SocketAddr::new(IpAddr::from_str("172.17.0.2").unwrap(), 80)
+        );
+        assert_eq!(m.request.proto, TransportProtocol::Tcp);
     }
 
     #[test]
-    fn resolve_ips_specific_ipv4_returns_single() {
-        assert_eq!(resolve_host_ips("192.168.1.100"), vec!["192.168.1.100"]);
+    fn mapping_empty_name_falls_back_to_unknown() {
+        let m = mapping_from_port_mapping(make_mapping(), "c-id", "");
+
+        assert_eq!(m.container_name, "unknown");
+        assert_eq!(m.rule_comment, "natmap:c-id:8080");
     }
 
     #[test]
-    fn resolve_ips_ipv6_returns_single() {
-        assert_eq!(resolve_host_ips("::1"), vec!["::1"]);
-    }
+    fn mapping_ipv6_udp_preserved() {
+        let m = mapping_from_port_mapping(
+            PortMapping {
+                host_addr: SocketAddr::new(IpAddr::from_str("::").unwrap(), 8443),
+                container_addr: SocketAddr::new(IpAddr::from_str("::1").unwrap(), 443),
+                proto: TransportProtocol::Udp,
+            },
+            "v6-id",
+            "v6-svc",
+        );
 
-    #[test]
-    fn resolve_ips_loopback_returns_single() {
-        assert_eq!(resolve_host_ips("127.0.0.1"), vec!["127.0.0.1"]);
-    }
-
-    // ── parse_container_port_proto ──
-
-    #[test]
-    fn parse_port_proto_tcp() {
-        let (port, proto) = parse_container_port_proto("80/tcp").unwrap();
-        assert_eq!(port, 80);
-        assert_eq!(proto, TransportProtocol::Tcp);
-    }
-
-    #[test]
-    fn parse_port_proto_udp() {
-        let (port, proto) = parse_container_port_proto("19132/udp").unwrap();
-        assert_eq!(port, 19132);
-        assert_eq!(proto, TransportProtocol::Udp);
-    }
-
-    #[test]
-    fn parse_port_proto_no_proto_returns_none() {
-        assert!(parse_container_port_proto("80").is_none());
-    }
-
-    #[test]
-    fn parse_port_proto_invalid_port_returns_none() {
-        assert!(parse_container_port_proto("abc/tcp").is_none());
-    }
-
-    #[test]
-    fn parse_port_proto_invalid_proto_returns_none() {
-        assert!(parse_container_port_proto("80/xyz").is_none());
-    }
-
-    #[test]
-    fn parse_port_proto_empty_string_returns_none() {
-        assert!(parse_container_port_proto("").is_none());
-    }
-
-    #[test]
-    fn parse_port_proto_uppercase_proto() {
-        let (port, proto) = parse_container_port_proto("443/TCP").unwrap();
-        assert_eq!(port, 443);
-        assert_eq!(proto, TransportProtocol::Tcp);
-    }
-
-    #[test]
-    fn parse_port_proto_port_zero() {
-        let (port, proto) = parse_container_port_proto("0/udp").unwrap();
-        assert_eq!(port, 0);
-        assert_eq!(proto, TransportProtocol::Udp);
-    }
-
-    #[test]
-    fn parse_port_proto_max_port() {
-        let (port, _proto) = parse_container_port_proto("65535/tcp").unwrap();
-        assert_eq!(port, 65535);
-    }
-
-    // ── parse_host_port ──
-
-    #[test]
-    fn parse_host_port_simple() {
-        assert_eq!(parse_host_port("8080"), Some(8080));
-    }
-
-    #[test]
-    fn parse_host_port_range_returns_first() {
-        assert_eq!(parse_host_port("3000-3005"), Some(3000));
-    }
-
-    #[test]
-    fn parse_host_port_empty_returns_none() {
-        assert!(parse_host_port("").is_none());
-    }
-
-    #[test]
-    fn parse_host_port_invalid_returns_none() {
-        assert!(parse_host_port("abc").is_none());
-    }
-
-    #[test]
-    fn parse_host_port_zero() {
-        assert_eq!(parse_host_port("0"), Some(0));
-    }
-
-    #[test]
-    fn parse_host_port_range_from_zero() {
-        assert_eq!(parse_host_port("0-1023"), Some(0));
+        assert!(m.request.is_ipv6());
+        assert_eq!(m.request.proto, TransportProtocol::Udp);
+        assert_eq!(m.rule_comment, "natmap:v6-id:8443");
+        assert_eq!(m.container_name, "v6-svc");
     }
 }
