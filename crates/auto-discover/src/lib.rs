@@ -17,6 +17,4 @@ pub mod cli;
 mod config;
 mod consul;
 mod daemon;
-mod docker;
 mod forwarding;
-mod model;

@@ -25,10 +25,17 @@ The canonical `TransportProtocol` enum (`Tcp` / `Udp`) with serde, `Display`, an
 | `LAB_OPS_BIN` | `/usr/local/bin/lab-ops` | auto-discover |
 | `LAB_OPS_CMD` | `lab-ops` | auto-discover |
 
-### `docker.rs` — Docker Helpers
+### `docker.rs` — Docker Helpers & Shared Inspection
+
+The shared container-inspection contract, consumed by both `natmap` and `auto-discover`:
 
 - `connect()` — Connects to the local Docker daemon via `Docker::connect_with_local_defaults()`
 - `trim_container_name(name) -> &str` — Strips the leading `/` from Docker container names
+- `DockerClient` — Bollard client wrapper with `new()`, `list_running_containers()`, and `inspect_container(container_id)`. Both container methods return the shared `ContainerInfo` shape
+- `ContainerInfo {id, name, compose_project, ip, networks}` — The shared container shape. `ip` is the primary container IP: the first attached network (sorted by name) with an address. `networks` holds the per-network settings
+- `ContainerNetwork {name, ip, gateway}` — The settings for one network a container is attached to
+- `parse_container_inspect(inspect) -> ContainerInfo` — Parses a `ContainerInspectResponse` into the shared container shape
+- `parse_port_mappings(inspect) -> Vec<PortMapping>` — Parses the published port mappings from an inspect response
 
 ### `port.rs` — Port Utilities & Management
 
@@ -184,9 +191,7 @@ pub mod cli;
 mod config;
 mod consul;
 mod daemon;
-mod docker;
 mod forwarding;
-mod model;
 ```
 
 ### `cli.rs` — CLI Definitions
@@ -229,12 +234,15 @@ Orchestrates the full discovery lifecycle:
 - `run_config_watcher()` — Watch `discovery.yaml` for file changes and re-sync
 - `ensure_docker_mapping()` — Adds a Docker mapping via `lab_ops_natmap::client::NatmapClient` and returns the daemon-reported host port. A `Conflict`/`NotFound` response is non-fatal only for explicit host ports. A rejected dynamic request (`host_port: 0`) fails the sync
 
-### `docker.rs` — Docker Client
+### Docker (shared with lab-lib)
 
-Wraps bollard:
-- `list_running_containers()` — List running containers with metadata
-- `inspect_container()` — Inspect a single container by ID, returns all metadata
-- `get_container_ip(container_id)` — Free function running `docker inspect` for a container's first network IP (fallback when no `bind_ip`/`bind_interface` is configured); `parse_docker_inspect_output` is its pure parsing half
+auto-discover has no local docker module. It uses the shared `lab_ops_lab_lib::docker` types:
+
+- `DockerClient` — `list_running_containers()` and `inspect_container()` return the shared `ContainerInfo` shape
+- `ContainerInfo {id, name, compose_project, ip, networks}` — The shared container shape, including the primary container IP
+- `ContainerNetwork {name, ip, gateway}` — The settings for one network a container is attached to
+
+The IP fallback in `determine_consul_ip()` (see `daemon.rs` above) is: `bind_ip`, then `bind_interface`, then `ContainerInfo.ip`. `determine_consul_ip` no longer runs a `docker inspect` subprocess.
 
 ### `forwarding.rs` — Forwarding Rule Sync
 
