@@ -789,7 +789,11 @@ fn parse_socket_addrs(
 /// kind requires. Rule kind is attributed from the `natmap:*` comment prefix.
 fn parse_live_rule(line: &str) -> Option<LiveRule> {
     let comment = line.split_once("--comment ")?;
-    let comment = comment.1.trim().trim_matches('"');
+    let comment = comment.1.trim();
+    let comment = match comment.strip_prefix('"') {
+        Some(inner) => inner.split('"').next().unwrap_or(comment),
+        None => comment,
+    };
 
     let (kind, rest) = if let Some(rest) = comment.strip_prefix("natmap:dnat:") {
         (RuleKind::Dnat, rest)
@@ -1440,6 +1444,51 @@ mod tests {
     fn parse_live_rule_non_natmap_comment_returns_none() {
         let line = r#"-A PREROUTING -p tcp -m tcp --dport 22 -j DNAT --to-destination 10.0.0.5:22 -m comment --comment "docker:custom""#;
         assert!(parse_live_rule(line).is_none());
+    }
+
+    #[test]
+    fn parse_live_rule_single_port_dnat_iptables_save_order() {
+        // Real `iptables-save` renders the comment BEFORE the jump target.
+        let line = r#"-A PREROUTING -d 203.0.113.50/32 -p tcp -m tcp --dport 36002 -m comment --comment "natmap:dnat:203.0.113.50:36002" -j DNAT --to-destination 10.0.0.99:36002"#;
+        let rule = parse_live_rule(line).unwrap();
+        assert_eq!(rule.kind, RuleKind::Dnat);
+        assert_eq!(rule.ext_ip, "203.0.113.50");
+        assert_eq!(rule.int_ip, "10.0.0.99");
+        assert_eq!(rule.ports, vec![36002]);
+        assert_eq!(rule.proto, TransportProtocol::Tcp);
+    }
+
+    #[test]
+    fn parse_live_rule_multiport_dnat_iptables_save_order() {
+        let line = r#"-A PREROUTING -d 203.0.113.50/32 -p tcp -m multiport --dports 80,443 -m comment --comment "natmap:dnat:203.0.113.50:80,443" -j DNAT --to-destination 10.0.0.99"#;
+        let rule = parse_live_rule(line).unwrap();
+        assert_eq!(rule.kind, RuleKind::Dnat);
+        assert_eq!(rule.ext_ip, "203.0.113.50");
+        assert_eq!(rule.int_ip, "10.0.0.99");
+        assert_eq!(rule.ports, vec![80, 443]);
+        assert_eq!(rule.proto, TransportProtocol::Tcp);
+    }
+
+    #[test]
+    fn parse_live_rule_hairpin_dnat_iptables_save_order() {
+        let line = r#"-A PREROUTING -s 10.0.0.99/32 -d 203.0.113.50/32 -p tcp -m tcp --dport 80 -m comment --comment "natmap:hairpin:203.0.113.50:10.0.0.99:80" -j DNAT --to-destination 10.0.0.99"#;
+        let rule = parse_live_rule(line).unwrap();
+        assert_eq!(rule.kind, RuleKind::Hairpin);
+        assert_eq!(rule.ext_ip, "203.0.113.50");
+        assert_eq!(rule.int_ip, "10.0.0.99");
+        assert_eq!(rule.ports, vec![80]);
+        assert_eq!(rule.proto, TransportProtocol::Tcp);
+    }
+
+    #[test]
+    fn parse_live_rule_docker_mapping_iptables_save_order() {
+        let line = r#"-A NATMAP -p tcp -d 100.64.0.10/32 -m tcp --dport 8080 -m comment --comment "natmap:c1:8080" -j DNAT --to-destination 10.0.0.2:80"#;
+        let rule = parse_live_rule(line).unwrap();
+        assert_eq!(rule.kind, RuleKind::Mapping);
+        assert_eq!(rule.ext_ip, "100.64.0.10");
+        assert_eq!(rule.int_ip, "10.0.0.2");
+        assert_eq!(rule.ports, vec![8080]);
+        assert_eq!(rule.proto, TransportProtocol::Tcp);
     }
 
     #[tokio::test]
