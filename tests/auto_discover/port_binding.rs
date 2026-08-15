@@ -124,7 +124,7 @@ services:
 
     let script = format!(
         r#"{setup}
-
+{wait}
 PORT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-local-fwd-local") | .value.Port')
 if [ -z "$PORT" ] || [ "$PORT" = "null" ]; then echo "FAIL: not registered with Consul" >&2; exit 1; fi
 if [ "$PORT" != "50000" ]; then echo "FAIL: expected static port 50000, got $PORT" >&2; exit 1; fi
@@ -144,6 +144,7 @@ kill %3 %2 %1 2>/dev/null || true
 sleep 1
 "#,
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
+        wait = wait_for_consul_service("it-local-fwd-local", 15),
     );
     let out = run(&script);
     assert_pass(&out, "local_forwarding_local_bind_port");

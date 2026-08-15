@@ -113,12 +113,12 @@ pub(crate) fn new_format_setup_with_defaults_ext(
     extra_setup: &str,
     daemon_flags: &str,
 ) -> String {
-    let full_yaml = format!(
-        r#"node:
-  name: int-test-node
-{defaults_yaml}
-{services_yaml}"#
-    );
+    let defaults_block = if defaults_yaml.is_empty() {
+        String::new()
+    } else {
+        format!("defaults:\n{defaults_yaml}\n")
+    };
+    let full_yaml = format!("node:\n  name: int-test-node\n\n{defaults_block}{services_yaml}");
     format!(
         r#"
 set -e
@@ -150,6 +150,28 @@ lab-ops auto-discover daemon /tmp/discovery.yaml \
     >/tmp/discovery.log 2>&1 &
 for i in $(seq 1 20); do kill -0 $! 2>/dev/null && break; sleep 0.2; done
 if ! kill -0 $! 2>/dev/null; then echo "FAIL: auto-discover daemon died" >&2; cat /tmp/discovery.log; exit 1; fi
+"#
+    )
+}
+
+// --- Consul wait helpers ---
+
+/// Emits a shell snippet that polls Consul agent services until `service_name`
+/// appears, up to `max_wait_secs` seconds. Exits the script with FAIL if the
+/// service never registers.
+pub(crate) fn wait_for_consul_service(service_name: &str, max_wait_secs: u32) -> String {
+    format!(
+        r#"
+for i in $(seq 1 {max_wait_secs}); do
+  SVC=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services 2>/dev/null | jq -r 'to_entries[] | select(.value.Service == "{service_name}") | .key // empty' 2>/dev/null)
+  if [ -n "$SVC" ]; then break; fi
+  sleep 1
+done
+if [ -z "$SVC" ]; then
+  echo "FAIL: service {service_name} never registered with Consul" >&2
+  cat /tmp/discovery.log
+  exit 1
+fi
 "#
     )
 }
