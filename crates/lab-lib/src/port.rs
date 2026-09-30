@@ -98,6 +98,29 @@ impl PortAllocator {
     ///
     /// Returns an error if the port is already bound by another process.
     pub async fn allocate(&self, addr: SocketAddr, proto: TransportProtocol) -> Result<()> {
+        // `deallocate` releases by dropping the socket, and the port is not
+        // always bindable again on the very next attempt — the fd outlives the
+        // map entry by a moment. Releasing a stale mapping and immediately
+        // re-allocating the same port is a real daemon path (a recreated
+        // container keeps its host port), so retry briefly rather than fail.
+        const ATTEMPTS: u32 = 25;
+        const BACKOFF: std::time::Duration = std::time::Duration::from_millis(2);
+        let mut last = None;
+        for attempt in 0..ATTEMPTS {
+            match self.allocate_once(addr, proto).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    last = Some(e);
+                    if attempt + 1 < ATTEMPTS {
+                        tokio::time::sleep(BACKOFF).await;
+                    }
+                }
+            }
+        }
+        Err(last.unwrap_or_else(|| eyre!("Failed to reserve {addr}")))
+    }
+
+    async fn allocate_once(&self, addr: SocketAddr, proto: TransportProtocol) -> Result<()> {
         let socket_type = match proto {
             TransportProtocol::Tcp => Type::STREAM,
             TransportProtocol::Udp => Type::DGRAM,
@@ -173,7 +196,58 @@ impl PortAllocator {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+
+    #[tokio::test]
+    async fn released_port_is_immediately_reallocatable() {
+        // Load check, not a reproduction. The rebind this covers failed
+        // intermittently only in the full parallel `lab-ops_natmap --lib`
+        // suite (5 failures in 40 runs) and never in this binary, so it cannot
+        // be turned into a test that fails without the retry in `allocate`.
+        // What this does guard: 2560 rebinds under concurrency, plus — in
+        // `allocate_fails_for_port_held_outside_the_allocator` — that the
+        // retry does not paper over a genuine conflict.
+        let allocator = Arc::new(PortAllocator::new());
+        let mut tasks = Vec::new();
+        for t in 0..64u16 {
+            let allocator = allocator.clone();
+            tasks.push(tokio::spawn(async move {
+                for i in 0..40u16 {
+                    let addr: SocketAddr =
+                        format!("127.0.0.1:{}", 21000 + t * 40 + i).parse().unwrap();
+                    allocator
+                        .allocate(addr, TransportProtocol::Tcp)
+                        .await
+                        .unwrap();
+                    allocator.deallocate(addr).await;
+                    allocator
+                        .allocate(addr, TransportProtocol::Tcp)
+                        .await
+                        .unwrap_or_else(|e| panic!("rebind of {addr} failed: {e:#}"));
+                }
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn allocate_fails_for_port_held_outside_the_allocator() {
+        // The retry must not turn a genuine conflict into a success.
+        let allocator = PortAllocator::new();
+        let addr: SocketAddr = "127.0.0.1:21999".parse().unwrap();
+        let held = std::net::TcpListener::bind(addr).unwrap();
+        assert!(
+            allocator
+                .allocate(addr, TransportProtocol::Tcp)
+                .await
+                .is_err()
+        );
+        drop(held);
+    }
 
     #[tokio::test]
     async fn is_allocated_returns_true_for_reserved_port() {

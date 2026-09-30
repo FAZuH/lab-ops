@@ -31,7 +31,16 @@ When a rule is removed:
 
 1. iptables rules are deleted first.
 2. The `ReservedSocket` entry is removed from the HashMap.
-3. Rust drops the value, which closes the underlying file descriptor and releases the port.
+3. Rust drops the value, closing the underlying file descriptor.
+
+Releasing a port and taking it straight back is a normal path, not an edge
+case: when a container is recreated, `apply_discovered_mappings` deallocates the
+stale mapping's port and immediately re-allocates the same one. Step 3 is not
+synchronous with respect to the next `bind()` — the descriptor outlives the map
+entry by a moment, so the rebind intermittently failed with `EADDRINUSE`.
+`PortAllocator::allocate` therefore retries a bind up to 25 times with a 2 ms
+gap (~50 ms ceiling). A port genuinely held by another process still fails, and
+still surfaces as `409 Conflict`; it just takes up to ~50 ms to say so.
 
 ## Why IP_FREEBIND?
 

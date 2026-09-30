@@ -609,7 +609,7 @@ impl IptablesManager {
                 .collect::<Vec<_>>()
                 .join(" ");
             let program = program.as_ref().to_string_lossy();
-            tracing::error!(program = %program, args = %args_str, error = %err, "command failed");
+            tracing::error!(program = %program, args = %args_str, error = %format!("{err:#}"), "command failed");
             bail!("{program} failed: {err}");
         }
     }

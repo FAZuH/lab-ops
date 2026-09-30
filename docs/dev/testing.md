@@ -34,6 +34,21 @@ Located in `#[cfg(test)] mod tests { }` blocks within source files.
 | `crates/auto-discover/src/daemon.rs` | 2 | Tracing span fields on container events |
 | `crates/auto-discover/src/forwarding.rs` | 27 | `group_forwarding_services`, `parse_dnat_rule`, 5 proptest invariants, edge cases |
 
+#### Test ports
+
+`PortAllocator` reserves by really binding a socket, so a test that hardcodes a
+host port collides with anything else holding it — another test run on the same
+box, or a service. Tests that bind take their port from
+`daemon::tests::test_port()` / `test_ports(n)` instead. Those hand out counted
+ports from a band that starts at 21000, which matters twice over: the ports sit
+below `EPHEMERAL_PORT_START` (32768) so the daemon's own `allocate_free_port`
+scan cannot take one, and the band is offset per process so two concurrent runs
+of the same test binary do not land on each other. Never hardcode a port in a
+test that reaches `allocate`.
+
+The per-file counts above and the totals drift; they are a guide, not a gate.
+`cargo test -p <crate>` is the source of truth.
+
 
 **Total: 88 inline unit tests**
 

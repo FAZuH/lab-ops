@@ -633,7 +633,7 @@ pub async fn remove_mapping_by_id(
     Path(id): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     let mut lock = state.daemon_state.write().await;
-    for (_, mappings) in lock.mapping.iter_mut() {
+    for mappings in lock.mapping.values_mut() {
         if let Some(pos) = mappings.iter().position(|m| m.id == id) {
             let m = mappings.remove(pos);
             let _ = state.iptables.remove_mapping(&m);
@@ -801,10 +801,9 @@ fn parse_live_rule(line: &str) -> Option<LiveRule> {
         (RuleKind::Hairpin, rest)
     } else if let Some(rest) = comment.strip_prefix("natmap:snat:") {
         (RuleKind::Snat, rest)
-    } else if let Some(rest) = comment.strip_prefix("natmap:") {
-        (RuleKind::Mapping, rest)
     } else {
-        return None;
+        let rest = comment.strip_prefix("natmap:")?;
+        (RuleKind::Mapping, rest)
     };
 
     let proto = match line.split(" -p ").nth(1) {
@@ -942,6 +941,7 @@ mod tests {
     use super::*;
     use crate::daemon::tests::FakeIptables;
     use crate::daemon::tests::test_app_state_with;
+    use crate::daemon::tests::test_port;
     use crate::iptables::IptablesManager;
     use crate::models::*;
     use crate::policy_route::PolicyRouteManager;
@@ -1199,19 +1199,16 @@ mod tests {
     async fn add_mapping_taken_host_port_returns_conflict() {
         let fake = Arc::new(FakeIptables::default());
         let state = test_app_state_with(fake.clone());
-        let addr = make_addr(39040);
-        if state
+        let host_port = test_port();
+        let addr = make_addr(host_port);
+        state
             .ports
             .allocate(addr, TransportProtocol::Tcp)
             .await
-            .is_err()
-        {
-            // OS ephemeral traffic may transiently hold the port — skip
-            return;
-        }
+            .unwrap();
         let req = DockerAddMapRequest {
             host_ip: "127.0.0.1".into(),
-            host_port: 39040,
+            host_port,
             container_port: 80,
             target_ip: Some("10.0.0.2".into()),
             proto: TransportProtocol::Tcp,

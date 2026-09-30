@@ -236,7 +236,7 @@ async fn apply_forwarding_group(natmap: &impl NatmapOps, group: &ForwardingGroup
             int.ip = %group.int_ip,
             ports = %ports_csv,
             proto = %group.proto,
-            error = %e,
+            error = %format!("{e:#}"),
             "failed to delete existing dnat rule"
         );
     }
@@ -260,7 +260,7 @@ async fn apply_forwarding_group(natmap: &impl NatmapOps, group: &ForwardingGroup
             int.ip = %group.int_ip,
             ports = %ports_csv,
             proto = %group.proto,
-            error = %e,
+            error = %format!("{e:#}"),
             "failed to create dnat rule"
         );
     }
@@ -272,7 +272,7 @@ async fn apply_forwarding_group(natmap: &impl NatmapOps, group: &ForwardingGroup
                 Err(e) => {
                     tracing::warn!(
                         int.ip = %group.int_ip,
-                        error = %e,
+                        error = %format!("{e:#}"),
                         "failed to detect LAN CIDR, skipping hairpin source restriction"
                     );
                     None
@@ -300,7 +300,7 @@ async fn apply_forwarding_group(natmap: &impl NatmapOps, group: &ForwardingGroup
                 int.ip = %group.int_ip,
                 ports = %ports_csv,
                 proto = %group.proto,
-                error = %e,
+                error = %format!("{e:#}"),
                 "failed to delete existing hairpin rule"
             );
         }
@@ -323,7 +323,7 @@ async fn apply_forwarding_group(natmap: &impl NatmapOps, group: &ForwardingGroup
                 int.ip = %group.int_ip,
                 ports = %ports_csv,
                 proto = %group.proto,
-                error = %e,
+                error = %format!("{e:#}"),
                 "hairpin creation failed (non-fatal)"
             );
         }
@@ -384,7 +384,7 @@ async fn delete_stale_rule(natmap: &impl NatmapOps, rule: &LiveRule) {
             int.ip = %rule.int_ip,
             ports = %ports_csv,
             proto = %rule.proto,
-            error = %e,
+            error = %format!("{e:#}"),
             "failed to delete stale forwarding rule"
         );
     }
@@ -575,10 +575,7 @@ mod tests {
             .get("protocol")
             .and_then(|v| v.as_str())
             .unwrap_or("tcp");
-        if ext_ip != g.ext_ip || address != g.int_ip || proto != g.proto {
-            return Some(false);
-        }
-        Some(true)
+        Some(!(ext_ip != g.ext_ip || address != g.int_ip || proto != g.proto))
     }
 
     proptest! {
