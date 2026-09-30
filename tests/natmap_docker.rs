@@ -1,6 +1,8 @@
 #[cfg(feature = "docker-tests")]
 mod natmap_docker {
+    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
+    use std::path::PathBuf;
     use std::process::Command;
     use std::sync::Once;
 
@@ -31,21 +33,47 @@ mod natmap_docker {
         image_name
     }
 
+    /// A NixOS host links lab-ops against a loader and an OpenSSL under
+    /// /nix/store that the test image lacks, so the binary cannot exec.
+    /// Mounting /nix fixes the loader, but the lib still needs to be on the
+    /// loader path, and setting LD_LIBRARY_PATH for the whole container
+    /// shadows the image's own OpenSSL-linked tools: nix libcrypto's RUNPATH
+    /// pulls nix glibc's libdl into curl, which then fails against the
+    /// image's glibc. So put the path on a wrapper around the binary alone.
+    /// Returns the wrapper to bind-mount over lab-ops, or None off NixOS.
+    fn nix_wrapper(label: &str) -> Option<PathBuf> {
+        if !Path::new("/nix").is_dir() {
+            return None;
+        }
+        let lib_dir = std::env::var("OPENSSL_LIB_DIR").ok()?;
+        let wrapper = std::env::temp_dir().join(format!("lab-ops-{label}-wrapper.sh"));
+        let script = format!(
+            "#!/bin/sh\nexec env LD_LIBRARY_PATH={lib_dir} /usr/local/bin/lab-ops.bin \"$@\"\n"
+        );
+        std::fs::write(&wrapper, script).ok()?;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).ok()?;
+        Some(wrapper)
+    }
+
     fn run_in_docker(args: &[&str]) -> String {
         let image = setup_docker_image();
         let binary_path = env!("CARGO_BIN_EXE_lab-ops");
         let mut cmd = Command::new("docker");
-        cmd.args([
-            "run",
-            "--rm",
-            "--privileged",
-            "-v",
-            &format!("{binary_path}:/usr/local/bin/lab-ops"),
-        ]);
-        // A NixOS host links lab-ops against a loader under /nix/store, which
-        // the test image lacks, so the binary cannot exec. No-op elsewhere.
-        if Path::new("/nix").is_dir() {
-            cmd.args(["-v", "/nix:/nix:ro"]);
+        cmd.args(["run", "--rm", "--privileged"]);
+        match nix_wrapper("natmap-docker") {
+            Some(wrapper) => {
+                cmd.args([
+                    "-v",
+                    "/nix:/nix:ro",
+                    "-v",
+                    &format!("{binary_path}:/usr/local/bin/lab-ops.bin"),
+                    "-v",
+                    &format!("{}:/usr/local/bin/lab-ops:ro", wrapper.display()),
+                ]);
+            }
+            None => {
+                cmd.args(["-v", &format!("{binary_path}:/usr/local/bin/lab-ops")]);
+            }
         }
         cmd.args([image, "sh", "-c"]);
 
