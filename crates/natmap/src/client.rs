@@ -208,6 +208,7 @@ mod tests {
     use crate::daemon::build_router;
     use crate::daemon::tests::FakeIptables;
     use crate::daemon::tests::test_app_state_with;
+    use crate::daemon::tests::test_port;
     use crate::iptables::IptablesManager;
     use crate::models::DockerAddMapRequest;
     use crate::models::DockerRemapRequest;
@@ -281,10 +282,11 @@ mod tests {
         let state = test_app_state();
         // Pre-allocate the port so the daemon's bind_ports returns 409.
         // Loopback binds fine without freebind privileges.
+        let port = test_port();
         state
             .ports
             .allocate(
-                SocketAddr::from(([127, 0, 0, 1], 8080)),
+                SocketAddr::from(([127, 0, 0, 1], port)),
                 TransportProtocol::Tcp,
             )
             .await
@@ -295,7 +297,7 @@ mod tests {
         let config = DnatConfig {
             ext_ip: "127.0.0.1".into(),
             int_ip: "10.0.0.99".into(),
-            ports: "8080".into(),
+            ports: port.to_string(),
             proto: TransportProtocol::Tcp,
             ext_if: None,
             preserve_src_ip: false,

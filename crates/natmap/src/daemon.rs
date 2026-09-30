@@ -930,6 +930,35 @@ pub(crate) mod tests {
         SocketAddr::new(IpAddr::from([127, 0, 0, 1]), port)
     }
 
+    /// Hands out `n` distinct host ports for a test to bind.
+    ///
+    /// [`PortAllocator`] reserves by really binding the socket, so a hardcoded
+    /// port collides with whatever else holds it — a second concurrent test
+    /// run, or a service on the box. Three properties keep that from biting:
+    ///
+    /// - The ports sit below [`EPHEMERAL_PORT_START`](crate::api::EPHEMERAL_PORT_START),
+    ///   so the daemon's own `allocate_free_port` scan (32768..=61000) can never
+    ///   take one. Handing out OS-assigned ephemeral ports does not have this
+    ///   property: that scan starts at the bottom of the ephemeral range and
+    ///   steals them.
+    /// - The band is offset per process, so two concurrent runs of this test
+    ///   binary land in different bands.
+    /// - They are counted up rather than probed, so each test's ports are
+    ///   distinct by construction and there is no bind/drop/rebind window for
+    ///   another party to win.
+    pub(crate) fn test_ports(n: usize) -> Vec<u16> {
+        static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+        // 400 bands of 24, all below 32768.
+        let base = 21000 + (std::process::id() as u16 % 400) * 24;
+        (0..n)
+            .map(|_| base + NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+            .collect()
+    }
+
+    pub(crate) fn test_port() -> u16 {
+        test_ports(1)[0]
+    }
+
     fn make_mapping(id: u64, host_port: u16, ctn_port: u16, container_id: &str) -> DockerPortMap {
         DockerPortMap::new(
             id,
@@ -1258,14 +1287,15 @@ pub(crate) mod tests {
     async fn ensure_docker_mapping_allocates_and_installs() {
         let fake = Arc::new(FakeIptables::default());
         let ports = Arc::new(PortAllocator::new());
-        let mapping = make_mapping(1, 39010, 8080, "c1");
+        let mapping = make_mapping(1, test_port(), 8080, "c1");
+        let host_addr = mapping.request.host_addr;
 
         ensure_docker_mapping(&ports, fake.as_ref(), &mapping)
             .await
             .unwrap();
 
         assert_eq!(fake.installed_mappings(), vec![mapping]);
-        assert!(ports.is_allocated(make_addr(39010)).await);
+        assert!(ports.is_allocated(host_addr).await);
     }
 
     #[tokio::test]
@@ -1274,29 +1304,31 @@ pub(crate) mod tests {
         let ports = Arc::new(PortAllocator::new());
         fake.set_fail_dockermap(true);
 
+        let port = test_port();
         let result =
-            ensure_docker_mapping(&ports, fake.as_ref(), &make_mapping(1, 39011, 8080, "c1")).await;
+            ensure_docker_mapping(&ports, fake.as_ref(), &make_mapping(1, port, 8080, "c1")).await;
 
         assert!(result.is_err());
         assert!(fake.installed_mappings().is_empty());
-        assert!(!ports.is_allocated(make_addr(39011)).await);
+        assert!(!ports.is_allocated(make_addr(port)).await);
     }
 
     #[tokio::test]
     async fn ensure_docker_mapping_fails_when_port_held() {
         let fake = Arc::new(FakeIptables::default());
         let ports = Arc::new(PortAllocator::new());
+        let port = test_port();
         ports
-            .allocate(make_addr(39012), TransportProtocol::Tcp)
+            .allocate(make_addr(port), TransportProtocol::Tcp)
             .await
             .unwrap();
 
         let result =
-            ensure_docker_mapping(&ports, fake.as_ref(), &make_mapping(1, 39012, 8080, "c1")).await;
+            ensure_docker_mapping(&ports, fake.as_ref(), &make_mapping(1, port, 8080, "c1")).await;
 
         assert!(result.is_err());
         assert!(fake.installed_mappings().is_empty());
-        assert!(ports.is_allocated(make_addr(39012)).await);
+        assert!(ports.is_allocated(make_addr(port)).await);
     }
 
     // --- Apply discovered mappings ---
@@ -1311,7 +1343,8 @@ pub(crate) mod tests {
             fake.clone(),
             ports.clone(),
         );
-        let stale = make_mapping(5, 39001, 8080, "old");
+        let port = test_port();
+        let stale = make_mapping(5, port, 8080, "old");
         daemon
             .state
             .daemon_state
@@ -1320,21 +1353,21 @@ pub(crate) mod tests {
             .mapping
             .insert("old".into(), vec![stale.clone()]);
         ports
-            .allocate(make_addr(39001), TransportProtocol::Tcp)
+            .allocate(make_addr(port), TransportProtocol::Tcp)
             .await
             .unwrap();
 
         let assigned = daemon
-            .apply_discovered_mappings("new", vec![make_mapping(0, 39001, 8080, "new")])
+            .apply_discovered_mappings("new", vec![make_mapping(0, port, 8080, "new")])
             .await;
 
         assert_eq!(fake.removed_mappings(), vec![stale]);
         assert_eq!(
             fake.installed_mappings(),
-            vec![make_mapping(1, 39001, 8080, "new")]
+            vec![make_mapping(1, port, 8080, "new")]
         );
-        assert_eq!(assigned, vec![make_mapping(1, 39001, 8080, "new")]);
-        assert!(ports.is_allocated(make_addr(39001)).await);
+        assert_eq!(assigned, vec![make_mapping(1, port, 8080, "new")]);
+        assert!(ports.is_allocated(make_addr(port)).await);
     }
 
     #[tokio::test]
@@ -1347,13 +1380,14 @@ pub(crate) mod tests {
             fake.clone(),
             ports.clone(),
         );
+        let port = test_port();
         ports
-            .allocate(make_addr(39002), TransportProtocol::Tcp)
+            .allocate(make_addr(port), TransportProtocol::Tcp)
             .await
             .unwrap();
 
         let assigned = daemon
-            .apply_discovered_mappings("new", vec![make_mapping(0, 39002, 8080, "new")])
+            .apply_discovered_mappings("new", vec![make_mapping(0, port, 8080, "new")])
             .await;
 
         assert!(assigned.is_empty());
@@ -1374,13 +1408,16 @@ pub(crate) mod tests {
             ports.clone(),
         );
 
+        let [p1, p2] = test_ports(2)[..] else {
+            unreachable!()
+        };
         let mut max_id = 0;
         let installed = daemon
             .ensure_container_mappings(
                 "c1",
                 vec![
-                    make_mapping(0, 39003, 8080, "c1"),
-                    make_mapping(0, 39004, 8081, "c1"),
+                    make_mapping(0, p1, 8080, "c1"),
+                    make_mapping(0, p2, 8081, "c1"),
                 ],
                 &mut max_id,
             )
@@ -1389,13 +1426,13 @@ pub(crate) mod tests {
         assert_eq!(
             installed,
             vec![
-                make_mapping(1, 39003, 8080, "c1"),
-                make_mapping(2, 39004, 8081, "c1"),
+                make_mapping(1, p1, 8080, "c1"),
+                make_mapping(2, p2, 8081, "c1"),
             ]
         );
         assert_eq!(max_id, 2);
-        assert!(ports.is_allocated(make_addr(39003)).await);
-        assert!(ports.is_allocated(make_addr(39004)).await);
+        assert!(ports.is_allocated(make_addr(p1)).await);
+        assert!(ports.is_allocated(make_addr(p2)).await);
     }
 
     #[tokio::test]
@@ -1410,14 +1447,15 @@ pub(crate) mod tests {
         );
         fake.set_fail_dockermap(true);
 
+        let port = test_port();
         let mut max_id = 0;
         let installed = daemon
-            .ensure_container_mappings("c1", vec![make_mapping(0, 39005, 8080, "c1")], &mut max_id)
+            .ensure_container_mappings("c1", vec![make_mapping(0, port, 8080, "c1")], &mut max_id)
             .await;
 
         assert!(installed.is_empty());
         assert_eq!(max_id, 0);
-        assert!(!ports.is_allocated(make_addr(39005)).await);
+        assert!(!ports.is_allocated(make_addr(port)).await);
     }
 
     // --- Reconcile tracked mapping ---
@@ -1445,8 +1483,9 @@ pub(crate) mod tests {
             fake.clone(),
             ports.clone(),
         );
-        let stored = make_tracked_mapping(7, 39006, "10.0.0.2:8080");
-        let current_addrs = HashMap::from([(make_addr(39006), make_addr(8080))]);
+        let port = test_port();
+        let stored = make_tracked_mapping(7, port, "10.0.0.2:8080");
+        let current_addrs = HashMap::from([(make_addr(port), make_addr(8080))]);
 
         let kept = daemon
             .reconcile_tracked_mapping("c1", stored.clone(), &current_addrs)
@@ -1455,7 +1494,7 @@ pub(crate) mod tests {
 
         assert_eq!(kept.request.container_addr, make_addr(8080));
         assert_eq!(fake.installed_mappings(), vec![kept.clone()]);
-        assert!(ports.is_allocated(make_addr(39006)).await);
+        assert!(ports.is_allocated(make_addr(port)).await);
     }
 
     #[tokio::test]
@@ -1468,11 +1507,12 @@ pub(crate) mod tests {
             fake.clone(),
             ports.clone(),
         );
+        let port = test_port();
         ports
-            .allocate(make_addr(39007), TransportProtocol::Tcp)
+            .allocate(make_addr(port), TransportProtocol::Tcp)
             .await
             .unwrap();
-        let stored = make_tracked_mapping(8, 39007, "10.0.0.2:8080");
+        let stored = make_tracked_mapping(8, port, "10.0.0.2:8080");
 
         let kept = daemon
             .reconcile_tracked_mapping("c1", stored, &HashMap::new())
@@ -1492,7 +1532,7 @@ pub(crate) mod tests {
             fake.clone(),
             ports.clone(),
         );
-        let stored = make_tracked_mapping(9, 39008, "10.0.0.2:8080");
+        let stored = make_tracked_mapping(9, test_port(), "10.0.0.2:8080");
 
         let kept = daemon
             .reconcile_tracked_mapping("c1", stored.clone(), &HashMap::new())
@@ -1512,28 +1552,30 @@ pub(crate) mod tests {
     async fn ensure_static_rule_allocates_and_installs_dnat() {
         let fake = Arc::new(FakeIptables::default());
         let ports = Arc::new(PortAllocator::new());
-        let config = make_dnat("39020");
+        let port = test_port();
+        let config = make_dnat(&port.to_string());
 
         ensure_static_rule(&ports, fake.as_ref(), StaticRule::Dnat(&config))
             .await
             .unwrap();
 
         assert_eq!(fake.installed_dnats(), vec![config]);
-        assert!(ports.is_allocated(make_addr(39020)).await);
+        assert!(ports.is_allocated(make_addr(port)).await);
     }
 
     #[tokio::test]
     async fn ensure_static_rule_allocates_and_installs_hairpin() {
         let fake = Arc::new(FakeIptables::default());
         let ports = Arc::new(PortAllocator::new());
-        let config = make_hairpin("39021");
+        let port = test_port();
+        let config = make_hairpin(&port.to_string());
 
         ensure_static_rule(&ports, fake.as_ref(), StaticRule::Hairpin(&config))
             .await
             .unwrap();
 
         assert_eq!(fake.installed_hairpins(), vec![config]);
-        assert!(ports.is_allocated(make_addr(39021)).await);
+        assert!(ports.is_allocated(make_addr(port)).await);
     }
 
     #[tokio::test]
@@ -1542,38 +1584,46 @@ pub(crate) mod tests {
         let ports = Arc::new(PortAllocator::new());
         fake.set_fail_dnat(true);
 
-        let result =
-            ensure_static_rule(&ports, fake.as_ref(), StaticRule::Dnat(&make_dnat("39022"))).await;
+        let port = test_port();
+        let result = ensure_static_rule(
+            &ports,
+            fake.as_ref(),
+            StaticRule::Dnat(&make_dnat(&port.to_string())),
+        )
+        .await;
 
         assert!(result.is_err());
         assert!(fake.installed_dnats().is_empty());
-        assert!(!ports.is_allocated(make_addr(39022)).await);
+        assert!(!ports.is_allocated(make_addr(port)).await);
     }
 
     #[tokio::test]
     async fn ensure_static_rule_rolls_back_reserved_ports_when_later_port_held() {
         let fake = Arc::new(FakeIptables::default());
         let ports = Arc::new(PortAllocator::new());
+        let [reserved, held_port] = test_ports(2)[..] else {
+            unreachable!()
+        };
         // Hold the second port at the OS level (outside the allocator) so
         // allocation fails mid-loop instead of being skipped.
-        let held = std::net::TcpListener::bind(make_addr(39034)).unwrap();
+        let held = std::net::TcpListener::bind(make_addr(held_port)).unwrap();
         let _ = &held;
 
         let result = ensure_static_rule(
             &ports,
             fake.as_ref(),
-            StaticRule::Dnat(&make_dnat("39033,39034")),
+            StaticRule::Dnat(&make_dnat(&format!("{reserved},{held_port}"))),
         )
         .await;
 
         assert!(result.is_err());
         assert!(fake.installed_dnats().is_empty());
         assert!(
-            !ports.is_allocated(make_addr(39033)).await,
+            !ports.is_allocated(make_addr(reserved)).await,
             "reserved port must be released on mid-loop failure"
         );
         ports
-            .allocate(make_addr(39033), TransportProtocol::Tcp)
+            .allocate(make_addr(reserved), TransportProtocol::Tcp)
             .await
             .unwrap();
     }
@@ -1582,8 +1632,11 @@ pub(crate) mod tests {
     async fn ensure_static_rule_rolls_back_partial_when_later_port_held() {
         let fake = Arc::new(FakeIptables::default());
         let ports = Arc::new(PortAllocator::new());
+        let [reserved, pre_held] = test_ports(2)[..] else {
+            unreachable!()
+        };
         ports
-            .allocate(make_addr(39024), TransportProtocol::Tcp)
+            .allocate(make_addr(pre_held), TransportProtocol::Tcp)
             .await
             .unwrap();
         fake.set_fail_dnat(true);
@@ -1591,18 +1644,18 @@ pub(crate) mod tests {
         let result = ensure_static_rule(
             &ports,
             fake.as_ref(),
-            StaticRule::Dnat(&make_dnat("39023,39024")),
+            StaticRule::Dnat(&make_dnat(&format!("{reserved},{pre_held}"))),
         )
         .await;
 
         assert!(result.is_err());
         assert!(fake.installed_dnats().is_empty());
         assert!(
-            !ports.is_allocated(make_addr(39023)).await,
+            !ports.is_allocated(make_addr(reserved)).await,
             "newly reserved port must be released"
         );
         assert!(
-            ports.is_allocated(make_addr(39024)).await,
+            ports.is_allocated(make_addr(pre_held)).await,
             "pre-held port must be untouched"
         );
     }
@@ -1611,19 +1664,22 @@ pub(crate) mod tests {
     async fn ensure_static_rule_skips_allocated_port() {
         let fake = Arc::new(FakeIptables::default());
         let ports = Arc::new(PortAllocator::new());
+        let [skipped, reserved] = test_ports(2)[..] else {
+            unreachable!()
+        };
         ports
-            .allocate(make_addr(39025), TransportProtocol::Tcp)
+            .allocate(make_addr(skipped), TransportProtocol::Tcp)
             .await
             .unwrap();
-        let config = make_dnat("39025,39026");
+        let config = make_dnat(&format!("{skipped},{reserved}"));
 
         ensure_static_rule(&ports, fake.as_ref(), StaticRule::Dnat(&config))
             .await
             .unwrap();
 
         assert_eq!(fake.installed_dnats(), vec![config]);
-        assert!(ports.is_allocated(make_addr(39025)).await);
-        assert!(ports.is_allocated(make_addr(39026)).await);
+        assert!(ports.is_allocated(make_addr(skipped)).await);
+        assert!(ports.is_allocated(make_addr(reserved)).await);
     }
 
     #[tokio::test]
@@ -1658,16 +1714,17 @@ pub(crate) mod tests {
             fake.clone(),
             ports.clone(),
         );
+        let port = test_port();
         let mut daemon_state = DaemonState {
-            dnats: vec![make_dnat("39030")],
+            dnats: vec![make_dnat(&port.to_string())],
             ..Default::default()
         };
 
         daemon.reconcile_dnats(&mut daemon_state).await;
 
-        assert_eq!(daemon_state.dnats, vec![make_dnat("39030")]);
-        assert_eq!(fake.installed_dnats(), vec![make_dnat("39030")]);
-        assert!(ports.is_allocated(make_addr(39030)).await);
+        assert_eq!(daemon_state.dnats, vec![make_dnat(&port.to_string())]);
+        assert_eq!(fake.installed_dnats(), vec![make_dnat(&port.to_string())]);
+        assert!(ports.is_allocated(make_addr(port)).await);
     }
 
     #[tokio::test]
@@ -1681,8 +1738,9 @@ pub(crate) mod tests {
             ports.clone(),
         );
         fake.set_fail_dnat(true);
+        let port = test_port();
         let mut daemon_state = DaemonState {
-            dnats: vec![make_dnat("39031")],
+            dnats: vec![make_dnat(&port.to_string())],
             ..Default::default()
         };
 
@@ -1690,7 +1748,7 @@ pub(crate) mod tests {
 
         assert!(daemon_state.dnats.is_empty());
         assert!(fake.installed_dnats().is_empty());
-        assert!(!ports.is_allocated(make_addr(39031)).await);
+        assert!(!ports.is_allocated(make_addr(port)).await);
     }
 
     #[tokio::test]
@@ -1703,15 +1761,19 @@ pub(crate) mod tests {
             fake.clone(),
             ports.clone(),
         );
+        let port = test_port();
         let mut daemon_state = DaemonState {
-            hairpins: vec![make_hairpin("39032")],
+            hairpins: vec![make_hairpin(&port.to_string())],
             ..Default::default()
         };
 
         daemon.reconcile_hairpins(&mut daemon_state).await;
 
-        assert_eq!(daemon_state.hairpins, vec![make_hairpin("39032")]);
-        assert_eq!(fake.installed_hairpins(), vec![make_hairpin("39032")]);
-        assert!(ports.is_allocated(make_addr(39032)).await);
+        assert_eq!(daemon_state.hairpins, vec![make_hairpin(&port.to_string())]);
+        assert_eq!(
+            fake.installed_hairpins(),
+            vec![make_hairpin(&port.to_string())]
+        );
+        assert!(ports.is_allocated(make_addr(port)).await);
     }
 }

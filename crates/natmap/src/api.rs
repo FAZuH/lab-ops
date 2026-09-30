@@ -941,6 +941,7 @@ mod tests {
     use super::*;
     use crate::daemon::tests::FakeIptables;
     use crate::daemon::tests::test_app_state_with;
+    use crate::daemon::tests::test_port;
     use crate::iptables::IptablesManager;
     use crate::models::*;
     use crate::policy_route::PolicyRouteManager;
@@ -1198,19 +1199,16 @@ mod tests {
     async fn add_mapping_taken_host_port_returns_conflict() {
         let fake = Arc::new(FakeIptables::default());
         let state = test_app_state_with(fake.clone());
-        let addr = make_addr(39040);
-        if state
+        let host_port = test_port();
+        let addr = make_addr(host_port);
+        state
             .ports
             .allocate(addr, TransportProtocol::Tcp)
             .await
-            .is_err()
-        {
-            // OS ephemeral traffic may transiently hold the port — skip
-            return;
-        }
+            .unwrap();
         let req = DockerAddMapRequest {
             host_ip: "127.0.0.1".into(),
-            host_port: 39040,
+            host_port,
             container_port: 80,
             target_ip: Some("10.0.0.2".into()),
             proto: TransportProtocol::Tcp,

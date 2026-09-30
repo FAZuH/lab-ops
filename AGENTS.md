@@ -25,12 +25,16 @@ Personal homelab utility tools. Rust workspace, edition **2024**.
 ### Quick Test Commands
 
 ```bash
-cargo test -p natmap                              # natmap unit tests only
-cargo test -p auto-discover                       # auto-discover unit tests only
+cargo test -p lab-ops_natmap                     # natmap unit tests only
+cargo test -p lab-ops_auto-discover              # auto-discover unit tests only
 cargo test -p lab-ops --test natmap_docker         # natmap Docker integration tests
 cargo test -p lab-ops --test auto_discover         # auto-discover Docker integration tests
 cargo test test_name -p crate_name                 # single test
 ```
+
+Package names carry the `lab-ops_` prefix (`lab-ops_natmap`,
+`lab-ops_auto-discover`). `cargo test -p natmap` fails — the directory is
+`crates/natmap/` but the package is not `natmap`.
 
 ## Key Conventions
 
