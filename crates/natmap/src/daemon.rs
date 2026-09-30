@@ -208,7 +208,7 @@ impl Daemon {
             let self_clone = self.clone();
             tokio::spawn(async move {
                 if let Err(e) = self_clone.listen_docker_events().await {
-                    tracing::error!(error = %e, "docker listener exited with error");
+                    tracing::error!(error = %format!("{e:#}"), "docker listener exited with error");
                 }
             });
         }
@@ -262,7 +262,7 @@ impl Daemon {
                     .serve_connection_with_upgrades(socket, srv)
                     .await
                 {
-                    tracing::error!(error = %err, "failed to serve connection");
+                    tracing::error!(error = %format!("{err:#}"), "failed to serve connection");
                 }
             });
         }
@@ -294,7 +294,7 @@ impl Daemon {
         let _ = self
             .reconcile_docker_portmaps(&mut daemon_state)
             .await
-            .map_err(|e| tracing::error!(error = %e, "error when reconciling docker portmaps"));
+            .map_err(|e| tracing::error!(error = %format!("{e:#}"), "error when reconciling docker portmaps"));
 
         // Reconcile NAT rules
         self.reconcile_hairpins(&mut daemon_state).await;
@@ -444,7 +444,7 @@ impl Daemon {
                 }
             }
             if let Err(e) = ensure_docker_mapping(&state.ports, state.iptables.as_ref(), &m).await {
-                tracing::warn!(mapping = ?m, error = %e, "failed to ensure mapping");
+                tracing::warn!(mapping = ?m, error = %format!("{e:#}"), "failed to ensure mapping");
                 continue;
             }
             assigned.push(m);
@@ -501,7 +501,7 @@ impl Daemon {
         if let Err(e) =
             ensure_docker_mapping(&self.state.ports, self.state.iptables.as_ref(), &m).await
         {
-            tracing::warn!(container.id = %container_id, mapping = ?m, error = %e,
+            tracing::warn!(container.id = %container_id, mapping = ?m, error = %format!("{e:#}"),
                 "failed to ensure mapping, dropping");
             return None;
         }
@@ -520,7 +520,7 @@ impl Daemon {
         for mut m in discovered {
             m.id = state.allocate_id();
             if let Err(e) = ensure_docker_mapping(&state.ports, state.iptables.as_ref(), &m).await {
-                tracing::warn!(container.id = %container_id, mapping = ?m, error = %e,
+                tracing::warn!(container.id = %container_id, mapping = ?m, error = %format!("{e:#}"),
                     "failed to ensure mapping for untracked container");
                 continue;
             }
@@ -612,7 +612,7 @@ impl Daemon {
             )
             .await
             {
-                tracing::warn!(hairpin = ?config, error = %e,
+                tracing::warn!(hairpin = ?config, error = %format!("{e:#}"),
                     "failed to reconcile hairpin rule, dropping");
             } else {
                 keep.push(config);
@@ -631,7 +631,7 @@ impl Daemon {
             )
             .await
             {
-                tracing::warn!(dnat = ?config, error = %e,
+                tracing::warn!(dnat = ?config, error = %format!("{e:#}"),
                     "failed to reconcile dnat rule, dropping");
             } else {
                 keep.push(config);
@@ -650,7 +650,7 @@ impl Daemon {
         let mut keep = Vec::new();
         for config in daemon_state.policy_routes.drain(..) {
             if let Err(e) = self.state.policy_route.install(&config) {
-                tracing::error!(error = %e, "failed to install policy route");
+                tracing::error!(error = %format!("{e:#}"), "failed to install policy route");
             } else {
                 keep.push(config);
             }

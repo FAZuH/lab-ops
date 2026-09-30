@@ -231,7 +231,7 @@ impl DiscoveryDaemon {
                                 sync_errors += 1;
                                 tracing::error!(
                                     service.id_prefix = %resolved.service_id_prefix,
-                                    error = %e,
+                                    error = %format!("{e:#}"),
                                     "failed to sync service"
                                 );
                             }
@@ -262,7 +262,7 @@ impl DiscoveryDaemon {
                                 sync_errors += 1;
                                 tracing::error!(
                                     service.id_prefix = %resolved.service_id_prefix,
-                                    error = %e,
+                                    error = %format!("{e:#}"),
                                     "failed to sync local service"
                                 );
                                 e
@@ -500,7 +500,7 @@ impl DiscoveryDaemon {
                 tracing::error!(
                     service.id_prefix = %resolved.service_id_prefix,
                     container.id = %&container_id[..12.min(container_id.len())],
-                    error = %e,
+                    error = %format!("{e:#}"),
                     "failed to sync service for container"
                 );
             }
@@ -541,7 +541,7 @@ impl DiscoveryDaemon {
                     )
                     .await
             {
-                tracing::warn!(error = %e, "failed to remove policy route");
+                tracing::warn!(error = %format!("{e:#}"), "failed to remove policy route");
             }
         }
 
@@ -594,13 +594,13 @@ impl DiscoveryDaemon {
             }
             Err(NatmapError::Conflict(e)) => {
                 tracing::warn!(
-                    error = %e,
+                    error = %format!("{e:#}"),
                     "natmap mapping already exists (409), registering with requested port"
                 );
                 Ok(host_port)
             }
             Err(NatmapError::NotFound(e)) => {
-                tracing::warn!(error = %e, "container not found, registering with requested port");
+                tracing::warn!(error = %format!("{e:#}"), "container not found, registering with requested port");
                 Ok(host_port)
             }
             Err(e) => Err(e).wrap_err("natmap command failed"),
@@ -1507,6 +1507,53 @@ mod tests {
 
         assert!(result.is_err());
         assert!(consul.registrations().is_empty());
+    }
+
+    /// Regression: every distinct natmap failure reaches the catch-all arm in
+    /// `ensure_docker_mapping`, whose context string is always "natmap command
+    /// failed". Logging `%e` renders only that outer context, so the log line
+    /// was identical no matter what actually went wrong — which is what made a
+    /// lab-wide registration outage undiagnosable from the journal.
+    #[tokio::test]
+    #[traced_test]
+    async fn sync_failure_log_carries_the_error_cause() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = r#"
+node:
+  name: test-node
+services:
+  web:
+    type: docker
+    bind_ip: 10.0.0.5
+    match:
+      project: myproj
+    forwardlocal:
+      - port: 8080
+        bind_port: 38080
+"#;
+        std::fs::write(dir.path().join("discovery.yaml"), config).unwrap();
+        let natmap = Arc::new(FakeNatmap::default());
+        natmap.fail_add_mapping.store(true, Ordering::SeqCst);
+        let consul = Arc::new(FakeConsul::default());
+        let running = vec![make_container_info("abc123def456", "web", Some("myproj"))];
+        let daemon = make_daemon(
+            &dir,
+            natmap.clone(),
+            consul.clone(),
+            Arc::new(FakeDocker::with_running(running)),
+        );
+
+        let _ = daemon.sync().await;
+
+        assert!(consul.registrations().is_empty());
+        assert!(
+            logs_contain("failed to sync service"),
+            "the failure must be logged at all"
+        );
+        assert!(
+            logs_contain("fake add_mapping failure"),
+            "the log must carry the cause, not just the wrap_err context"
+        );
     }
 
     #[tokio::test]
