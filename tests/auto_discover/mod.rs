@@ -8,6 +8,7 @@ mod recovery;
 mod registration;
 mod startup_race;
 
+use std::path::Path;
 use std::process::Command;
 use std::sync::Once;
 
@@ -56,10 +57,13 @@ pub(crate) fn run(script: &str) -> String {
         "NATMAP_SOCKET=/tmp/natmap.sock",
         "-e",
         "CONSUL_HTTP_ADDR=http://127.0.0.1:8500",
-        image,
-        "sh",
-        "-c",
     ]);
+    // A NixOS host links lab-ops against a loader under /nix/store, which the
+    // test image lacks, so the binary cannot exec. No-op elsewhere.
+    if Path::new("/nix").is_dir() {
+        cmd.args(["-v", "/nix:/nix:ro"]);
+    }
+    cmd.args([image, "sh", "-c"]);
     cmd.arg(script);
 
     let output = cmd.output().expect("Failed to execute docker run");

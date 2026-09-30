@@ -1,5 +1,6 @@
 #[cfg(feature = "docker-tests")]
 mod natmap_docker {
+    use std::path::Path;
     use std::process::Command;
     use std::sync::Once;
 
@@ -40,10 +41,13 @@ mod natmap_docker {
             "--privileged",
             "-v",
             &format!("{binary_path}:/usr/local/bin/lab-ops"),
-            image,
-            "sh",
-            "-c",
         ]);
+        // A NixOS host links lab-ops against a loader under /nix/store, which
+        // the test image lacks, so the binary cannot exec. No-op elsewhere.
+        if Path::new("/nix").is_dir() {
+            cmd.args(["-v", "/nix:/nix:ro"]);
+        }
+        cmd.args([image, "sh", "-c"]);
 
         let shell_cmd = args.join(" ");
         cmd.arg(&shell_cmd);
