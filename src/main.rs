@@ -57,6 +57,10 @@ fn main() -> Result<()> {
     // Use color for table output based on the resolved ANSI setting.
     let use_color = ansi;
 
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+
     match cli.command {
         Command::Completions { shell, dir } => {
             generate_completions(shell, dir.as_deref())?;
@@ -71,19 +75,12 @@ fn main() -> Result<()> {
             zone_id_var,
         } => cf2terra::run(zone_file, zone_name, zone_id_var)?,
         Command::DockerNet => {
-            use tokio::runtime::Builder;
-
-            let rt = Builder::new_current_thread().enable_all().build()?;
             rt.block_on(dockernet::run(use_color))?;
         }
         Command::NatMap { args } => {
-            use tokio::runtime::Builder;
-            let rt = Builder::new_current_thread().enable_all().build()?;
             rt.block_on(lab_ops_natmap::cli::run_cli(args, use_color))?;
         }
         Command::AutoDiscover { args } => {
-            use tokio::runtime::Builder;
-            let rt = Builder::new_current_thread().enable_all().build()?;
             rt.block_on(lab_ops_auto_discover::cli::run_cli(args))?;
         }
     };

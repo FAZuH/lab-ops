@@ -41,7 +41,6 @@ node:
 YAMLEOF
 
 lab-ops auto-discover daemon /tmp/discovery.yaml \
-    --state-dir /tmp/state \
     --no-forwarding \
     --consul-addr http://127.0.0.1:8500 \
     >/tmp/discovery.log 2>&1 &
@@ -62,7 +61,7 @@ kill $NATMAP_PID 2>/dev/null || true
 sleep 1
 rm -f /tmp/natmap.sock
 
-if lab-ops auto-discover sync /tmp/discovery.yaml --state-dir /tmp/state >/tmp/sync.log 2>&1; then
+if lab-ops auto-discover sync /tmp/discovery.yaml >/tmp/sync.log 2>&1; then
     echo "FAIL: sync should have exited non-zero (all natmap mappings errored)" >&2
     cat /tmp/sync.log
     exit 1

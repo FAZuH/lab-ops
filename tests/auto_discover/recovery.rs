@@ -11,8 +11,7 @@ sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: consul died"; cat /tmp/consul.l
 
 echo "invalid: yaml: {broken" > /tmp/bad-config.yaml
 
-mkdir -p /tmp/state
-lab-ops auto-discover sync /tmp/bad-config.yaml --state-dir /tmp/state 2>/tmp/sync-err.log && { echo "FAIL: sync should have failed"; exit 1; } || true
+lab-ops auto-discover sync /tmp/bad-config.yaml 2>/tmp/sync-err.log && { echo "FAIL: sync should have failed"; exit 1; } || true
 
 echo "PASS: sync correctly rejected invalid YAML"
 kill %1 2>/dev/null || true
@@ -68,7 +67,6 @@ SVC_BEFORE=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] 
 if [ -n "$SVC_BEFORE" ]; then echo "FAIL: service registered before daemon start" >&2; exit 1; fi
 
 lab-ops auto-discover daemon /tmp/discovery.yaml \
-    --state-dir /tmp/state \
     --no-forwarding \
     --consul-addr http://127.0.0.1:8500 \
     >/tmp/discovery.log 2>&1 &
@@ -132,7 +130,6 @@ node:
 YAMLEOF
 
 lab-ops auto-discover daemon /tmp/discovery.yaml \
-    --state-dir /tmp/state \
     --no-forwarding \
     --consul-addr http://127.0.0.1:8500 \
     >/tmp/discovery.log 2>&1 &
@@ -208,7 +205,7 @@ services:
       - it-svc-cfg-a.test.local
 YAMLEOF
 
-lab-ops auto-discover daemon /tmp/discovery.yaml --state-dir /tmp/state --no-forwarding --consul-addr $CONSUL_HTTP_ADDR >/tmp/discovery.log 2>&1 &
+lab-ops auto-discover daemon /tmp/discovery.yaml --no-forwarding --consul-addr $CONSUL_HTTP_ADDR >/tmp/discovery.log 2>&1 &
 sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: daemon died"; cat /tmp/discovery.log; exit 1; }
 
 docker run -d --name it-cfg-a -l "com.docker.compose.project=it-svc-cfg-a" nginx:alpine
@@ -245,7 +242,7 @@ services:
       - it-svc-cfg-b.test.local
 YAMLEOF
 
-lab-ops auto-discover sync /tmp/discovery.yaml --state-dir /tmp/state >/tmp/sync.log 2>&1
+lab-ops auto-discover sync /tmp/discovery.yaml >/tmp/sync.log 2>&1
 
 docker run -d --name it-cfg-b -l "com.docker.compose.project=it-svc-cfg-b" nginx:alpine
 sleep 5
@@ -294,7 +291,7 @@ services:
       - it-svc-cfg-rm.test.local
 YAMLEOF
 
-lab-ops auto-discover daemon /tmp/discovery.yaml --state-dir /tmp/state --no-forwarding --consul-addr $CONSUL_HTTP_ADDR >/tmp/discovery.log 2>&1 &
+lab-ops auto-discover daemon /tmp/discovery.yaml --no-forwarding --consul-addr $CONSUL_HTTP_ADDR >/tmp/discovery.log 2>&1 &
 sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: daemon died"; cat /tmp/discovery.log; exit 1; }
 
 docker run -d --name it-cfg-rm -l "com.docker.compose.project=it-svc-cfg-rm" nginx:alpine
@@ -311,7 +308,7 @@ cat > /tmp/discovery.yaml <<'YAMLEOF'
 services: {}
 YAMLEOF
 
-lab-ops auto-discover sync /tmp/discovery.yaml --state-dir /tmp/state >/tmp/sync.log 2>&1 || true
+lab-ops auto-discover sync /tmp/discovery.yaml >/tmp/sync.log 2>&1 || true
 
 REMAINING=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Meta.server_name == "int-test-node") | .key // empty')
 if [ -n "$REMAINING" ]; then echo "FAIL: stale service still registered: $REMAINING" >&2; exit 1; fi
@@ -363,7 +360,7 @@ services:
       - it-cfg-ip.test.local
 YAMLEOF
 
-lab-ops auto-discover daemon /tmp/discovery.yaml --state-dir /tmp/state --no-forwarding --consul-addr $CONSUL_HTTP_ADDR >/tmp/discovery.log 2>&1 &
+lab-ops auto-discover daemon /tmp/discovery.yaml --no-forwarding --consul-addr $CONSUL_HTTP_ADDR >/tmp/discovery.log 2>&1 &
 sleep 2; kill -0 $! 2>/dev/null || {{ echo "FAIL: daemon died"; cat /tmp/discovery.log; exit 1; }}
 
 docker run -d --name {cname} -l "com.docker.compose.project=it-cfg-ip-svc" nginx:alpine
@@ -392,7 +389,7 @@ services:
       - it-cfg-ip.test.local
 YAMLEOF
 
-lab-ops auto-discover sync /tmp/discovery.yaml --state-dir /tmp/state >/tmp/sync.log 2>&1
+lab-ops auto-discover sync /tmp/discovery.yaml >/tmp/sync.log 2>&1
 
 ADDR2=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-cfg-ip-svc") | .value.Address')
 if [ "$ADDR2" != "10.99.99.1" ]; then echo "FAIL: expected Address=10.99.99.1 after change, got $ADDR2" >&2; exit 1; fi
@@ -441,7 +438,7 @@ services:
       - it-cfg-all.test.local
 YAMLEOF
 
-lab-ops auto-discover daemon /tmp/discovery.yaml --state-dir /tmp/state --no-forwarding --consul-addr $CONSUL_HTTP_ADDR >/tmp/discovery.log 2>&1 &
+lab-ops auto-discover daemon /tmp/discovery.yaml --no-forwarding --consul-addr $CONSUL_HTTP_ADDR >/tmp/discovery.log 2>&1 &
 sleep 2; kill -0 $! 2>/dev/null || {{ echo "FAIL: daemon died"; cat /tmp/discovery.log; exit 1; }}
 
 docker run -d --name {cname} -l "com.docker.compose.project=it-cfg-all-svc" nginx:alpine
@@ -458,7 +455,7 @@ cat > /tmp/discovery.yaml <<'YAMLEOF'
 services: {{}}
 YAMLEOF
 
-lab-ops auto-discover sync /tmp/discovery.yaml --state-dir /tmp/state >/tmp/sync.log 2>&1 || true
+lab-ops auto-discover sync /tmp/discovery.yaml >/tmp/sync.log 2>&1 || true
 
 REMAINING=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Meta.server_name == "int-test-node") | .key // empty')
 if [ -n "$REMAINING" ]; then echo "FAIL: stale registrations remain: $REMAINING" >&2; exit 1; fi

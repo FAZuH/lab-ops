@@ -93,6 +93,23 @@ pub trait Iptables: Send + Sync {
 
 // ── Pure argument builders (testable without iptables) ──
 
+/// Appends the port-match args for a static rule.
+///
+/// A comma-separated `ports` list is a multi-port set, which iptables only
+/// matches through `-m multiport --dports`; a single port uses `--dport`.
+fn push_port_args(args: &mut Vec<String>, ports: &str) {
+    if ports.contains(',') {
+        args.extend([
+            "-m".into(),
+            "multiport".into(),
+            "--dports".into(),
+            ports.into(),
+        ]);
+    } else {
+        args.extend(["--dport".into(), ports.into()]);
+    }
+}
+
 /// Builds iptables args for a docker mapping DNAT rule (nat/NATMAP).
 fn build_dnat_rule_args(map: &DockerPortMap) -> Vec<String> {
     let req = &map.request;
@@ -245,17 +262,8 @@ fn build_static_dnat_prerouting_args(config: &DnatConfig) -> Vec<String> {
     args.push("-d".into());
     args.push(config.ext_ip.clone());
     args.push("-p".into());
-    args.push(config.proto.to_lowercase().into());
-    if config.ports.contains(',') {
-        args.extend([
-            "-m".into(),
-            "multiport".into(),
-            "--dports".into(),
-            config.ports.clone(),
-        ]);
-    } else {
-        args.extend(["--dport".into(), config.ports.clone()]);
-    }
+    args.push(config.proto.to_string());
+    push_port_args(&mut args, &config.ports);
     let dest = if config.ports.contains(',') {
         config.int_ip.clone()
     } else {
@@ -271,19 +279,10 @@ fn build_static_dnat_forward_args(config: &DnatConfig) -> Vec<String> {
     let comment = config.rule_comment();
     let mut args: Vec<String> = vec!["-A".into(), "FORWARD".into()];
     args.push("-p".into());
-    args.push(config.proto.to_lowercase().into());
+    args.push(config.proto.to_string());
     args.push("-d".into());
     args.push(config.int_ip.clone());
-    if config.ports.contains(',') {
-        args.extend([
-            "-m".into(),
-            "multiport".into(),
-            "--dports".into(),
-            config.ports.clone(),
-        ]);
-    } else {
-        args.extend(["--dport".into(), config.ports.clone()]);
-    }
+    push_port_args(&mut args, &config.ports);
     args.extend(["-j".into(), "ACCEPT".into()]);
     args.extend(["-m".into(), "comment".into(), "--comment".into(), comment]);
     args
@@ -330,17 +329,8 @@ fn build_hairpin_prerouting_args(config: &HairpinConfig) -> Option<Vec<String>> 
         config.ext_ip.clone(),
     ];
     args.push("-p".into());
-    args.push(config.proto.to_lowercase().into());
-    if config.ports.contains(',') {
-        args.extend([
-            "-m".into(),
-            "multiport".into(),
-            "--dports".into(),
-            config.ports.clone(),
-        ]);
-    } else {
-        args.extend(["--dport".into(), config.ports.clone()]);
-    }
+    args.push(config.proto.to_string());
+    push_port_args(&mut args, &config.ports);
     args.extend([
         "-j".into(),
         "DNAT".into(),
@@ -366,26 +356,11 @@ fn build_hairpin_postrouting_args(config: &HairpinConfig) -> Vec<String> {
         config.int_ip.clone(),
     ];
     args.push("-p".into());
-    args.push(config.proto.to_lowercase().into());
-    if config.ports.contains(',') {
-        args.extend([
-            "-m".into(),
-            "multiport".into(),
-            "--dports".into(),
-            config.ports.clone(),
-        ]);
-    } else {
-        args.extend(["--dport".into(), config.ports.clone()]);
-    }
+    args.push(config.proto.to_string());
+    push_port_args(&mut args, &config.ports);
     args.extend(["-j".into(), "MASQUERADE".into()]);
     args.extend(["-m".into(), "comment".into(), "--comment".into(), comment]);
     args
-}
-
-impl Default for IptablesManager {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl IptablesManager {

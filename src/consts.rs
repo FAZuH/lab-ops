@@ -1,6 +1,3 @@
-/// The lab-ops binary installed on the host system.
-pub const BIN: &str = "/usr/local/bin/lab-ops";
-
 /// The lab-ops CLI command name (for subprocess invocations).
 pub const CMD: &str = "lab-ops";
 

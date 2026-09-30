@@ -14,18 +14,11 @@ use std::path::PathBuf;
 use hyper::Method;
 
 use crate::models::DnatConfig;
-use crate::models::DnatRequest;
 use crate::models::DockerAddMapRequest;
 use crate::models::DockerPortMap;
-use crate::models::DockerRemapRequest;
 use crate::models::HairpinConfig;
-use crate::models::HairpinRequest;
-use crate::models::ListResponse;
 use crate::models::LiveRule;
 use crate::models::PolicyRouteConfig;
-use crate::models::PolicyRouteRequest;
-use crate::models::SnatConfig;
-use crate::models::SnatRequest;
 pub use crate::utils::NatmapError;
 use crate::utils::request_json;
 
@@ -61,32 +54,12 @@ impl NatmapClient {
         config: DnatConfig,
         delete: bool,
     ) -> Result<Option<DnatConfig>, NatmapError> {
-        let req = DnatRequest::from(config);
         if delete {
-            let _: () = request_json(&self.socket, Method::DELETE, "/dnat", Some(req)).await?;
+            let _: () = request_json(&self.socket, Method::DELETE, "/dnat", Some(config)).await?;
             Ok(None)
         } else {
             let echoed: DnatConfig =
-                request_json(&self.socket, Method::POST, "/dnat", Some(req)).await?;
-            Ok(Some(echoed))
-        }
-    }
-
-    /// Installs or deletes a static SNAT rule.
-    ///
-    /// Returns the daemon's echoed config on install, `None` on delete.
-    pub async fn snat(
-        &self,
-        config: SnatConfig,
-        delete: bool,
-    ) -> Result<Option<SnatConfig>, NatmapError> {
-        let req = SnatRequest::from(config);
-        if delete {
-            let _: () = request_json(&self.socket, Method::DELETE, "/snat", Some(req)).await?;
-            Ok(None)
-        } else {
-            let echoed: SnatConfig =
-                request_json(&self.socket, Method::POST, "/snat", Some(req)).await?;
+                request_json(&self.socket, Method::POST, "/dnat", Some(config)).await?;
             Ok(Some(echoed))
         }
     }
@@ -99,13 +72,13 @@ impl NatmapClient {
         config: HairpinConfig,
         delete: bool,
     ) -> Result<Option<HairpinConfig>, NatmapError> {
-        let req = HairpinRequest::from(config);
         if delete {
-            let _: () = request_json(&self.socket, Method::DELETE, "/hairpin", Some(req)).await?;
+            let _: () =
+                request_json(&self.socket, Method::DELETE, "/hairpin", Some(config)).await?;
             Ok(None)
         } else {
             let echoed: HairpinConfig =
-                request_json(&self.socket, Method::POST, "/hairpin", Some(req)).await?;
+                request_json(&self.socket, Method::POST, "/hairpin", Some(config)).await?;
             Ok(Some(echoed))
         }
     }
@@ -118,14 +91,13 @@ impl NatmapClient {
         config: PolicyRouteConfig,
         delete: bool,
     ) -> Result<Option<PolicyRouteConfig>, NatmapError> {
-        let req = PolicyRouteRequest::from(config);
         if delete {
             let _: () =
-                request_json(&self.socket, Method::DELETE, "/policy-route", Some(req)).await?;
+                request_json(&self.socket, Method::DELETE, "/policy-route", Some(config)).await?;
             Ok(None)
         } else {
             let echoed: PolicyRouteConfig =
-                request_json(&self.socket, Method::POST, "/policy-route", Some(req)).await?;
+                request_json(&self.socket, Method::POST, "/policy-route", Some(config)).await?;
             Ok(Some(echoed))
         }
     }
@@ -145,48 +117,11 @@ impl NatmapClient {
         request_json(&self.socket, Method::POST, &uri, Some(req)).await
     }
 
-    /// Removes a port mapping by container ID and host port.
-    pub async fn remove_mapping(
-        &self,
-        container_id: &str,
-        host_port: u16,
-    ) -> Result<(), NatmapError> {
-        let uri = format!("/mapping/{container_id}/{host_port}");
-        request_json(&self.socket, Method::DELETE, &uri, None::<()>).await
-    }
-
-    /// Removes a port mapping by its numeric ID.
-    pub async fn remove_mapping_by_id(&self, id: u64) -> Result<(), NatmapError> {
-        let uri = format!("/mapping/by-id/{id}");
-        request_json(&self.socket, Method::DELETE, &uri, None::<()>).await
-    }
-
-    /// Remaps a container's host port without restarting the container.
-    pub async fn remap_port(
-        &self,
-        container_id: &str,
-        req: DockerRemapRequest,
-    ) -> Result<Vec<DockerPortMap>, NatmapError> {
-        let uri = format!("/remap/{container_id}");
-        request_json(&self.socket, Method::PUT, &uri, Some(req)).await
-    }
-
-    /// Lists all daemon-managed mappings and static rules.
-    pub async fn list_mappings(&self) -> Result<ListResponse, NatmapError> {
-        request_json(&self.socket, Method::GET, "/mappings", None::<()>).await
-    }
-
-    /// Lists all live NAT rules currently installed in iptables.
-    ///
-    /// Unlike [`Self::list_mappings`], these reflect what the daemon actually
-    /// installed (parsed from `iptables-save`), not the persisted daemon state.
+    /// Lists all live NAT rules currently installed in iptables, parsed from
+    /// `iptables-save` — what the daemon actually installed, not its
+    /// persisted state.
     pub async fn rules(&self) -> Result<Vec<LiveRule>, NatmapError> {
         request_json(&self.socket, Method::GET, "/rules", None::<()>).await
-    }
-
-    /// Removes all managed NAT rules and resets daemon state.
-    pub async fn clear(&self) -> Result<(), NatmapError> {
-        request_json(&self.socket, Method::DELETE, "/clear", None::<()>).await
     }
 }
 
@@ -211,7 +146,6 @@ mod tests {
     use crate::daemon::tests::test_port;
     use crate::iptables::IptablesManager;
     use crate::models::DockerAddMapRequest;
-    use crate::models::DockerRemapRequest;
     use crate::models::PolicyRouteConfig;
     use crate::models::RuleKind;
 
@@ -307,20 +241,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remove_snat_not_found_maps_not_found() {
-        let (_dir, socket) = spawn_daemon(test_app_state()).await;
-        let client = NatmapClient::new(socket);
-
-        let config = SnatConfig {
-            int_ip: "10.0.0.1".into(),
-            ext_ip: "203.0.113.50".into(),
-            ext_if: "eth0".into(),
-        };
-        let result = client.snat(config, true).await;
-        assert!(matches!(result, Err(NatmapError::NotFound(_))));
-    }
-
-    #[tokio::test]
     async fn add_mapping_without_target_ip_maps_unavailable_when_no_docker() {
         let (_dir, socket) = spawn_daemon(test_app_state()).await;
         let client = NatmapClient::new(socket);
@@ -359,61 +279,6 @@ mod tests {
             "daemon must report the allocated port, got {}",
             mapping.request.host_addr.port()
         );
-    }
-
-    #[tokio::test]
-    async fn remove_mapping_not_found_maps_not_found() {
-        let (_dir, socket) = spawn_daemon(test_app_state()).await;
-        let client = NatmapClient::new(socket);
-
-        let result = client.remove_mapping("nonexistent", 80).await;
-        assert!(matches!(result, Err(NatmapError::NotFound(_))));
-    }
-
-    #[tokio::test]
-    async fn remove_mapping_by_id_not_found_maps_not_found() {
-        let (_dir, socket) = spawn_daemon(test_app_state()).await;
-        let client = NatmapClient::new(socket);
-
-        let result = client.remove_mapping_by_id(999).await;
-        assert!(matches!(result, Err(NatmapError::NotFound(_))));
-    }
-
-    #[tokio::test]
-    async fn remap_port_not_found_maps_not_found() {
-        let (_dir, socket) = spawn_daemon(test_app_state()).await;
-        let client = NatmapClient::new(socket);
-
-        let req = DockerRemapRequest {
-            host_port: 8080,
-            new_host_port: 9090,
-        };
-        let result = client.remap_port("nonexistent", req).await;
-        assert!(matches!(result, Err(NatmapError::NotFound(_))));
-    }
-
-    #[tokio::test]
-    async fn list_mappings_roundtrips_state() {
-        let state = test_app_state();
-        {
-            let mut lock = state.daemon_state.write().await;
-            lock.dnats.push(dnat_config("80,443"));
-        }
-        let (_dir, socket) = spawn_daemon(state).await;
-        let client = NatmapClient::new(socket);
-
-        let resp = client.list_mappings().await.unwrap();
-        assert_eq!(resp.dnats.len(), 1);
-        assert_eq!(resp.dnats[0].ports, "80,443");
-        assert!(resp.docker.is_empty());
-    }
-
-    #[tokio::test]
-    async fn clear_returns_ok_on_empty_state() {
-        let (_dir, socket) = spawn_daemon(test_app_state()).await;
-        let client = NatmapClient::new(socket);
-
-        assert!(client.clear().await.is_ok());
     }
 
     #[tokio::test]

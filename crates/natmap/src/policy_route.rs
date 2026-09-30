@@ -46,11 +46,11 @@ fn filter_cloneable_routes(output: &str) -> Vec<String> {
         .collect()
 }
 
-/// Builds `ip route add default via <via> table <table>` args.
-fn build_route_add_args(config: &PolicyRouteConfig) -> Vec<String> {
+/// Builds `ip route <verb> default via <via> table <table>` args.
+fn build_route_args(config: &PolicyRouteConfig, verb: &str) -> Vec<String> {
     vec![
         "route".into(),
-        "add".into(),
+        verb.into(),
         "default".into(),
         "via".into(),
         config.via.clone(),
@@ -59,38 +59,13 @@ fn build_route_add_args(config: &PolicyRouteConfig) -> Vec<String> {
     ]
 }
 
-/// Builds `ip rule add from <src_ip> table <table>` args.
-fn build_rule_add_args(config: &PolicyRouteConfig) -> Vec<String> {
+/// Builds `ip rule <verb> from <src_ip> table <table>` args.
+fn build_rule_args(config: &PolicyRouteConfig, verb: &str) -> Vec<String> {
     vec![
         "rule".into(),
-        "add".into(),
+        verb.into(),
         "from".into(),
         config.src_ip.clone(),
-        "table".into(),
-        config.table.to_string(),
-    ]
-}
-
-/// Builds `ip rule del from <src_ip> table <table>` args.
-fn build_rule_del_args(config: &PolicyRouteConfig) -> Vec<String> {
-    vec![
-        "rule".into(),
-        "del".into(),
-        "from".into(),
-        config.src_ip.clone(),
-        "table".into(),
-        config.table.to_string(),
-    ]
-}
-
-/// Builds `ip route del default via <via> table <table>` args.
-fn build_route_del_args(config: &PolicyRouteConfig) -> Vec<String> {
-    vec![
-        "route".into(),
-        "del".into(),
-        "default".into(),
-        "via".into(),
-        config.via.clone(),
         "table".into(),
         config.table.to_string(),
     ]
@@ -148,7 +123,7 @@ impl PolicyRouteManager {
     pub fn install(&self, config: &PolicyRouteConfig) -> Result<()> {
         if !self.check_route_exists(config)? {
             let status = Command::new("ip")
-                .args(build_route_add_args(config))
+                .args(build_route_args(config, "add"))
                 .status()
                 .wrap_err("Failed to execute ip route add")?;
             if !status.success() {
@@ -158,7 +133,7 @@ impl PolicyRouteManager {
 
         if !self.check_rule_exists(config)? {
             let status = Command::new("ip")
-                .args(build_rule_add_args(config))
+                .args(build_rule_args(config, "add"))
                 .status()
                 .wrap_err("Failed to execute ip rule add")?;
             if !status.success() {
@@ -184,10 +159,10 @@ impl PolicyRouteManager {
 
     pub fn remove(&self, config: &PolicyRouteConfig) -> Result<()> {
         let _ = Command::new("ip")
-            .args(build_rule_del_args(config))
+            .args(build_rule_args(config, "del"))
             .status();
         let _ = Command::new("ip")
-            .args(build_route_del_args(config))
+            .args(build_route_args(config, "del"))
             .status();
         Ok(())
     }
@@ -336,7 +311,7 @@ mod tests {
     #[test]
     fn route_add_args_format() {
         let cfg = test_config();
-        let args = build_route_add_args(&cfg);
+        let args = build_route_args(&cfg, "add");
         assert_eq!(
             args,
             vec![
@@ -356,7 +331,7 @@ mod tests {
     #[test]
     fn rule_add_args_format() {
         let cfg = test_config();
-        let args = build_rule_add_args(&cfg);
+        let args = build_rule_args(&cfg, "add");
         assert_eq!(
             args,
             vec!["rule", "add", "from", "10.0.0.1", "table", "100"]
@@ -368,7 +343,7 @@ mod tests {
     #[test]
     fn rule_del_args_format() {
         let cfg = test_config();
-        let args = build_rule_del_args(&cfg);
+        let args = build_rule_args(&cfg, "del");
         assert_eq!(
             args,
             vec!["rule", "del", "from", "10.0.0.1", "table", "100"]
@@ -380,7 +355,7 @@ mod tests {
     #[test]
     fn route_del_args_format() {
         let cfg = test_config();
-        let args = build_route_del_args(&cfg);
+        let args = build_route_args(&cfg, "del");
         assert_eq!(
             args,
             vec![
