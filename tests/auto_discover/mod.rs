@@ -8,15 +8,50 @@ mod recovery;
 mod registration;
 mod startup_race;
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Once;
 
 static INIT: Once = Once::new();
 
+/// A test that hits `exit 1` never reaches the `teardown()` fragment appended to
+/// its script, so its `it-*` container survives on the host and the next run dies
+/// at `docker run --name` with a conflict that masks the real failure. Anchored
+/// `^it-` so a loose match cannot reach names like `audit-it-decoy`. Best effort:
+/// a missing or unhappy `docker` must never turn the suite red.
+fn sweep_leaked_containers() {
+    let Ok(list) = Command::new("docker")
+        .args(["ps", "-aq", "--filter", "name=^it-"])
+        .output()
+    else {
+        return;
+    };
+    let ids: Vec<String> = String::from_utf8_lossy(&list.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(String::from)
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+    eprintln!(
+        "sweeping {} leaked it-* test container(s) from a previous run: {}",
+        ids.len(),
+        ids.join(" ")
+    );
+    let _ = Command::new("docker")
+        .args(["rm", "-f"])
+        .args(&ids)
+        .status();
+}
+
 fn setup_image() -> &'static str {
     let image_name = "lab-ops-auto-discover-test:latest";
     INIT.call_once(|| {
+        sweep_leaked_containers();
         let dockerfile = concat!(
             "FROM ubuntu:24.04\n",
             "RUN apt-get update && apt-get install -y iptables jq curl unzip iproute2 docker.io\n",
@@ -41,6 +76,28 @@ fn setup_image() -> &'static str {
     image_name
 }
 
+/// A NixOS host links lab-ops against a loader and an OpenSSL under
+/// /nix/store that the test image lacks, so the binary cannot exec.
+/// Mounting /nix fixes the loader, but the lib still needs to be on the
+/// loader path, and setting LD_LIBRARY_PATH for the whole container
+/// shadows the image's own OpenSSL-linked tools: nix libcrypto's RUNPATH
+/// pulls nix glibc's libdl into curl, which then fails against the
+/// image's glibc. So put the path on a wrapper around the binary alone.
+/// Returns the wrapper to bind-mount over lab-ops, or None off NixOS.
+fn nix_wrapper(label: &str) -> Option<PathBuf> {
+    if !Path::new("/nix").is_dir() {
+        return None;
+    }
+    let lib_dir = std::env::var("OPENSSL_LIB_DIR").ok()?;
+    let wrapper = std::env::temp_dir().join(format!("lab-ops-{label}-wrapper.sh"));
+    let script = format!(
+        "#!/bin/sh\nexec env LD_LIBRARY_PATH={lib_dir} /usr/local/bin/lab-ops.bin \"$@\"\n"
+    );
+    std::fs::write(&wrapper, script).ok()?;
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).ok()?;
+    Some(wrapper)
+}
+
 pub(crate) fn run(script: &str) -> String {
     let image = setup_image();
     let binary_path = env!("CARGO_BIN_EXE_lab-ops");
@@ -50,18 +107,26 @@ pub(crate) fn run(script: &str) -> String {
         "--rm",
         "--privileged",
         "-v",
-        &format!("{binary_path}:/usr/local/bin/lab-ops"),
-        "-v",
         "/var/run/docker.sock:/var/run/docker.sock",
         "-e",
         "NATMAP_SOCKET=/tmp/natmap.sock",
         "-e",
         "CONSUL_HTTP_ADDR=http://127.0.0.1:8500",
     ]);
-    // A NixOS host links lab-ops against a loader under /nix/store, which the
-    // test image lacks, so the binary cannot exec. No-op elsewhere.
-    if Path::new("/nix").is_dir() {
-        cmd.args(["-v", "/nix:/nix:ro"]);
+    match nix_wrapper("auto-discover-docker") {
+        Some(wrapper) => {
+            cmd.args([
+                "-v",
+                "/nix:/nix:ro",
+                "-v",
+                &format!("{binary_path}:/usr/local/bin/lab-ops.bin"),
+                "-v",
+                &format!("{}:/usr/local/bin/lab-ops:ro", wrapper.display()),
+            ]);
+        }
+        None => {
+            cmd.args(["-v", &format!("{binary_path}:/usr/local/bin/lab-ops")]);
+        }
     }
     cmd.args([image, "sh", "-c"]);
     cmd.arg(script);
