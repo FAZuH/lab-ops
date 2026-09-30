@@ -11,8 +11,8 @@ cargo test --workspace                              # All tests (excl. Docker)
 cargo test -p lab-ops_lab-lib                       # lab-lib crate only
 cargo test -p lab-ops_natmap                        # natmap crate only
 cargo test -p lab-ops_auto-discover                 # auto-discover crate only
-cargo test -p lab-ops --test natmap_docker          # natmap Docker integration tests
-cargo test -p lab-ops --test auto_discover          # auto-discover Docker integration tests
+cargo test -p lab-ops --all-features --test natmap_docker   # natmap Docker integration tests
+cargo test -p lab-ops --all-features --test auto_discover   # auto-discover Docker integration tests
 cargo test -p lab-ops_natmap --test model           # natmap model integration tests
 cargo test --doc -p lab-ops_natmap -p lab-ops_lab-lib  # Doc tests only
 ```
@@ -123,6 +123,45 @@ The Docker image is built once via `Once` from `ubuntu:24.04` with `iptables` in
 ## How Tests Run
 
 `./dev.sh test` executes `cargo test --workspace --all-targets --all-features`. Note that `--all-features` enables `docker-tests` in the root crate and the auto-discover crate, so all test categories are included.
+
+`--all-features` is not decorative. The repo's `.cargo/config.toml` sets
+`[build] rustflags = ["--cfg", "feature=\"docker-tests\""]`, which is the
+*lowest*-precedence source. Cargo uses exactly one rustflags source, in this
+order:
+
+```
+RUSTFLAGS env  >  [target.<triple>]  >  [build]
+```
+
+So the cfg is dropped by either of two independent triggers:
+
+- a user-level `~/.cargo/config.toml` that defines a `[target.<triple>]` table,
+  which replaces `[build]` outright
+- any `RUSTFLAGS` that does not itself carry the cfg
+
+Either way everything behind `#[cfg(feature = "docker-tests")]` is compiled
+out, and a Docker target reports:
+
+```
+0 tests, 0 benchmarks
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+That is a green result for a suite that did not run. Note that on this
+machine `~/.bashrc` re-declares the cfg inside `RUSTFLAGS`, which papers over
+the second trigger here and nowhere else — so a green Docker suite locally is
+not evidence that the cfg reaches the compiler anywhere else.
+
+`--all-features` enables the feature through the feature system instead of
+rustflags, so it survives every rustflags override. Any hand-written command
+targeting a Docker suite needs it; `dev.sh test` and CI already pass it. If a
+Docker target comes back with `0 passed`, check for a `[target.<triple>]`
+rustflags table and for `RUSTFLAGS` before suspecting the code.
+
+Beware stale build artifacts when reproducing this: a cached test binary built
+while the cfg was in effect will list all its tests even though a fresh
+compile of the same command would not. Force a rebuild before concluding
+either way.
 
 ### Docker Test Requirements
 
