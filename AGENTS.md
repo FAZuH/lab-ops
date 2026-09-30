@@ -13,7 +13,7 @@ Personal homelab utility tools. Rust workspace, edition **2024**.
 ```
 
 - **`rustfmt` requires nightly** (`+nightly`). `rustfmt.toml` uses unstable features (`imports_granularity = "Item"`, `group_imports = "StdExternalCrate"`).
-- **`.cargo/config.toml` always enables `docker-tests`** via `--cfg feature="docker-tests"`. So `--all-features` in dev commands is redundant but harmless.
+- **`.cargo/config.toml` enables `docker-tests`** via `--cfg feature="docker-tests"` in `[build] rustflags`. Cargo *merges* that with a `[target.<triple>] rustflags` table, so both apply. But a **`RUSTFLAGS` environment variable overrides both tables**, and then the cfg is dropped: every `#[cfg(feature = "docker-tests")]` target compiles to zero tests and reports `ok. 0 passed`, a green result for a suite that never ran. **Pass `--all-features` on any command that must include the Docker suites.** It enables the feature through the feature system rather than rustflags, so it survives any rustflags override. `dev.sh test` and CI already do; a hand-written `cargo test` does not.
 
 ### Build environment (NixOS host)
 
@@ -43,8 +43,8 @@ export OPENSSL_INCLUDE_DIR=/nix/store/0la6k2nj90y1716c1znhdm713ia1qgx8-openssl-3
 ```bash
 cargo test -p lab-ops_natmap                     # natmap unit tests only
 cargo test -p lab-ops_auto-discover              # auto-discover unit tests only
-cargo test -p lab-ops --test natmap_docker         # natmap Docker integration tests
-cargo test -p lab-ops --test auto_discover         # auto-discover Docker integration tests
+cargo test -p lab-ops --all-features --test natmap_docker   # natmap Docker integration tests
+cargo test -p lab-ops --all-features --test auto_discover   # auto-discover Docker integration tests
 cargo test test_name -p crate_name                 # single test
 ```
 
