@@ -12,6 +12,7 @@
 ### Fixed
 
 - Fixed error logs hiding the real cause behind a generic message
+- Fixed port reservation failing when a port is released and immediately re-allocated.
 - Fixed full sync failure removing services that were already registered.
 
 ## 0.1.28 (2026-07-12)
