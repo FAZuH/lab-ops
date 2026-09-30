@@ -16,9 +16,42 @@ use std::sync::Once;
 
 static INIT: Once = Once::new();
 
+/// A test that hits `exit 1` never reaches the `teardown()` fragment appended to
+/// its script, so its `it-*` container survives on the host and the next run dies
+/// at `docker run --name` with a conflict that masks the real failure. Anchored
+/// `^it-` so a loose match cannot reach names like `audit-it-decoy`. Best effort:
+/// a missing or unhappy `docker` must never turn the suite red.
+fn sweep_leaked_containers() {
+    let Ok(list) = Command::new("docker")
+        .args(["ps", "-aq", "--filter", "name=^it-"])
+        .output()
+    else {
+        return;
+    };
+    let ids: Vec<String> = String::from_utf8_lossy(&list.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(String::from)
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+    eprintln!(
+        "sweeping {} leaked it-* test container(s) from a previous run: {}",
+        ids.len(),
+        ids.join(" ")
+    );
+    let _ = Command::new("docker")
+        .args(["rm", "-f"])
+        .args(&ids)
+        .status();
+}
+
 fn setup_image() -> &'static str {
     let image_name = "lab-ops-auto-discover-test:latest";
     INIT.call_once(|| {
+        sweep_leaked_containers();
         let dockerfile = concat!(
             "FROM ubuntu:24.04\n",
             "RUN apt-get update && apt-get install -y iptables jq curl unzip iproute2 docker.io\n",
