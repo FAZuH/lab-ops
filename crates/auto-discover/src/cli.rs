@@ -190,7 +190,7 @@ async fn run_daemon(config_path: PathBuf, state_dir: PathBuf) {
             let e = match event {
                 Ok(e) => e,
                 Err(e) => {
-                    tracing::error!(error = %e, "docker event error");
+                    tracing::error!(error = %format!("{e:#}"), "docker event error");
                     continue;
                 }
             };
@@ -219,12 +219,12 @@ async fn run_daemon(config_path: PathBuf, state_dir: PathBuf) {
                             .handle_container_start(container_id, project, action)
                             .await
                     {
-                        tracing::error!(error = %e, "container start error");
+                        tracing::error!(error = %format!("{e:#}"), "container start error");
                     }
                 }
                 "die" => {
                     if let Err(e) = daemon.handle_container_die(container_id).await {
-                        tracing::error!(error = %e, "container die error");
+                        tracing::error!(error = %format!("{e:#}"), "container die error");
                     }
                 }
                 _ => {}

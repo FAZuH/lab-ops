@@ -52,10 +52,26 @@ Field sigils:
 | `daemon` | Daemon name label | `"natmap"` or `"auto-discover"` |
 | `socket.path` | Unix socket path | `%path` |
 | `mapping` | Full mapping struct for debug | `?m` |
-| `error` | Error description | `%e` |
+| `error` | Error description, full `wrap_err` chain | `%format!("{e:#}")` |
 | `regex` | Regex pattern string | `%cr` |
 | `program` | External program name | `%program` |
 | `args` | Command-line arguments | `%args_str` |
+
+### Why `error` uses `{e:#}` and not `%e`
+
+`eyre::Report`'s `Display` prints **only the outermost context**. `%e` on a
+wrapped error therefore logs `natmap command failed` and silently drops the
+cause underneath it. Every failure mode that reaches one `wrap_err` arm then
+produces the same log line, which makes the journal useless for diagnosis.
+
+Use `%format!("{e:#}")` (Alternate `Display`, the `a: b: c` chain) for every
+`error` field. For an unwrapped error it renders identically to `%e`, so there
+is no cost to always using it. For a `String` or a type with no `Alternate`
+impl it falls back to plain `Display`.
+
+`docs/dev/standards.md` forbids `expect`/`unwrap` in library code; a log line
+that hides its own cause is the same class of problem — an error path that
+cannot be acted on.
 
 ## 3. Spans — `#[instrument]` and `.instrument()`
 
