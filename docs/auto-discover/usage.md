@@ -149,7 +149,6 @@ services:
 | Field | Required | Description |
 |-------|----------|-------------|
 | `node` | Yes | Node identity (see below) |
-| `config_dir` | No | Directory for generated configs. Default: none |
 | `defaults` | No | Cascade defaults for all services (see below) |
 | `services` | Yes | Map of service definitions (key = service name, used as Consul service name) |
 

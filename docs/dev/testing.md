@@ -139,7 +139,7 @@ Each test creates a fresh Docker container. Parallel execution causes race condi
 1. **Docker tests hang**: Always use `--test-threads=1`.
 2. **Daemon connection refused**: Docker tests must start the daemon inside the container with `&` and `sleep 2` before CLI commands.
 3. **Port binding fails in Docker**: Use `--privileged`. Port allocation requires `CAP_NET_BIND_SERVICE` or root.
-4. **State file conflicts**: Each test uses a unique `--state-dir` path.
+4. **State file conflicts**: Not possible as written. `run()` uses `docker run --rm` and mounts no host `/tmp`, so every `/tmp` path inside a test script is already fresh per test. Adding per-test paths is unnecessary.
 
 ## Adding New Tests
 

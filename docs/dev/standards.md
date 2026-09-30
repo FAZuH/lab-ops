@@ -73,7 +73,7 @@ pub const CMD_FORWARD: &str = "forward";
 
 - `PascalCase`, descriptive
 - Error types: `XxxError` (e.g., `ConsulError`, `ConfigError`)
-- Request/response types: `XxxRequest`, `XxxResponse` (e.g., `DnatRequest`)
+- Request/response types: `XxxRequest`, `XxxResponse` (e.g., `DockerAddMapRequest`)
 
 ### 3.4. Functions and Methods
 
