@@ -8,6 +8,11 @@ on:
         required: false
         type: string
         default: ''
+      artifact-pattern:
+        description: 'Glob selecting uploaded artifacts to download as release assets; defaults to <binary-name>-*'
+        required: false
+        type: string
+        default: ''
       platforms:
         description: 'Build targets: multi (all 4) or linux (x64 only)'
         required: false
@@ -23,6 +28,11 @@ on:
         required: false
         type: boolean
         default: false
+      run-build:
+        description: 'Run the build stage (build.yml) even when build-binaries is false'
+        required: false
+        type: boolean
+        default: false
     outputs:
       tag:
         description: 'The release tag that was created'
@@ -34,6 +44,11 @@ on:
         required: false
       CARGO_REGISTRY_TOKEN:
         required: false
+
+concurrency:
+  group: release-job-${{ github.ref }}
+  cancel-in-progress: false
+  queue: max
 
 jobs:
   changelog:
@@ -95,11 +110,11 @@ jobs:
   build:
     name: Build Binaries
     needs: [changelog, patch-version]
-    if: ${{ needs.changelog.outputs.skipped != 'true' && inputs.build-binaries }}
+    if: ${{ needs.changelog.outputs.skipped != 'true' && (inputs.build-binaries || inputs.run-build) }}
     uses: ./.github/workflows/build.yml
     with:
       cargo-build-args: '--release --all-features --all-targets'
-      upload-binary: true
+      upload-binary: ${{ inputs.build-binaries }}
       release: true
       require-patched-cargo: true
 
@@ -121,11 +136,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Download patched Cargo.toml
-        uses: actions/download-artifact@v4
-        with:
-          name: patched-cargo-toml
-          path: .
+      - name: Restore patched manifests
+        env:
+          MANIFESTS_B64: ${{ needs.patch-version.outputs.manifests_b64 }}
+        run: |
+          printf '%s' "$MANIFESTS_B64" | base64 -d | tar xzf -
 
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -145,7 +160,7 @@ jobs:
 
   publish-changelog:
     name: Publish Changelog Commit
-    needs: [changelog, build, publish-crates]
+    needs: [changelog, patch-version, build, publish-crates]
     if: |
       always() && 
       needs.changelog.outputs.skipped != 'true' && 
@@ -162,6 +177,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: true
 
       - name: Fetch All Tags
         run: git fetch --tags --force origin '+refs/tags/*:refs/tags/*'
@@ -171,11 +187,11 @@ jobs:
           LATEST_TAG=$(git tag -l 'v*' --sort=-version:refname | head -1)
           echo "{\"version\":\"${LATEST_TAG:-v0.0.0}\"}" > version.json
 
-      - name: Download patched Cargo.toml
-        uses: actions/download-artifact@v4
-        with:
-          name: patched-cargo-toml
-          path: .
+      - name: Restore patched manifests
+        env:
+          MANIFESTS_B64: ${{ needs.patch-version.outputs.manifests_b64 }}
+        run: |
+          printf '%s' "$MANIFESTS_B64" | base64 -d | tar xzf -
 
       - name: Stage patched files
         run: |
@@ -192,7 +208,7 @@ jobs:
         with:
           github-token: ${{ secrets.PRIVATE_TOKEN }}
           git-user-name: "faz-bot"
-          git-user-email: "mail@fazuh.com"
+          git-user-email: "faz-bot@users.noreply.github.com"
           config-file-path: ./.github/.config.cjs
           version-file: ./version.json
           preset: conventionalcommits
@@ -217,21 +233,25 @@ jobs:
       - name: Clean stale artifacts and push release
         run: |
           git config user.name "faz-bot"
-          git config user.email "mail@fazuh.com"
-          git remote set-url origin "https://x-access-token:${{ secrets.PRIVATE_TOKEN }}@github.com/${{ github.repository }}"
+          git config user.email "faz-bot@users.noreply.github.com"
           TAG="${{ steps.commit.outputs.tag }}"
           git rm --cached -rf --ignore-unmatch node_modules/ version.json
           git commit --amend --no-edit
           if [ -n "$TAG" ]; then
             git tag -f "$TAG"
           fi
-          git push origin release --tags
+          # autopromote can merge main into release mid-run. Rebase so the branch
+          # update is not rejected, and push branch and tag together so a tag can
+          # never land without its commit. A merge landing after the fetch still
+          # fails the run, loudly and without moving the tag.
+          git fetch origin release
+          git rebase origin/release
+          git push --atomic origin release --tags
 
       - name: Sync version bump to main
         run: |
           git config user.name "faz-bot"
-          git config user.email "mail@fazuh.com"
-          git remote set-url origin "https://x-access-token:${{ secrets.PRIVATE_TOKEN }}@github.com/${{ github.repository }}"
+          git config user.email "faz-bot@users.noreply.github.com"
           git fetch origin main
           git checkout -B main origin/main
           git merge release --no-edit -m "chore(release): sync version bump to main [skip ci]"
@@ -256,18 +276,21 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: ${{ inputs.binary-name }}-*
+          pattern: ${{ inputs.artifact-pattern || format('{0}-*', inputs.binary-name) }}
 
       - name: Prepare Release Files
         if: ${{ inputs.build-binaries }}
+        # Copy every downloaded binary artifact into the release folder.
+        # Supports any number of binaries; single-binary projects are unaffected.
         run: |
           mkdir -p release
-          cp artifacts/${{ inputs.binary-name }}-linux-x64/${{ inputs.binary-name }}-linux-x64 release/
-          if [[ "${{ inputs.platforms }}" != "linux" ]]; then
-            cp artifacts/${{ inputs.binary-name }}-windows-x64.exe/${{ inputs.binary-name }}-windows-x64.exe release/
-            cp artifacts/${{ inputs.binary-name }}-macos-x64/${{ inputs.binary-name }}-macos-x64 release/
-            cp artifacts/${{ inputs.binary-name }}-macos-arm64/${{ inputs.binary-name }}-macos-arm64 release/
+          if [ ! -d artifacts ]; then
+            echo "::error::No artifacts to release. Expected pattern '${{ inputs.artifact-pattern || format('{0}-*', inputs.binary-name) }}' — the build job must upload an artifact, and upload-artifact resolves paths against the workspace root, not defaults.run.working-directory."
+            exit 1
           fi
+          find artifacts -mindepth 2 -maxdepth 2 -type f -exec cp {} release/ \;
+          # upload-artifact does not keep permissions, so every copy arrives 0644.
+          chmod +x release/* 2>/dev/null || true
 
       - name: Create Release
         id: release
@@ -282,7 +305,7 @@ jobs:
         with:
           webhook-url: ${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}
           embed-color: "9498256"
-          embed-title: "${{ inputs.binary-name }} ${{ needs.publish-changelog.outputs.tag }}"
+          embed-title: "${{ github.event.repository.name }} ${{ needs.publish-changelog.outputs.tag }}"
           embed-description: ${{ env.RELEASE_BODY }}
           embed-url: ${{ steps.release.outputs.url }}
           embed-timestamp: ${{ github.event.head_commit.timestamp }}
