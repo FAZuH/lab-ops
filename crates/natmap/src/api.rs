@@ -633,7 +633,7 @@ pub async fn remove_mapping_by_id(
     Path(id): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     let mut lock = state.daemon_state.write().await;
-    for (_, mappings) in lock.mapping.iter_mut() {
+    for mappings in lock.mapping.values_mut() {
         if let Some(pos) = mappings.iter().position(|m| m.id == id) {
             let m = mappings.remove(pos);
             let _ = state.iptables.remove_mapping(&m);
@@ -801,10 +801,9 @@ fn parse_live_rule(line: &str) -> Option<LiveRule> {
         (RuleKind::Hairpin, rest)
     } else if let Some(rest) = comment.strip_prefix("natmap:snat:") {
         (RuleKind::Snat, rest)
-    } else if let Some(rest) = comment.strip_prefix("natmap:") {
-        (RuleKind::Mapping, rest)
     } else {
-        return None;
+        let rest = comment.strip_prefix("natmap:")?;
+        (RuleKind::Mapping, rest)
     };
 
     let proto = match line.split(" -p ").nth(1) {
