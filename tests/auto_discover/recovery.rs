@@ -1,3 +1,5 @@
+//! Docker integration tests for daemon recovery from an invalid config.
+
 use super::*;
 
 #[test]

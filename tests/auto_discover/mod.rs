@@ -1,3 +1,5 @@
+//! Shared harness and shell helpers for the auto-discover Docker integration suite.
+
 #![cfg(feature = "docker-tests")]
 
 mod forwarding;
@@ -98,6 +100,7 @@ fn nix_wrapper(label: &str) -> Option<PathBuf> {
     Some(wrapper)
 }
 
+/// Runs `script` in the shared test container and returns its stdout.
 pub(crate) fn run(script: &str) -> String {
     let image = setup_image();
     let binary_path = env!("CARGO_BIN_EXE_lab-ops");
@@ -163,6 +166,7 @@ done
     )
 }
 
+/// Asserts the script printed a `PASS:` line, dumping the output on failure.
 pub(crate) fn assert_pass(output: &str, test_name: &str) {
     assert!(
         output.contains("PASS"),
@@ -176,6 +180,8 @@ pub(crate) fn new_format_setup(services_yaml: &str, extra_setup: &str) -> String
     new_format_setup_with_defaults_ext(services_yaml, "", extra_setup, "--no-forwarding")
 }
 
+/// Like [`new_format_setup`], but also writes a `defaults:` block and starts the
+/// daemon with `daemon_flags`. `services_yaml` must contain the `services:` block.
 pub(crate) fn new_format_setup_with_defaults_ext(
     services_yaml: &str,
     defaults_yaml: &str,

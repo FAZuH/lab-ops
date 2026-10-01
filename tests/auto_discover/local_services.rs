@@ -1,3 +1,5 @@
+//! Docker integration tests for `type: local` service discovery.
+
 use super::*;
 
 #[test]

@@ -1,3 +1,5 @@
+//! `discovery.yaml` schema: node identity, defaults, and per-service definitions.
+
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -6,6 +8,8 @@ use lab_ops_lab_lib::TransportProtocol;
 use serde::Deserialize;
 use serde::Serialize;
 
+/// Root of `discovery.yaml`: this node's identity, the defaults every
+/// service inherits, and the per-service map.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DiscoveryConfig {
     pub node: NodeConfig,
@@ -15,11 +19,13 @@ pub struct DiscoveryConfig {
     pub services: HashMap<String, ServiceConfig>,
 }
 
+/// Identity this node registers its own Consul agent under.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NodeConfig {
     pub name: String,
 }
 
+/// Fallback values for any service that does not set them itself.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Defaults {
     #[serde(default)]
@@ -38,6 +44,7 @@ pub struct Defaults {
     pub preserve_src_ip_src: Option<String>,
 }
 
+/// Whether a service is a Docker container or a fixed local address.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum ServiceType {
@@ -45,6 +52,7 @@ pub enum ServiceType {
     Local,
 }
 
+/// One entry under `services:` in `discovery.yaml`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ServiceConfig {
     #[serde(rename = "type")]
@@ -79,6 +87,7 @@ pub struct ServiceConfig {
     pub extra: HashMap<String, String>,
 }
 
+/// Container match criteria; a service with no match registers once, statically.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct MatchConfig {
     pub project: Option<String>,
@@ -86,6 +95,7 @@ pub struct MatchConfig {
     pub container_regex: Option<String>,
 }
 
+/// A Consul environment-variable registration for a local service.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RProxyLocalConfig {
     pub port: u16,
@@ -98,6 +108,7 @@ pub struct RProxyLocalConfig {
     pub proxy_ip: Option<String>,
 }
 
+/// A Consul environment-variable registration for a container's port.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RProxyRemoteConfig {
     pub port: u16,
@@ -110,6 +121,7 @@ pub struct RProxyRemoteConfig {
     pub proxy_ip: Option<String>,
 }
 
+/// A natmap DNAT mapping onto a local address.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ForwardLocalConfig {
     pub port: u16,
@@ -125,6 +137,7 @@ pub struct ForwardLocalConfig {
     pub proxy_on: Option<String>,
 }
 
+/// A natmap DNAT mapping published on an external IP and port set.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ForwardRemoteConfig {
     pub port: u16,
@@ -146,6 +159,7 @@ pub struct ForwardRemoteConfig {
     pub preserve_src_ip_src: Option<String>,
 }
 
+/// The single port registration a service resolves to, after defaults merge.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResolvedPortType {
     RProxyLocal {
@@ -171,6 +185,7 @@ pub enum ResolvedPortType {
     },
 }
 
+/// One fully-resolved registration, with defaults applied and ports flattened.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedService {
     pub service_id_prefix: String,
@@ -188,6 +203,7 @@ pub struct ResolvedService {
 }
 
 impl ResolvedService {
+    /// First configured domain, or `"_"` for a non-rproxy service.
     pub fn primary_domain(&self) -> &str {
         match &self.port_type {
             ResolvedPortType::RProxyLocal { domains, .. }
@@ -198,10 +214,12 @@ impl ResolvedService {
         }
     }
 
+    /// The primary domain with dots replaced by dashes, for use in an ID.
     pub fn domain_slug(&self) -> String {
         self.primary_domain().replace('.', "-")
     }
 
+    /// Every configured domain; empty for a non-rproxy service.
     pub fn domains(&self) -> Vec<&str> {
         match &self.port_type {
             ResolvedPortType::RProxyLocal { domains, .. }
@@ -214,6 +232,7 @@ impl ResolvedService {
 }
 
 impl DiscoveryConfig {
+    /// Reads and deserializes a `discovery.yaml` from disk.
     pub fn load(path: &Path) -> Result<Self> {
         let contents = std::fs::read_to_string(path)?;
         let config = serde_yaml::from_str(&contents)?;
@@ -240,6 +259,7 @@ impl DiscoveryConfig {
         }
     }
 
+    /// Expands every service into one [`ResolvedService`] per port registration.
     pub fn resolve_all(&self) -> Vec<ResolvedService> {
         let mut resolved = Vec::new();
 

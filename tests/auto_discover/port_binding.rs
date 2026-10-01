@@ -1,3 +1,5 @@
+//! Docker integration tests for host-port binding of forwarded services.
+
 use super::*;
 
 #[test]

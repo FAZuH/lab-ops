@@ -1,7 +1,6 @@
 //! Transport protocol enum (TCP / UDP).
 //!
-//! Canonical representation shared across the workspace. Previously defined
-//! in natmap's `models.rs`; extracted here so auto-discover can use it without
+//! Lives in lab-lib rather than natmap so auto-discover can use it without
 //! depending on natmap.
 //!
 //! ```

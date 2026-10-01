@@ -165,18 +165,18 @@ either way.
 
 ### Docker Test Requirements
 
-Docker tests must run single-threaded:
+Each Docker test spins up a privileged container, so run them single-threaded:
 
 ```bash
-cargo test --features docker-tests -- --test-threads=1
+cargo test --workspace --all-features -- --test-threads=1
 ```
 
-Each test creates a fresh Docker container. Parallel execution causes race conditions with image builds.
+`--all-features` is required: see the rustflags note above.
 
 ## Common Pitfalls
 
-1. **Docker tests hang**: Always use `--test-threads=1`.
-2. **Daemon connection refused**: Docker tests must start the daemon inside the container with `&` and `sleep 2` before CLI commands.
+1. **Docker tests hang**: pass `--test-threads=1` yourself. Nothing in the tree sets it: `.cargo/config.toml` sets only `rustflags`, so the Docker suites run at cargo's default parallelism, where they are currently flaky (#54).
+2. **Daemon connection refused**: start the daemon inside the container with `&`, then poll for the socket (`WAIT_SOCKET` in `tests/natmap_docker.rs`, the `wait_for_*` helpers in `tests/auto_discover/mod.rs`). Never a bare `sleep`.
 3. **Port binding fails in Docker**: Use `--privileged`. Port allocation requires `CAP_NET_BIND_SERVICE` or root.
 4. **State file conflicts**: Not possible as written. `run()` uses `docker run --rm` and mounts no host `/tmp`, so every `/tmp` path inside a test script is already fresh per test. Adding per-test paths is unnecessary.
 

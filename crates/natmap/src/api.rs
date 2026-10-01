@@ -1,3 +1,5 @@
+//! Axum HTTP handlers for the natmap daemon's Unix-socket API.
+
 use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -77,7 +79,6 @@ pub async fn add_dnat(
     State(state): State<AppState>,
     Json(config): Json<DnatConfig>,
 ) -> Result<Json<DnatConfig>, (StatusCode, Json<ErrorResponse>)> {
-    // Check if this DNAT already exists (idempotent add).
     {
         let lock = state.daemon_state.read().await;
         if lock.dnats.iter().any(|d| {
@@ -131,9 +132,8 @@ pub async fn remove_dnat(
         state.persist().await;
         Ok(StatusCode::OK)
     } else {
-        // Not in daemon state but may still have stale iptables rules and port
-        // reservations from a previous daemon instance (e.g. after restart with
-        // reconciled DNATs). Clean them up so the caller can re-add cleanly.
+        // Absent from state, but a previous instance may have left the rules and
+        // port reservations behind, so clean those up too.
         let _ = state.iptables.remove_dnat(&config);
         unbind_ports(state.ports.clone(), &config.ext_ip, &config.ports).await;
         Ok(StatusCode::OK)
@@ -221,8 +221,8 @@ pub async fn remove_hairpin(
         state.persist().await;
         Ok(StatusCode::OK)
     } else {
-        // Not in daemon state but may still have stale iptables rules and port
-        // reservations from a previous daemon instance. Clean them up.
+        // Absent from state, but a previous instance may have left the rules and
+        // port reservations behind, so clean those up too.
         let _ = state.iptables.remove_hairpin(&config);
         unbind_ports(state.ports, &config.ext_ip, &config.ports).await;
         Ok(StatusCode::OK)
@@ -275,7 +275,6 @@ pub async fn remove_policy_route(
         state.persist().await;
         Ok(StatusCode::OK)
     } else {
-        // Not in daemon state, but still try to remove to be safe
         let _ = state.policy_route.remove(&config);
         Ok(StatusCode::OK)
     }
@@ -571,6 +570,8 @@ async fn allocate_free_port(
     ))
 }
 
+/// Reserves every port in `ports_csv` on `ip`, or returns 409 naming the first
+/// port another holder already owns. A partial failure releases what it took.
 pub async fn bind_ports(
     ports: Arc<PortAllocator>,
     ip: &str,
@@ -586,6 +587,7 @@ pub async fn bind_ports(
     Ok(())
 }
 
+/// Releases every reservation `bind_ports` took for `ip`.
 pub async fn unbind_ports(ports: Arc<PortAllocator>, ip: &str, ports_csv: &str) {
     if let Ok(addrs) = parse_socket_addrs(ip, ports_csv) {
         for addr in addrs {
@@ -897,7 +899,6 @@ mod tests {
 
         let result = add_dnat(State(state.clone()), Json(req.clone())).await;
         if result.is_err() {
-            // iptables not available — skip
             return;
         }
         assert!(result.is_ok());
@@ -993,15 +994,12 @@ mod tests {
         };
         let result = add_mapping(State(state.clone()), Path("test123".into()), Json(req)).await;
         if result.is_err() {
-            // real iptables may fail — skip
             return;
         }
         assert!(result.is_ok());
         let mapping = result.unwrap().0;
         assert_eq!(mapping.container_id, "test123");
     }
-
-    // --- Add mapping allocation ---
 
     #[tokio::test]
     async fn add_mapping_no_host_port_allocates_and_returns_port() {
@@ -1069,10 +1067,8 @@ mod tests {
         assert_eq!(result.unwrap_err().0, StatusCode::INTERNAL_SERVER_ERROR);
         assert!(fake.installed_mappings().is_empty());
 
-        // The port the daemon allocated for the scan must have been released.
-        // Check the allocator map directly (external OS ephemeral traffic never
-        // touches it), so the assertion is immune to port contention in the
-        // OS ephemeral range (32768..=60999) that overlaps the scan range.
+        // Asserted against the allocator map, not a bind: the OS ephemeral range
+        // overlaps the scan range, so an external bind would race.
         let leaked: Vec<u16> = {
             let mut leaked = Vec::new();
             for port in super::EPHEMERAL_PORT_START..=super::EPHEMERAL_PORT_START + 12 {
@@ -1088,12 +1084,12 @@ mod tests {
             "allocated port must be released on install failure; still held: {leaked:?}"
         );
 
-        // The released port is immediately re-allocatable by the next request.
         fake.set_fail_dockermap(false);
         let mapping = add_mapping(State(state.clone()), Path("c1".into()), Json(req))
             .await
             .unwrap()
             .0;
+        // Released and immediately re-allocatable, so the retry gets the same port.
         assert_eq!(
             mapping.request.host_addr.ip(),
             IpAddr::from_str("127.0.0.4").unwrap()
@@ -1122,22 +1118,21 @@ mod tests {
         assert_eq!(result.unwrap_err().0, StatusCode::INTERNAL_SERVER_ERROR);
         assert!(fake.installed_mappings().is_empty());
 
-        // The explicitly requested port must have been released on install
-        // failure. Check the allocator map directly (external OS ephemeral
-        // traffic never touches it), so the assertion is immune to port
-        // contention in the OS ephemeral range.
+        // The explicitly requested port must be released on install failure.
+        // Asserted against the allocator map, not a bind: the OS ephemeral range
+        // overlaps, so an external bind would race.
         let addr = SocketAddr::new(IpAddr::from_str("127.0.0.4").unwrap(), 39040);
         assert!(
             !state.ports.is_allocated(addr).await,
             "explicitly requested port must be released on install failure"
         );
 
-        // The released port is immediately re-allocatable by the next request.
         fake.set_fail_dockermap(false);
         let mapping = add_mapping(State(state.clone()), Path("c1".into()), Json(req))
             .await
             .unwrap()
             .0;
+        // Released and immediately re-allocatable: 39040 was the requested port.
         assert_eq!(mapping.request.host_addr.port(), 39040);
         assert!(state.ports.is_allocated(mapping.request.host_addr).await);
     }
@@ -1188,8 +1183,6 @@ mod tests {
         let result = remove_policy_route(State(state), Json(req)).await;
         assert!(result.is_ok());
     }
-
-    // --- parse_live_rule ---
 
     #[test]
     fn parse_ports_csv_skips_invalid_entries() {

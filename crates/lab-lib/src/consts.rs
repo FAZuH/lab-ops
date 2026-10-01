@@ -3,4 +3,5 @@
 /// Default path to the natmap daemon Unix socket.
 pub const NATMAP_SOCKET: &str = "/run/natmap.sock";
 
+/// Default install path of the lab-ops binary.
 pub const LABOPS_BIN: &str = "/usr/local/bin/lab-ops";

@@ -1,3 +1,5 @@
+//! CLI parsing and command dispatch for the auto-discover binary.
+
 use std::path::PathBuf;
 
 use bollard::query_parameters::EventsOptions;
@@ -26,6 +28,7 @@ pub struct Cli {
     pub command: Command,
 }
 
+/// The auto-discover subcommands.
 #[derive(Subcommand)]
 pub enum Command {
     /// Run all enabled daemon components (discovery, forwarding)

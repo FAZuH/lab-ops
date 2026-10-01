@@ -364,7 +364,6 @@ fn build_hairpin_postrouting_args(config: &HairpinConfig) -> Vec<String> {
 }
 
 impl IptablesManager {
-    /// Creates a new [`IptablesManager`].
     pub fn new() -> Self {
         Self
     }
@@ -377,30 +376,26 @@ impl IptablesManager {
         tracing::info!("setting up iptables chains and jumps");
 
         for &cmd in &["iptables", "ip6tables"] {
-            // Verify DOCKER-USER exists (it should, Docker makes it). Create if missing.
+            // Docker normally creates DOCKER-USER, but the daemon can win the race.
             if !self.chain_exists(cmd, "filter", "DOCKER-USER") {
-                // create new DOCKER-USER chain
                 self.run_success(cmd, ["-t", "filter", "-N", "DOCKER-USER"])?;
-                // insert a jump rule on first position of FORWARD chain to DOCKER-USER
+                // -I, not -A: the jump must precede Docker's own FORWARD rules.
                 self.run_success(cmd, ["-t", "filter", "-I", "FORWARD", "-j", "DOCKER-USER"])?;
             }
 
-            // Create NATMAP subchain in nat table (DNAT rules live here)
+            // DNAT rules land in nat/NATMAP, FORWARD ACCEPT in filter/NATMAP.
             if !self.chain_exists(cmd, "nat", NATMAP) {
                 self.run_success(cmd, ["-t", "nat", "-N", NATMAP])?;
             }
 
-            // Create NATMAP subchain in filter table (FORWARD ACCEPT rules live here)
             if !self.chain_exists(cmd, "filter", NATMAP) {
                 self.run_success(cmd, ["-t", "filter", "-N", NATMAP])?;
             }
 
-            // Jump from DOCKER-USER to NATMAP in filter table (if not exists)
             if !self.rule_exists(cmd, &["-t", "filter", "-C", "DOCKER-USER", "-j", NATMAP]) {
                 self.run(cmd, ["-t", "filter", "-I", "DOCKER-USER", "-j", NATMAP])?;
             }
 
-            // Jump from PREROUTING to NATMAP in nat table (if not exists)
             if !self.rule_exists(cmd, &["-t", "nat", "-C", "PREROUTING", "-j", NATMAP]) {
                 self.run_success(cmd, ["-t", "nat", "-I", "PREROUTING", "-j", NATMAP])?;
             }
@@ -538,28 +533,24 @@ impl IptablesManager {
     fn remove_by_comment(&self, comment: &str, is_ipv6: bool) -> Result<()> {
         let cmd = self.cmd_for(is_ipv6);
 
-        // Delete from NATMAP in nat table
         self.delete_all_matching(cmd, "nat", NATMAP, comment)?;
-        // Delete from NATMAP in filter table
         self.delete_all_matching(cmd, "filter", NATMAP, comment)?;
-        // Delete from POSTROUTING in nat table
         self.delete_all_matching(cmd, "nat", "POSTROUTING", comment)?;
-        // Delete from OUTPUT in nat table (localhost DNAT)
+        // OUTPUT carries the localhost DNAT rule.
         self.delete_all_matching(cmd, "nat", "OUTPUT", comment)?;
 
         Ok(())
     }
 
     /// Flushes and deletes a specific chain in a given table.
+    ///
+    /// Best-effort: both calls ignore their result so a missing chain or a
+    /// chain still referenced elsewhere does not abort the surrounding flush.
     fn flush_chain(&self, cmd: &str, table: &str, chain: &str) -> Result<()> {
-        // flush chain
         let _ = self.run(cmd, ["-t", table, "-F", chain]);
-        // delete chain
         let _ = self.run(cmd, ["-t", table, "-X", chain]);
         Ok(())
     }
-
-    // --- Helper functions ---
 
     /// Returns `"ip6tables"` or `"iptables"` based on address family.
     fn cmd_for(&self, is_ipv6: bool) -> &'static str {
@@ -589,7 +580,8 @@ impl IptablesManager {
         }
     }
 
-    /// Runs a command.
+    /// Runs a command, logging the invocation at trace and returning its output
+    /// whatever the exit status.
     fn run(
         &self,
         program: impl AsRef<OsStr>,
@@ -613,8 +605,10 @@ impl IptablesManager {
     }
 
     /// Checks whether a specific iptables rule already exists.
+    ///
+    /// Uses `run`, not `run_success`: `-C` exits non-zero when the rule is
+    /// absent, which is the answer, not a failure.
     fn rule_exists(&self, cmd: &str, args: &[&str]) -> bool {
-        // cmd_success logs on fail
         self.run(cmd, args)
             .map(|o| o.status.success())
             .unwrap_or(false)
@@ -628,7 +622,6 @@ impl IptablesManager {
         chain: &str,
         comment: &str,
     ) -> Result<()> {
-        // Rules and delete by line numbers.
         loop {
             let rules = self.get_rules(cmd, table, chain)?;
             let mut deleted = false;
@@ -636,11 +629,10 @@ impl IptablesManager {
                 if rule.contains(&format!("--comment \"{comment}\""))
                     || rule.contains(&format!("--comment {comment}"))
                 {
-                    // Delete by line number from bottom up (or just one by one)
                     let num = (line_num + 1).to_string();
                     self.run_success(cmd, ["-t", table, "-D", chain, &num])?;
                     deleted = true;
-                    break; // Start over since line numbers changed
+                    break; // Restart: deleting shifts every later line number.
                 }
             }
             if !deleted {
@@ -652,11 +644,9 @@ impl IptablesManager {
 
     /// Returns the list of active rules in a chain (lines starting with `-A` or `-I`).
     fn get_rules(&self, cmd: &str, table: &str, chain: &str) -> Result<Vec<String>> {
-        // -S -- short for --list-rules
+        // -S also prints chain declarations, which have no line number to delete.
         let out = self.run(cmd, ["-t", table, "-S", chain])?;
 
-        // Get only -A (append) and -I (insert)
-        // Ignore others, such as chain declarations
         let rules = String::from_utf8_lossy(&out.stdout)
             .lines()
             .filter(|l| l.starts_with("-A ") || l.starts_with("-I "))
@@ -753,8 +743,6 @@ mod tests {
         DockerPortMap::new(id, req, "c1".into(), "svc".into())
     }
 
-    // ── build_dnat_rule_args ──
-
     #[test]
     fn dnat_args_unspecified_ip_omits_d_flag() {
         let m = test_dockermap("0.0.0.0", 8080, "10.0.0.2", 80, TransportProtocol::Tcp, 1);
@@ -763,7 +751,6 @@ mod tests {
         assert!(args.contains(&"DNAT".into()));
         assert!(args.contains(&"8080".into()));
         assert!(args.contains(&"10.0.0.2:80".into()));
-        // Should NOT have -d for unspecified IP
         let d_idx = args.iter().position(|a| a == "-d");
         assert_eq!(d_idx, None, "-d should not appear for unspecified host IP");
     }
@@ -808,8 +795,6 @@ mod tests {
         assert!(args.contains(&m.rule_comment));
     }
 
-    // ── build_forward_accept_args ──
-
     #[test]
     fn forward_accept_args_includes_ctn_ip_and_port() {
         let m = test_dockermap("0.0.0.0", 80, "172.17.0.3", 8080, TransportProtocol::Tcp, 5);
@@ -819,8 +804,6 @@ mod tests {
         assert!(args.contains(&"ACCEPT".into()));
         assert!(args.contains(&"NATMAP".into()));
     }
-
-    // ── build_masquerade_args ──
 
     #[test]
     fn masquerade_args_matches_ctn_ip() {
@@ -834,7 +817,6 @@ mod tests {
         );
         let args = build_masquerade_args(&m);
         assert!(args.contains(&"MASQUERADE".into()));
-        // Both -s and -d should match container IP
         let s_idx = args.iter().position(|a| a == "-s").unwrap();
         let d_idx = args.iter().position(|a| a == "-d").unwrap();
         assert_eq!(
@@ -844,8 +826,6 @@ mod tests {
         );
     }
 
-    // ── build_output_dnat_args ──
-
     #[test]
     fn output_dnat_args_uses_output_dst() {
         let m = test_dockermap("0.0.0.0", 9090, "10.0.0.5", 9090, TransportProtocol::Tcp, 7);
@@ -853,8 +833,6 @@ mod tests {
         assert!(args.contains(&"127.0.0.1".into()));
         assert!(args.contains(&"OUTPUT".into()));
     }
-
-    // ── build_loopback_masq_args ──
 
     #[test]
     fn loopback_masq_args_returned_when_host_unspecified_and_ctn_non_loopback() {
@@ -886,8 +864,6 @@ mod tests {
         let args = build_loopback_masq_args(&m).unwrap();
         assert!(args.contains(&"::1/128".into()));
     }
-
-    // ── build_static_dnat_prerouting_args ──
 
     #[test]
     fn static_dnat_prerouting_single_port() {
@@ -952,8 +928,6 @@ mod tests {
         assert!(args.contains(&"udp".into()));
     }
 
-    // ── build_static_dnat_forward_args ──
-
     #[test]
     fn static_dnat_forward_single_port() {
         let cfg = DnatConfig {
@@ -986,8 +960,6 @@ mod tests {
         assert!(args.contains(&"3000,3001,3002".into()));
     }
 
-    // ── build_snat_args ──
-
     #[test]
     fn snat_args_contains_expected_fields() {
         let cfg = SnatConfig {
@@ -1001,8 +973,6 @@ mod tests {
         assert!(args.contains(&"203.0.113.50".into()));
         assert!(args.contains(&"eth0".into()));
     }
-
-    // ── build_hairpin_prerouting_args ──
 
     #[test]
     fn hairpin_prerouting_args_returned_when_no_lan_cidr() {
@@ -1040,8 +1010,6 @@ mod tests {
         let args = build_hairpin_prerouting_args(&cfg).unwrap();
         assert!(args.contains(&"multiport".into()));
     }
-
-    // ── build_hairpin_postrouting_args ──
 
     #[test]
     fn hairpin_postrouting_args_default_src_without_cidr() {
@@ -1084,7 +1052,6 @@ mod tests {
         assert!(args.contains(&"multiport".into()));
     }
 
-    // ── cmd_for ──
     // The manager struct just delegates; test the helper directly.
 
     #[test]

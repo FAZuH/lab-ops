@@ -183,8 +183,6 @@ pub fn can_proxy(rtype: &str) -> bool {
 mod tests {
     use super::*;
 
-    // ── parse_zone ──
-
     #[test]
     fn parse_zone_record_types() {
         let cases: &[(&str, &str, &str)] = &[
@@ -329,8 +327,6 @@ www.example.com. 300 IN CNAME example.com.";
         assert_eq!(records[0].ttl, 1);
     }
 
-    // ── split_data_and_proxied ──
-
     #[test]
     fn split_data_and_proxied_no_tag() {
         let (data, proxied) = split_data_and_proxied("192.0.2.1");
@@ -365,8 +361,6 @@ www.example.com. 300 IN CNAME example.com.";
         assert_eq!(data, "192.0.2.1 ; cf_tags=cf-proxied:maybe");
         assert_eq!(proxied, None);
     }
-
-    // ── strip_zone ──
 
     #[test]
     fn strip_zone_apex_match() {
@@ -411,8 +405,6 @@ www.example.com. 300 IN CNAME example.com.";
         assert_eq!(strip_zone("", "example.com."), "");
     }
 
-    // ── parse_srv_name ──
-
     #[test]
     fn parse_srv_name_standard() {
         let (name, service, proto) = parse_srv_name("_sip._tcp.example.com.", "example.com.");
@@ -444,8 +436,6 @@ www.example.com. 300 IN CNAME example.com.";
         assert_eq!(service, "_unknown");
         assert_eq!(proto, "tcp");
     }
-
-    // ── parse_tlsa_name ──
 
     #[test]
     fn parse_tlsa_name_standard() {
@@ -484,8 +474,6 @@ www.example.com. 300 IN CNAME example.com.";
         assert_eq!(port, 0);
         assert_eq!(proto, "tcp");
     }
-
-    // ── parse_txt_data ──
 
     #[test]
     fn parse_txt_data_single_quote() {
@@ -527,8 +515,6 @@ www.example.com. 300 IN CNAME example.com.";
             "v=spf1"
         );
     }
-
-    // ── can_proxy ──
 
     #[test]
     fn can_proxy_supported_types() {

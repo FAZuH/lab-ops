@@ -1,3 +1,5 @@
+//! Property tests for the natmap CLI's Docker mapping parser.
+
 use lab_ops_natmap::command::parse_docker_mapping;
 use lab_ops_natmap::models::TransportProtocol;
 use proptest::prelude::*;

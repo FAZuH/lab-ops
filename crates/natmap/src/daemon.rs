@@ -69,15 +69,12 @@ use crate::policy_route::PolicyRouteManager;
 pub struct AppState {
     /// The in-memory daemon state.
     pub daemon_state: Arc<RwLock<DaemonState>>,
-    /// iptables rule manager.
     pub iptables: Arc<dyn Iptables>,
-    /// Policy routing manager.
     pub policy_route: Arc<PolicyRouteManager>,
     /// Docker client (None if Docker is unavailable).
     pub docker: Option<Docker>,
     /// Filesystem path for persisting state to JSON.
     pub state_path: PathBuf,
-    /// Path to natmap socket.
     pub socket_path: PathBuf,
     /// Group name owning the natmap socket.
     pub socket_group: String,
@@ -136,6 +133,8 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// The natmap daemon: iptables owner, state holder, and HTTP server over a
+/// Unix socket.
 #[derive(Clone)]
 pub struct Daemon {
     state: AppState,
@@ -143,6 +142,8 @@ pub struct Daemon {
 }
 
 impl Daemon {
+    /// Builds the daemon and its iptables chains. Fails when the chains cannot be
+    /// created; Docker is optional and its absence only disables auto-discovery.
     pub async fn new(
         socket_path: PathBuf,
         state_path: PathBuf,
@@ -280,20 +281,18 @@ impl Daemon {
         let iptables = self.state.iptables.clone();
         let policy_route = self.state.policy_route.clone();
 
-        // ignore flush fail. we still have more cleanup to do independent from flush
+        // Ignore a flush failure: the rest of the cleanup is independent of it.
         let _ = iptables.flush_all_natmap();
         let _ = policy_route.flush_all(&state.daemon_state.read().await.policy_routes);
         ports.deallocate_all().await;
 
         let mut daemon_state = self.create_daemon_state();
 
-        // Reconcile Docker mappings
         let _ = self
             .reconcile_docker_portmaps(&mut daemon_state)
             .await
             .map_err(|e| tracing::error!(error = %format!("{e:#}"), "error when reconciling docker portmaps"));
 
-        // Reconcile NAT rules
         self.reconcile_hairpins(&mut daemon_state).await;
         self.reconcile_dnats(&mut daemon_state).await;
         self.reconcile_snats(&daemon_state).await;
@@ -472,8 +471,7 @@ impl Daemon {
     ) -> Option<DockerPortMap> {
         let host_addr = m.request.host_addr;
 
-        // Update container_addr from live Docker inspect if changed
-        // (silently falls back to stored IP if inspect failed above)
+        // Keep the stored IP when the re-inspect above failed.
         if let Some(&current_ctn_addr) = current_addrs.get(&host_addr) {
             let proto = m.request.proto;
             if reconcile_container_addr(
@@ -542,15 +540,13 @@ impl Daemon {
                 daemon_state.mapping.drain().collect();
             let mut new_docker = HashMap::new();
 
-            // iter containers
             for (id, maps) in old_maps {
                 if !running_ids.contains(&id) {
                     tracing::info!(container.id = %id, "container gone, removing mappings");
                     continue;
                 }
 
-                // Re-inspect container to get current IPs (may have changed if
-                // Docker network was recreated while daemon was down)
+                // Re-inspect: the network may have been recreated while the daemon was down.
                 let current_addrs: HashMap<SocketAddr, SocketAddr> =
                     docker::get_port_mappings(docker, &id)
                         .await
@@ -563,7 +559,6 @@ impl Daemon {
                         })
                         .collect();
 
-                // iter port mappings for this container
                 let mut kept = Vec::new();
                 for m in maps {
                     if let Some(m) = self.reconcile_tracked_mapping(&id, m, &current_addrs).await {
@@ -576,7 +571,6 @@ impl Daemon {
                 }
             }
 
-            // Discover untracked containers (started while daemon was down)
             let tracked: HashSet<String> = new_docker.keys().cloned().collect();
             for id in untracked_container_ids(&running_ids, &tracked) {
                 tracing::info!(container.id = %id, "discovering untracked container");
@@ -839,6 +833,7 @@ pub(crate) mod tests {
             *self.rules_lines.lock().unwrap() = lines;
         }
 
+        /// Every mapping the fake iptables was asked to install.
         pub(crate) fn installed_mappings(&self) -> Vec<DockerPortMap> {
             self.installed_mappings.lock().unwrap().clone()
         }
@@ -855,6 +850,7 @@ pub(crate) mod tests {
             self.installed_hairpins.lock().unwrap().clone()
         }
 
+        /// Test hook: make the next `install_dockermap` fail.
         pub(crate) fn set_fail_dockermap(&self, fail: bool) {
             self.fail_dockermap.store(fail, Ordering::SeqCst);
         }
@@ -952,6 +948,8 @@ pub(crate) mod tests {
             .collect()
     }
 
+    /// Hands out this test binary's next port, from a band below the daemon's
+    /// ephemeral scan so a concurrent run cannot take it.
     pub(crate) fn test_port() -> u16 {
         test_ports(1)[0]
     }

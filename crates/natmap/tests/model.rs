@@ -1,3 +1,5 @@
+//! Round-trip and invariant tests for the natmap model types and state file.
+
 use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::str::FromStr;

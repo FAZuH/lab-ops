@@ -19,6 +19,7 @@ use crate::models::DockerPortMap;
 use crate::models::HairpinConfig;
 use crate::models::LiveRule;
 use crate::models::PolicyRouteConfig;
+/// Re-exported so callers need only the `client` path.
 pub use crate::utils::NatmapError;
 use crate::utils::request_json;
 
@@ -214,8 +215,8 @@ mod tests {
     #[tokio::test]
     async fn dnat_add_conflicts_when_port_allocated() {
         let state = test_app_state();
-        // Pre-allocate the port so the daemon's bind_ports returns 409.
-        // Loopback binds fine without freebind privileges.
+        // Pre-allocated, so the daemon's bind_ports returns 409. Loopback binds
+        // without freebind privileges.
         let port = test_port();
         state
             .ports
