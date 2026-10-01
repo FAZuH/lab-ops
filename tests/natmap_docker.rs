@@ -98,6 +98,23 @@ mod natmap_docker {
     /// died before binding only surfaced later as an unrelated client error.
     const WAIT_SOCKET: &str = "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done; [ -S /tmp/ns ] || { echo 'FAIL: natmap socket never appeared' >&2; exit 1; }";
 
+    /// Fails unless the script actually exercised its scenario.
+    ///
+    /// A script that soft-skips exits zero having verified nothing, and the
+    /// harness would report that as a pass — indistinguishable from coverage.
+    /// Rust has no dynamic skip, so a skip surfaces here as a failure whose
+    /// message names what was missing.
+    fn assert_scenario_ran(output: &str, test_name: &str) {
+        assert!(
+            !output.contains("SKIP:"),
+            "{test_name} SKIPPED and verified nothing:\n{output}"
+        );
+        assert!(
+            output.contains("PASS"),
+            "{test_name} printed no PASS marker:\n{output}"
+        );
+    }
+
     /// Kills the job named by `pid` and waits for it to be gone, so a following
     /// command cannot race a shutdown. `pid` is a shell expression: `%1` for the
     /// first background job, `$DAEMON_PID` for one captured with `$!`. Polling
@@ -235,9 +252,15 @@ mod natmap_docker {
     }
 
     /// Daemon startup must flush natmap-commented rules via ip6tables too.
+    ///
+    /// The script soft-skips when the image has no `ip6tables`. libtest has no
+    /// dynamic skip, so a soft skip that stayed green would report coverage the
+    /// run never produced — `assert_scenario_ran` turns the skip into a visible
+    /// failure instead. The `iptables` package in this image ships `ip6tables`,
+    /// so the skip branch is only reached on a custom image.
     #[test]
     fn flush_ip6tables_postrouting_natmap_rules() {
-        run_in_docker(&[
+        let out = run_in_docker(&[
             "which ip6tables || (echo 'SKIP: ip6tables not available' && exit 0)",
             "&&",
             "ip6tables -t nat -A POSTROUTING -s fc00::1 -d fc00::1 -p tcp --dport 8080 -j MASQUERADE -m comment --comment 'natmap:ipv6dead:32771'",
@@ -249,6 +272,7 @@ mod natmap_docker {
             "&&",
             "ip6tables -t nat -S POSTROUTING | grep -q 'natmap:ipv6dead' && (echo 'FAIL: ip6tables natmap rule not flushed' >&2 && exit 1) || echo 'PASS'",
         ]);
+        assert_scenario_ran(&out, "flush_ip6tables_postrouting_natmap_rules");
     }
 
     /// Multiple natmap rules in the same chain must all be cleaned.

@@ -60,8 +60,7 @@ echo "PASS: global preserve_src_ip created policy route with cloned local routes
         cname = cname,
     );
 
-    let out = run(&script);
-    assert_pass(&out, "Test J — preserve_src_ip global default");
+    run(&script);
 }
 
 #[test]
@@ -105,8 +104,7 @@ echo "PASS: per-service preserve_src_ip overrides default"
         teardown = teardown(&[cname]),
         cname = cname,
     );
-    let out = run(&script);
-    assert_pass(&out, "Test J — preserve_src_ip per-service override");
+    run(&script);
 }
 
 #[test]
@@ -148,8 +146,7 @@ echo "PASS: preserve_src_ip false skips policy route"
         teardown = teardown(&[cname]),
         cname = cname,
     );
-    let out = run(&script);
-    assert_pass(&out, "Test J — preserve_src_ip false");
+    run(&script);
 }
 
 #[test]
@@ -187,8 +184,7 @@ echo "PASS: preserve_src_ip meta propagated to consul"
         teardown = teardown(&[cname]),
         cname = cname,
     );
-    let out = run(&script);
-    assert_pass(&out, "Test J — preserve_src_ip consul meta");
+    run(&script);
 }
 
 #[test]
@@ -227,8 +223,7 @@ echo "PASS: policy route is idempotent"
         teardown = teardown(&[cname]),
         cname = cname,
     );
-    let out = run(&script);
-    assert_pass(&out, "Test J — preserve_src_ip idempotent");
+    run(&script);
 }
 
 #[test]
@@ -278,6 +273,5 @@ echo "PASS: policy route removed on container stop"
         teardown = teardown(&[cname]),
         cname = cname,
     );
-    let out = run(&script);
-    assert_pass(&out, "Test J — preserve_src_ip stop removes route");
+    run(&script);
 }

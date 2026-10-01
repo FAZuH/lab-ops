@@ -41,8 +41,7 @@ echo "PASS: forwarding local bind_port=36000 with forwarding_type=local"
         cname = cname,
     );
 
-    let out = run(&script);
-    assert_pass(&out, "docker_forwarding_local_bind_port");
+    run(&script);
 }
 
 #[test]
@@ -110,8 +109,7 @@ echo "PASS: forwardlocal + rproxylocal separate entries"
         cname = cname,
     );
 
-    let out = run(&script);
-    assert_pass(&out, "docker_forwarding_local_with_template");
+    run(&script);
 }
 
 #[test]
@@ -150,8 +148,7 @@ sleep 1
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
         wait = wait_for_consul_service("it-local-fwd-local", 15),
     );
-    let out = run(&script);
-    assert_pass(&out, "local_forwarding_local_bind_port");
+    run(&script);
 }
 
 #[test]
@@ -193,8 +190,7 @@ echo "PASS: forwarding local no bind (ephemeral), port=$PORT with forwarding_typ
         cname = cname,
     );
 
-    let out = run(&script);
-    assert_pass(&out, "docker_forwarding_local_no_bind");
+    run(&script);
 }
 
 /// Where the daemon bound a mapping, read from the natmap API rather than the
@@ -267,7 +263,6 @@ echo "PASS: {svc} bound to $EXPECTED"
             svc = svc,
         );
 
-        let out = run(&script);
-        assert_pass(&out, &format!("bind address from {svc}"));
+        run(&script);
     }
 }

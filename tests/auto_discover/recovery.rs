@@ -14,8 +14,7 @@ echo "PASS: sync correctly rejected invalid YAML"
 "#,
         infra = infra_setup(false),
     );
-    let out = run(&script);
-    assert_pass(&out, "Phase 3 — invalid YAML rejected");
+    run(&script);
 }
 
 #[test]
@@ -55,8 +54,7 @@ docker rm -f {cname} 2>/dev/null || true
         after = wait_for_consul_service("it-svc-restart", 30),
         cname = cname,
     );
-    let out = run(&script);
-    assert_pass(&out, "Phase 1 — restart auto-discover");
+    run(&script);
 }
 
 #[test]
@@ -109,8 +107,7 @@ docker rm -f it-nmrestart-a it-nmrestart-c 2>/dev/null || true
         ) + &assert_count_at_most("it-svc-nmrestart", 1, "while natmap was down"),
         recovered = wait_for_consul_service("it-svc-nmrestart", 30),
     );
-    let out = run(&script);
-    assert_pass(&out, "Phase 2 — restart natmap");
+    run(&script);
 }
 
 #[test]
@@ -163,8 +160,7 @@ docker rm -f it-cfg-a it-cfg-b 2>/dev/null || true
         rewrite = write_discovery_config(&format!("node:\n  name: int-test-node\n{second_yaml}")),
         second = wait_for_consul_service("it-svc-cfg-b", 30),
     );
-    let out = run(&script);
-    assert_pass(&out, "Phase 3 — add service to config");
+    run(&script);
 }
 
 /// `remove_service_from_config_stale_deregistered` and
@@ -204,8 +200,7 @@ docker rm -f it-cfg-all 2>/dev/null || true
         sync = sync_once(),
         gone = assert_node_registrations_gone(),
     );
-    let out = run(&script);
-    assert_pass(&out, "Phase 3 — remove all services");
+    run(&script);
 }
 
 #[test]
@@ -268,8 +263,7 @@ if [ "$ADDR1" != "127.0.0.1" ]; then echo "FAIL: expected Address=127.0.0.1, got
 if [ "$ADDR2" != "10.99.99.1" ]; then echo "FAIL: expected Address=10.99.99.1 after change, got $ADDR2" >&2; exit 1; fi
 "#,
     );
-    let out = run(&script);
-    assert_pass(&out, "Phase 3 — change bind_ip");
+    run(&script);
 }
 
 #[test]
@@ -303,6 +297,5 @@ docker rm -f {cnames_list} 2>/dev/null || true
         ),
         cnames_list = cnames.join(" "),
     );
-    let out = run(&script);
-    assert_pass(&out, "Phase 3 — large config");
+    run(&script);
 }

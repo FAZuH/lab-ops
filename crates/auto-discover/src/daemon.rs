@@ -761,12 +761,28 @@ mod tests {
     #[tokio::test]
     #[traced_test]
     async fn handle_container_start_span_fields() {
-        let daemon = DiscoveryDaemon::new(PathBuf::from("/dev/null"));
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("discovery.yaml"),
+            "node:\n  name: test-node\nservices: {}\n",
+        )
+        .unwrap();
+        let daemon = make_daemon(
+            &dir,
+            Arc::new(FakeNatmap::default()),
+            Arc::new(FakeConsul::default()),
+            Arc::new(FakeDocker::with_inspect(make_container_info(
+                "123456789012",
+                "web",
+                Some("my_project"),
+            ))),
+        );
 
-        let _ = daemon
+        let result = daemon
             .handle_container_start("123456789012", "my_project", "start")
             .await;
 
+        assert!(result.is_ok());
         assert!(logs_contain("container.id=123456789012"));
         assert!(logs_contain("event.action=start"));
     }
@@ -774,10 +790,17 @@ mod tests {
     #[tokio::test]
     #[traced_test]
     async fn handle_container_die_logs_deregister() {
-        let daemon = DiscoveryDaemon::new(PathBuf::from("/dev/null"));
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = make_daemon(
+            &dir,
+            Arc::new(FakeNatmap::default()),
+            Arc::new(FakeConsul::default()),
+            Arc::new(FakeDocker::with_running(vec![])),
+        );
 
-        let _ = daemon.handle_container_die("123456789012").await;
+        let result = daemon.handle_container_die("123456789012").await;
 
+        assert!(result.is_ok());
         // The event may be a debug or an error; either way the span must carry the id.
         assert!(logs_contain("container.id=123456789012"));
     }
