@@ -22,7 +22,7 @@ services:
     let script = format!(
         r#"{setup}
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-preserve" nginx:alpine
-sleep 4
+{registered}
 
 # Should add ip rule and route to table 100
 IP_RULE=$(ip rule show)
@@ -53,6 +53,7 @@ echo "PASS: global preserve_src_ip created policy route with cloned local routes
 "#,
         setup =
             new_format_setup_with_defaults_ext(services_yaml, defaults_yaml, "", "--no-forwarding"),
+        registered = wait_for_ip_rule(100, 30),
         teardown = teardown(&[cname]),
         cname = cname,
     );
@@ -85,7 +86,7 @@ services:
     let script = format!(
         r#"{setup}
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-preserve-svc" nginx:alpine
-sleep 4
+{registered}
 
 IP_RULE=$(ip rule show)
 if ! echo "$IP_RULE" | grep -q "lookup 100"; then
@@ -98,6 +99,7 @@ echo "PASS: per-service preserve_src_ip overrides default"
 "#,
         setup =
             new_format_setup_with_defaults_ext(services_yaml, defaults_yaml, "", "--no-forwarding"),
+        registered = wait_for_ip_rule(100, 30),
         teardown = teardown(&[cname]),
         cname = cname,
     );
@@ -123,7 +125,8 @@ services:
     let script = format!(
         r#"{setup}
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-preserve-false" nginx:alpine
-sleep 4
+{registered}
+{settle}
 
 IP_RULE=$(ip rule show)
 if echo "$IP_RULE" | grep -q "lookup 100"; then
@@ -135,6 +138,11 @@ echo "PASS: preserve_src_ip false skips policy route"
 {teardown}
 "#,
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
+        // The absence can only be asserted once the daemon has processed the
+        // container, so wait for the registration first, then for the grace
+        // period the route would have appeared in.
+        registered = wait_for_consul_service("it-svc-preserve-false", 30),
+        settle = settle(4),
         teardown = teardown(&[cname]),
         cname = cname,
     );
@@ -163,7 +171,7 @@ services:
     let script = format!(
         r#"{setup}
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-preserve-meta" nginx:alpine
-sleep 4
+{registered}
 
 SVC=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq 'to_entries[] | select(.value.Service == "it-svc-preserve-meta") | .value')
 PRESERVE=$(echo "$SVC" | jq -r '.Meta.preserve_src_ip')
@@ -173,6 +181,7 @@ echo "PASS: preserve_src_ip meta propagated to consul"
 {teardown}
 "#,
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
+        registered = wait_for_consul_service("it-svc-preserve-meta", 30),
         teardown = teardown(&[cname]),
         cname = cname,
     );
@@ -201,7 +210,7 @@ services:
     let script = format!(
         r#"{setup}
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-preserve-idemp" nginx:alpine
-sleep 4
+{registered}
 
 # Run sync manually again
 lab-ops auto-discover sync $CONSUL_HTTP_ADDR >/tmp/sync.log 2>&1 || true
@@ -213,6 +222,7 @@ echo "PASS: policy route is idempotent"
 {teardown}
 "#,
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
+        registered = wait_for_ip_rule(100, 30),
         teardown = teardown(&[cname]),
         cname = cname,
     );
@@ -241,7 +251,7 @@ services:
     let script = format!(
         r#"{setup}
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-preserve-stop" nginx:alpine
-sleep 4
+{registered}
 
 IP_RULE=$(ip rule show)
 if ! echo "$IP_RULE" | grep -q "lookup 100"; then
@@ -250,7 +260,7 @@ if ! echo "$IP_RULE" | grep -q "lookup 100"; then
 fi
 
 docker stop {cname}
-sleep 4
+{deregistered}
 
 IP_RULE_AFTER=$(ip rule show)
 if echo "$IP_RULE_AFTER" | grep -q "lookup 100"; then
@@ -262,6 +272,8 @@ echo "PASS: policy route removed on container stop"
 {teardown}
 "#,
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
+        registered = wait_for_ip_rule(100, 30),
+        deregistered = wait_for_ip_rule_gone(100, 30),
         teardown = teardown(&[cname]),
         cname = cname,
     );
