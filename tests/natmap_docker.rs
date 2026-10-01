@@ -692,11 +692,22 @@ mod natmap_docker {
             "&&",
             "lab-ops natmap --socket /tmp/ns docker add 127.0.0.1:32771:172.18.0.2:9000 --name portainer-ce",
             "&&",
-            "iptables -t nat -S POSTROUTING | grep -- '-s 127.0.0.0/8 -d 172.18.0.2' && echo 'PASS' || (echo 'FAIL: loopback MASQUERADE missing' >&2 && iptables -t nat -S POSTROUTING >&2 && exit 1)",
+            "iptables-save | grep 'natmap:portainer-ce:32771' | grep -- '-s 127.0.0.0/8' || true",
         ]);
-        assert!(
-            out.contains("PASS"),
-            "loopback→container MASQUERADE rule missing after loopback-host mapping:\n{out}"
+
+        let actual: Vec<&str> = out
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+
+        let expected = vec![
+            r#"-A POSTROUTING -s 127.0.0.0/8 -d 172.18.0.2/32 -p tcp -m tcp --dport 9000 -m comment --comment "natmap:portainer-ce:32771" -j MASQUERADE"#,
+        ];
+
+        assert_eq!(
+            actual, expected,
+            "loopback→container MASQUERADE rule does not match:\n{out}"
         );
     }
 
@@ -713,7 +724,11 @@ mod natmap_docker {
             "&&",
             "lab-ops natmap --socket /tmp/ns docker add 100.64.0.5:32771:172.18.0.2:9000 --name portainer-remote",
             "&&",
-            "iptables -t nat -S POSTROUTING | grep -- '-s 127.0.0.0/8' | grep -q 'natmap:' && (echo 'FAIL: unexpected loopback MASQUERADE for non-loopback host' >&2 && iptables -t nat -S POSTROUTING >&2 && exit 1) || echo 'PASS'",
+            "iptables -t nat -S POSTROUTING | grep -q 'natmap:portainer-remote:32771' || { echo 'FAIL: no natmap POSTROUTING rule, so the loopback check below proves nothing' >&2; exit 1; }",
+            "&&",
+            "if iptables -t nat -S POSTROUTING | grep 'natmap:portainer-remote:32771' | grep -q -- '-s 127.0.0.0/8'; then echo 'FAIL: unexpected loopback MASQUERADE for non-loopback host' >&2; iptables -t nat -S POSTROUTING >&2; exit 1; fi",
+            "&&",
+            "echo 'PASS'",
         ]);
         assert!(
             out.contains("PASS"),
