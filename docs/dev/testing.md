@@ -50,7 +50,7 @@ The per-file counts above and the totals drift; they are a guide, not a gate.
 `cargo test -p <crate>` is the source of truth.
 
 
-**Total: 88 inline unit tests**
+**Total: 328 inline unit tests**, measured from the four lib test binaries after a forced rebuild (`cargo test -p lab-ops -p lab-ops_natmap -p lab-ops_auto-discover -p lab-ops_lab-lib --lib`): 57 + 157 + 80 + 34.
 
 ### Doc Tests
 
