@@ -997,6 +997,34 @@ pub(crate) mod tests {
         ids.iter().map(|&s| s.to_string()).collect()
     }
 
+    fn make_state(entries: &[(&str, u16, &str)]) -> Arc<RwLock<DaemonState>> {
+        let mut state = DaemonState::default();
+        for (idx, (id, host_port, container_ip)) in entries.iter().enumerate() {
+            state.mapping.insert(
+                (*id).to_string(),
+                vec![DockerPortMap::new(
+                    idx as u64 + 1,
+                    DockerPortMapRequest {
+                        host_addr: format!("0.0.0.0:{host_port}").parse().unwrap(),
+                        container_addr: format!("{container_ip}:{host_port}").parse().unwrap(),
+                        proto: TransportProtocol::Tcp,
+                    },
+                    (*id).to_string(),
+                    format!("{id}-container"),
+                )],
+            );
+        }
+        Arc::new(RwLock::new(state))
+    }
+
+    fn make_stored_request(host: &str, container: &str) -> DockerPortMapRequest {
+        DockerPortMapRequest {
+            host_addr: host.parse().unwrap(),
+            container_addr: container.parse().unwrap(),
+            proto: TransportProtocol::Tcp,
+        }
+    }
+
     fn test_daemon_with(
         state_path: PathBuf,
         iptables: Arc<dyn Iptables>,
@@ -1088,7 +1116,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn resolve_stale_returns_none_when_no_mapping() {
-        let state = Arc::new(RwLock::new(DaemonState::default()));
+        let state = make_state(&[]);
         let addr: SocketAddr = "0.0.0.0:9000".parse().unwrap();
         let result = resolve_stale_container(&state, addr, "new-container").await;
         assert!(result.is_none());
@@ -1096,20 +1124,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn resolve_stale_returns_none_when_no_match() {
-        let state = Arc::new(RwLock::new(DaemonState::default()));
-        state.write().await.mapping.insert(
-            "other".into(),
-            vec![DockerPortMap::new(
-                1,
-                DockerPortMapRequest {
-                    host_addr: "0.0.0.0:8080".parse().unwrap(),
-                    container_addr: "10.0.0.2:8080".parse().unwrap(),
-                    proto: TransportProtocol::Tcp,
-                },
-                "other".into(),
-                "other-container".into(),
-            )],
-        );
+        let state = make_state(&[("other", 8080, "10.0.0.2")]);
         let addr: SocketAddr = "0.0.0.0:9000".parse().unwrap();
         let result = resolve_stale_container(&state, addr, "new-container").await;
         assert!(result.is_none());
@@ -1117,20 +1132,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn resolve_stale_returns_stale_id_when_match() {
-        let state = Arc::new(RwLock::new(DaemonState::default()));
-        state.write().await.mapping.insert(
-            "stale".into(),
-            vec![DockerPortMap::new(
-                1,
-                DockerPortMapRequest {
-                    host_addr: "0.0.0.0:9000".parse().unwrap(),
-                    container_addr: "10.0.0.2:9000".parse().unwrap(),
-                    proto: TransportProtocol::Tcp,
-                },
-                "stale".into(),
-                "old-container".into(),
-            )],
-        );
+        let state = make_state(&[("stale", 9000, "10.0.0.2")]);
         let addr: SocketAddr = "0.0.0.0:9000".parse().unwrap();
         let result = resolve_stale_container(&state, addr, "new-container").await;
         assert_eq!(result, Some("stale".to_string()));
@@ -1138,20 +1140,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn resolve_stale_returns_none_for_same_container() {
-        let state = Arc::new(RwLock::new(DaemonState::default()));
-        state.write().await.mapping.insert(
-            "same".into(),
-            vec![DockerPortMap::new(
-                1,
-                DockerPortMapRequest {
-                    host_addr: "0.0.0.0:9000".parse().unwrap(),
-                    container_addr: "10.0.0.2:9000".parse().unwrap(),
-                    proto: TransportProtocol::Tcp,
-                },
-                "same".into(),
-                "same-container".into(),
-            )],
-        );
+        let state = make_state(&[("same", 9000, "10.0.0.2")]);
         let addr: SocketAddr = "0.0.0.0:9000".parse().unwrap();
         let result = resolve_stale_container(&state, addr, "same").await;
         assert!(result.is_none(), "same container should not be stale");
@@ -1159,33 +1148,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn resolve_stale_returns_correct_id_when_multiple_containers() {
-        let state = Arc::new(RwLock::new(DaemonState::default()));
-        state.write().await.mapping.insert(
-            "alpha".into(),
-            vec![DockerPortMap::new(
-                1,
-                DockerPortMapRequest {
-                    host_addr: "0.0.0.0:8080".parse().unwrap(),
-                    container_addr: "10.0.0.2:8080".parse().unwrap(),
-                    proto: TransportProtocol::Tcp,
-                },
-                "alpha".into(),
-                "alpha-container".into(),
-            )],
-        );
-        state.write().await.mapping.insert(
-            "bravo".into(),
-            vec![DockerPortMap::new(
-                2,
-                DockerPortMapRequest {
-                    host_addr: "0.0.0.0:9000".parse().unwrap(),
-                    container_addr: "10.0.0.3:9000".parse().unwrap(),
-                    proto: TransportProtocol::Tcp,
-                },
-                "bravo".into(),
-                "bravo-container".into(),
-            )],
-        );
+        let state = make_state(&[("alpha", 8080, "10.0.0.2"), ("bravo", 9000, "10.0.0.3")]);
         let addr: SocketAddr = "0.0.0.0:9000".parse().unwrap();
         let result = resolve_stale_container(&state, addr, "new-container").await;
         assert_eq!(result, Some("bravo".to_string()));
@@ -1226,16 +1189,8 @@ pub(crate) mod tests {
 
     #[test]
     fn reconcile_addr_no_change() {
-        let mut stored = DockerPortMapRequest {
-            host_addr: "0.0.0.0:9000".parse().unwrap(),
-            container_addr: "10.0.0.2:9000".parse().unwrap(),
-            proto: TransportProtocol::Tcp,
-        };
-        let current = DockerPortMapRequest {
-            host_addr: "0.0.0.0:9000".parse().unwrap(),
-            container_addr: "10.0.0.2:9000".parse().unwrap(),
-            proto: TransportProtocol::Tcp,
-        };
+        let mut stored = make_stored_request("0.0.0.0:9000", "10.0.0.2:9000");
+        let current = make_stored_request("0.0.0.0:9000", "10.0.0.2:9000");
         assert!(!reconcile_container_addr(&mut stored, &current));
         assert_eq!(
             stored.container_addr,
@@ -1245,16 +1200,8 @@ pub(crate) mod tests {
 
     #[test]
     fn reconcile_addr_updated() {
-        let mut stored = DockerPortMapRequest {
-            host_addr: "0.0.0.0:9000".parse().unwrap(),
-            container_addr: "10.0.0.2:9000".parse().unwrap(),
-            proto: TransportProtocol::Tcp,
-        };
-        let current = DockerPortMapRequest {
-            host_addr: "0.0.0.0:9000".parse().unwrap(),
-            container_addr: "10.0.0.3:9000".parse().unwrap(),
-            proto: TransportProtocol::Tcp,
-        };
+        let mut stored = make_stored_request("0.0.0.0:9000", "10.0.0.2:9000");
+        let current = make_stored_request("0.0.0.0:9000", "10.0.0.3:9000");
         assert!(reconcile_container_addr(&mut stored, &current));
         assert_eq!(
             stored.container_addr,
@@ -1264,16 +1211,8 @@ pub(crate) mod tests {
 
     #[test]
     fn reconcile_addr_different_host_port_same_container_ip() {
-        let mut stored = DockerPortMapRequest {
-            host_addr: "0.0.0.0:8080".parse().unwrap(),
-            container_addr: "10.0.0.2:80".parse().unwrap(),
-            proto: TransportProtocol::Tcp,
-        };
-        let current = DockerPortMapRequest {
-            host_addr: "0.0.0.0:9090".parse().unwrap(),
-            container_addr: "10.0.0.2:80".parse().unwrap(),
-            proto: TransportProtocol::Tcp,
-        };
+        let mut stored = make_stored_request("0.0.0.0:8080", "10.0.0.2:80");
+        let current = make_stored_request("0.0.0.0:9090", "10.0.0.2:80");
         assert!(!reconcile_container_addr(&mut stored, &current));
         assert_eq!(
             stored.container_addr,

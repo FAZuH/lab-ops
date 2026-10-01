@@ -385,30 +385,45 @@ mod tests {
     use crate::config::ResolvedPortType;
     use crate::config::ServiceType;
 
-    #[test]
-    fn build_consul_service() {
-        let mut extra = HashMap::new();
-        extra.insert("client_max_body_size".into(), "50M".into());
-
-        let service = ResolvedService {
-            service_id_prefix: "example-drive".into(),
-            service_name: "example-drive".into(),
+    fn make_resolved(
+        prefix: &str,
+        container_port: u16,
+        protocol: TransportProtocol,
+        port_type: ResolvedPortType,
+        extra: HashMap<String, String>,
+    ) -> ResolvedService {
+        ResolvedService {
+            service_id_prefix: prefix.into(),
+            service_name: prefix.into(),
             service_type: ServiceType::Docker,
             match_cfg: None,
             local_address: None,
-            container_port: 80,
+            container_port,
             proxy_on: None,
             bind_ip: None,
             bind_interface: None,
-            protocol: TransportProtocol::Tcp,
+            protocol,
             extra,
-            port_type: ResolvedPortType::RProxyLocal {
+            port_type,
+        }
+    }
+
+    #[test]
+    fn build_consul_service_identity_and_address() {
+        let mut extra = HashMap::new();
+        extra.insert("client_max_body_size".into(), "50M".into());
+        let service = make_resolved(
+            "example-drive",
+            80,
+            TransportProtocol::Tcp,
+            ResolvedPortType::RProxyLocal {
                 template: "example-drive.ctmpl".into(),
                 domains: vec!["drive.example.com".into()],
                 proxy_on: None,
                 proxy_ip: Some("203.0.113.43".into()),
             },
-        };
+            extra,
+        );
 
         let reg = ConsulServiceRegistration::new(
             &service,
@@ -423,6 +438,34 @@ mod tests {
         assert_eq!(reg.name, "example-drive");
         assert_eq!(reg.address, "10.0.0.101");
         assert_eq!(reg.port, 32000);
+    }
+
+    #[test]
+    fn build_consul_service_meta_from_rproxy_local() {
+        let mut extra = HashMap::new();
+        extra.insert("client_max_body_size".into(), "50M".into());
+        let service = make_resolved(
+            "example-drive",
+            80,
+            TransportProtocol::Tcp,
+            ResolvedPortType::RProxyLocal {
+                template: "example-drive.ctmpl".into(),
+                domains: vec!["drive.example.com".into()],
+                proxy_on: None,
+                proxy_ip: Some("203.0.113.43".into()),
+            },
+            extra,
+        );
+
+        let reg = ConsulServiceRegistration::new(
+            &service,
+            32000,
+            "service-node-1",
+            "gen-123",
+            "abcdef",
+            "10.0.0.101",
+        );
+
         assert_eq!(reg.meta.get("domain").unwrap(), "drive.example.com");
         assert_eq!(reg.meta.get("template").unwrap(), "example-drive.ctmpl");
         assert_eq!(reg.meta.get("proxy_ip").unwrap(), "203.0.113.43");
@@ -430,30 +473,51 @@ mod tests {
         assert_eq!(reg.meta.get("generation_id").unwrap(), "gen-123");
         assert_eq!(reg.meta.get("container_id").unwrap(), "abcdef");
         assert_eq!(reg.meta.get("client_max_body_size").unwrap(), "50M");
-        assert!(reg.check.get("TCP").is_some());
     }
 
     #[test]
-    fn build_consul_service_udp_check() {
-        let service = ResolvedService {
-            service_id_prefix: "dns".into(),
-            service_name: "dns".into(),
-            service_type: ServiceType::Docker,
-            match_cfg: None,
-            local_address: None,
-            container_port: 53,
-            proxy_on: None,
-            bind_ip: None,
-            bind_interface: None,
-            protocol: TransportProtocol::Udp,
-            extra: HashMap::new(),
-            port_type: ResolvedPortType::RProxyLocal {
+    fn build_consul_service_health_check_for_protocol() {
+        let cases = [
+            (TransportProtocol::Tcp, true, false),
+            (TransportProtocol::Udp, false, true),
+        ];
+
+        for (protocol, has_tcp, has_args) in cases {
+            let service = make_resolved(
+                "drive",
+                80,
+                protocol,
+                ResolvedPortType::RProxyLocal {
+                    template: "drive.ctmpl".into(),
+                    domains: vec!["drive.example.com".into()],
+                    proxy_on: None,
+                    proxy_ip: None,
+                },
+                HashMap::new(),
+            );
+
+            let reg =
+                ConsulServiceRegistration::new(&service, 32000, "node", "gen", "cid", "10.0.0.101");
+
+            assert_eq!(reg.check.get("TCP").is_some(), has_tcp, "{protocol}");
+            assert_eq!(reg.check.get("Args").is_some(), has_args, "{protocol}");
+        }
+    }
+
+    #[test]
+    fn build_consul_service_meta_protocol_reflects_service() {
+        let service = make_resolved(
+            "dns",
+            53,
+            TransportProtocol::Udp,
+            ResolvedPortType::RProxyLocal {
                 template: "dns.ctmpl".into(),
                 domains: vec!["dns.example.com".into()],
                 proxy_on: None,
                 proxy_ip: None,
             },
-        };
+            HashMap::new(),
+        );
 
         let reg = ConsulServiceRegistration::new(
             &service,
@@ -465,8 +529,6 @@ mod tests {
         );
 
         assert_eq!(reg.meta.get("protocol").unwrap(), "udp");
-        assert!(reg.check.get("Args").is_some());
-        assert!(reg.check.get("TCP").is_none());
     }
 
     #[test]
@@ -483,19 +545,11 @@ mod tests {
 
     #[test]
     fn build_consul_service_with_forwarding() {
-        let service = ResolvedService {
-            service_id_prefix: "example-mc".into(),
-            service_name: "example-mc".into(),
-            service_type: ServiceType::Docker,
-            match_cfg: None,
-            local_address: None,
-            container_port: 25565,
-            proxy_on: None,
-            bind_ip: None,
-            bind_interface: None,
-            protocol: TransportProtocol::Tcp,
-            extra: HashMap::new(),
-            port_type: ResolvedPortType::ForwardRemote {
+        let service = make_resolved(
+            "example-mc",
+            25565,
+            TransportProtocol::Tcp,
+            ResolvedPortType::ForwardRemote {
                 ext_ip: "203.0.113.43".into(),
                 ext_ports: vec![25565],
                 hairpin: true,
@@ -504,7 +558,8 @@ mod tests {
                 preserve_src_ip_gateway: None,
                 preserve_src_ip_src: None,
             },
-        };
+            HashMap::new(),
+        );
 
         let reg = ConsulServiceRegistration::new(
             &service,
