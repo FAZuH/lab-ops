@@ -450,7 +450,6 @@ mod tests {
             ResolvedPortType::RProxyLocal {
                 template: "example-drive.ctmpl".into(),
                 domains: vec!["drive.example.com".into()],
-                proxy_on: None,
                 proxy_ip: Some("203.0.113.43".into()),
             },
             extra,
@@ -489,7 +488,6 @@ mod tests {
                 ResolvedPortType::RProxyLocal {
                     template: "drive.ctmpl".into(),
                     domains: vec!["drive.example.com".into()],
-                    proxy_on: None,
                     proxy_ip: None,
                 },
                 HashMap::new(),
