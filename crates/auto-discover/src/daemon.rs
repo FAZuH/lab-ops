@@ -1008,6 +1008,27 @@ mod tests {
         }
     }
 
+    /// Returns the tempdir, the two recording fakes, and a daemon wired to
+    /// them. The tempdir must stay alive for the test's duration because
+    /// `config_path` and `state_dir` point into it.
+    fn make_sync_daemon() -> (
+        tempfile::TempDir,
+        Arc<FakeNatmap>,
+        Arc<FakeConsul>,
+        DiscoveryDaemon,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let natmap = Arc::new(FakeNatmap::default());
+        let consul = Arc::new(FakeConsul::default());
+        let daemon = make_daemon(
+            &dir,
+            natmap.clone(),
+            consul.clone(),
+            Arc::new(FakeDocker::with_running(vec![])),
+        );
+        (dir, natmap, consul, daemon)
+    }
+
     fn make_forward_remote(
         ext_ports: Vec<u16>,
         preserve_src_ip: bool,
@@ -1040,15 +1061,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_service_docker_target_maps_and_registers() {
-        let dir = tempfile::tempdir().unwrap();
-        let natmap = Arc::new(FakeNatmap::default());
-        let consul = Arc::new(FakeConsul::default());
-        let daemon = make_daemon(
-            &dir,
-            natmap.clone(),
-            consul.clone(),
-            Arc::new(FakeDocker::with_running(vec![])),
-        );
+        let (_dir, natmap, consul, daemon) = make_sync_daemon();
 
         let info = make_container_info("abc123def456", "web", Some("myproj"));
         let mut resolved = make_resolved(
@@ -1086,15 +1099,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_service_local_target_maps_with_prefix_and_local_ip() {
-        let dir = tempfile::tempdir().unwrap();
-        let natmap = Arc::new(FakeNatmap::default());
-        let consul = Arc::new(FakeConsul::default());
-        let daemon = make_daemon(
-            &dir,
-            natmap.clone(),
-            consul.clone(),
-            Arc::new(FakeDocker::with_running(vec![])),
-        );
+        let (_dir, natmap, consul, daemon) = make_sync_daemon();
 
         let resolved = make_resolved(
             "loc",
@@ -1129,15 +1134,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_service_docker_forward_remote_always_maps() {
-        let dir = tempfile::tempdir().unwrap();
-        let natmap = Arc::new(FakeNatmap::default());
-        let consul = Arc::new(FakeConsul::default());
-        let daemon = make_daemon(
-            &dir,
-            natmap.clone(),
-            consul.clone(),
-            Arc::new(FakeDocker::with_running(vec![])),
-        );
+        let (_dir, natmap, _consul, daemon) = make_sync_daemon();
 
         let info = make_container_info("abc123def456", "web", None);
         let mut resolved = make_resolved(
@@ -1166,15 +1163,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_service_local_forward_remote_maps_when_port_free() {
-        let dir = tempfile::tempdir().unwrap();
-        let natmap = Arc::new(FakeNatmap::default());
-        let consul = Arc::new(FakeConsul::default());
-        let daemon = make_daemon(
-            &dir,
-            natmap.clone(),
-            consul.clone(),
-            Arc::new(FakeDocker::with_running(vec![])),
-        );
+        let (_dir, natmap, _consul, daemon) = make_sync_daemon();
 
         let resolved = make_resolved(
             "loc",
@@ -1201,16 +1190,8 @@ mod tests {
 
     #[tokio::test]
     async fn sync_service_local_forward_remote_conflict_skips_mapping_but_registers() {
-        let dir = tempfile::tempdir().unwrap();
-        let natmap = Arc::new(FakeNatmap::default());
+        let (_dir, natmap, consul, daemon) = make_sync_daemon();
         natmap.conflict_add_mapping.store(true, Ordering::SeqCst);
-        let consul = Arc::new(FakeConsul::default());
-        let daemon = make_daemon(
-            &dir,
-            natmap.clone(),
-            consul.clone(),
-            Arc::new(FakeDocker::with_running(vec![])),
-        );
 
         let resolved = make_resolved(
             "loc",
@@ -1239,15 +1220,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_service_local_rproxy_skips_natmap() {
-        let dir = tempfile::tempdir().unwrap();
-        let natmap = Arc::new(FakeNatmap::default());
-        let consul = Arc::new(FakeConsul::default());
-        let daemon = make_daemon(
-            &dir,
-            natmap.clone(),
-            consul.clone(),
-            Arc::new(FakeDocker::with_running(vec![])),
-        );
+        let (_dir, natmap, consul, daemon) = make_sync_daemon();
 
         let resolved = make_resolved(
             "web",
@@ -1280,15 +1253,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_service_docker_rproxy_allocates_and_maps() {
-        let dir = tempfile::tempdir().unwrap();
-        let natmap = Arc::new(FakeNatmap::default());
-        let consul = Arc::new(FakeConsul::default());
-        let daemon = make_daemon(
-            &dir,
-            natmap.clone(),
-            consul.clone(),
-            Arc::new(FakeDocker::with_running(vec![])),
-        );
+        let (_dir, natmap, consul, daemon) = make_sync_daemon();
 
         let info = make_container_info("abc123def456", "web", None);
         let mut resolved = make_resolved(
@@ -1327,15 +1292,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_service_docker_forward_local_dynamic_requests_zero_host_port() {
-        let dir = tempfile::tempdir().unwrap();
-        let natmap = Arc::new(FakeNatmap::default());
-        let consul = Arc::new(FakeConsul::default());
-        let daemon = make_daemon(
-            &dir,
-            natmap.clone(),
-            consul.clone(),
-            Arc::new(FakeDocker::with_running(vec![])),
-        );
+        let (_dir, natmap, consul, daemon) = make_sync_daemon();
 
         let info = make_container_info("abc123def456", "web", None);
         let mut resolved = make_resolved(
@@ -1366,16 +1323,8 @@ mod tests {
 
     #[tokio::test]
     async fn sync_service_dynamic_mapping_not_found_is_fatal() {
-        let dir = tempfile::tempdir().unwrap();
-        let natmap = Arc::new(FakeNatmap::default());
+        let (_dir, natmap, consul, daemon) = make_sync_daemon();
         natmap.not_found_add_mapping.store(true, Ordering::SeqCst);
-        let consul = Arc::new(FakeConsul::default());
-        let daemon = make_daemon(
-            &dir,
-            natmap.clone(),
-            consul.clone(),
-            Arc::new(FakeDocker::with_running(vec![])),
-        );
 
         let info = make_container_info("abc123def456", "web", None);
         let mut resolved = make_resolved(
@@ -1402,15 +1351,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_service_policy_route_uses_explicit_src_ip() {
-        let dir = tempfile::tempdir().unwrap();
-        let natmap = Arc::new(FakeNatmap::default());
-        let consul = Arc::new(FakeConsul::default());
-        let daemon = make_daemon(
-            &dir,
-            natmap.clone(),
-            consul.clone(),
-            Arc::new(FakeDocker::with_running(vec![])),
-        );
+        let (_dir, natmap, _consul, daemon) = make_sync_daemon();
 
         let info = make_container_info("abc123def456", "web", None);
         let mut resolved = make_resolved(
@@ -1441,15 +1382,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_service_policy_route_local_falls_back_to_local_ip() {
-        let dir = tempfile::tempdir().unwrap();
-        let natmap = Arc::new(FakeNatmap::default());
-        let consul = Arc::new(FakeConsul::default());
-        let daemon = make_daemon(
-            &dir,
-            natmap.clone(),
-            consul.clone(),
-            Arc::new(FakeDocker::with_running(vec![])),
-        );
+        let (_dir, natmap, _consul, daemon) = make_sync_daemon();
 
         let resolved = make_resolved(
             "loc",
@@ -1475,16 +1408,8 @@ mod tests {
 
     #[tokio::test]
     async fn sync_service_propagates_mapping_failure() {
-        let dir = tempfile::tempdir().unwrap();
-        let natmap = Arc::new(FakeNatmap::default());
+        let (_dir, natmap, consul, daemon) = make_sync_daemon();
         natmap.fail_add_mapping.store(true, Ordering::SeqCst);
-        let consul = Arc::new(FakeConsul::default());
-        let daemon = make_daemon(
-            &dir,
-            natmap.clone(),
-            consul.clone(),
-            Arc::new(FakeDocker::with_running(vec![])),
-        );
 
         let info = make_container_info("abc123def456", "web", None);
         let mut resolved = make_resolved(
@@ -1559,16 +1484,8 @@ services:
     #[tokio::test]
     #[traced_test]
     async fn sync_service_mapping_conflict_is_non_fatal() {
-        let dir = tempfile::tempdir().unwrap();
-        let natmap = Arc::new(FakeNatmap::default());
+        let (_dir, natmap, consul, daemon) = make_sync_daemon();
         natmap.conflict_add_mapping.store(true, Ordering::SeqCst);
-        let consul = Arc::new(FakeConsul::default());
-        let daemon = make_daemon(
-            &dir,
-            natmap.clone(),
-            consul.clone(),
-            Arc::new(FakeDocker::with_running(vec![])),
-        );
 
         let info = make_container_info("abc123def456", "web", None);
         let mut resolved = make_resolved(
