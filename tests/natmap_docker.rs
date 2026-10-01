@@ -743,6 +743,43 @@ mod natmap_docker {
         );
     }
 
+    #[test]
+    fn docker_mapping_installs_full_rule_set() {
+        let out = run_in_docker(&[
+            "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
+            WAIT_SOCKET,
+            "&&",
+            "lab-ops natmap --socket /tmp/ns docker add 100.64.0.5:32771:172.18.0.2:9000 --name portainer-remote",
+            "&&",
+            // Only natmap's own rules carry the natmap: comment; the chain jumps (-A PREROUTING -j NATMAP) do not.
+            "iptables-save | grep -- 'natmap:' | sort",
+        ]);
+
+        let mut actual: Vec<&str> = out
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        actual.sort_unstable();
+
+        let mut expected = vec![
+            // DNAT into the container (nat/NATMAP)
+            r#"-A NATMAP -d 100.64.0.5/32 -p tcp -m tcp --dport 32771 -m comment --comment "natmap:portainer-remote:32771" -j DNAT --to-destination 172.18.0.2:9000"#,
+            // FORWARD ACCEPT to the container (filter/NATMAP)
+            r#"-A NATMAP -d 172.18.0.2/32 -p tcp -m tcp --dport 9000 -m comment --comment "natmap:portainer-remote:32771" -j ACCEPT"#,
+            // OUTPUT DNAT for locally-generated traffic (nat/OUTPUT)
+            r#"-A OUTPUT -d 100.64.0.5/32 -p tcp -m tcp --dport 32771 -m comment --comment "natmap:portainer-remote:32771" -j DNAT --to-destination 172.18.0.2:9000"#,
+            // POSTROUTING MASQUERADE (nat/POSTROUTING)
+            r#"-A POSTROUTING -s 172.18.0.2/32 -d 172.18.0.2/32 -p tcp -m tcp --dport 9000 -m comment --comment "natmap:portainer-remote:32771" -j MASQUERADE"#,
+        ];
+        expected.sort_unstable();
+
+        assert_eq!(
+            actual, expected,
+            "natmap rule set for one mapping does not match:\n{out}"
+        );
+    }
+
     /// policy-route must clone local-subnet routes from the main table into the
     /// policy routing table, so traffic from the source IP to Docker bridges,
     /// LAN subnets, etc. uses the correct interface instead of the proxy gateway.
