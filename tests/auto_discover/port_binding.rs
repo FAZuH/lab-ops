@@ -195,133 +195,77 @@ echo "PASS: forwarding local no bind (ephemeral), port=$PORT with forwarding_typ
     assert_pass(&out, "docker_forwarding_local_no_bind");
 }
 
-#[test]
-fn bind_ip_strict_address() {
-    let cname = "it-bind-ip";
-    let services_yaml = r#"
-services:
-  it-svc-b:
-    type: docker
-    match:
-      project: it-svc-b
-    bind_ip: 10.99.99.1
-    rproxylocal:
-    - port: 80
-      template: HTTP_PROXY
-      domains:
-      - it-svc-b.test.local"#;
-
-    let script = format!(
-        r#"{setup}
-docker run -d --name {cname} -l "com.docker.compose.project=it-svc-b" nginx:alpine
-{registered}
-
-PORT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-b") | .value.Port')
-if [ -z "$PORT" ] || [ "$PORT" = "null" ]; then echo "FAIL: not registered with Consul" >&2; exit 1; fi
-
-CID=$(docker inspect -f '{{{{.Id}}}}' {cname} | cut -c1-12)
-MAPPING=$(lab-ops natmap --socket /tmp/natmap.sock ls | awk -v id="$CID" '$6 == id {{print $8}}')
-EXPECTED="10.99.99.1:$PORT"
-if [ "$MAPPING" != "$EXPECTED" ]; then echo "FAIL: expected $EXPECTED, got $MAPPING" >&2; exit 1; fi
-
-echo "PASS: bound to $EXPECTED"
-{teardown}
-"#,
-        setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
-        registered = wait_for_consul_service("it-svc-b", 30),
-        teardown = teardown(&[cname]),
-        cname = cname,
-    );
-
-    let out = run(&script);
-    assert_pass(&out, "Test B — bind_ip");
+/// Where the daemon bound a mapping, read from the natmap API rather than the
+/// `ls` table, so a column reorder or a re-pad cannot move the field out from
+/// under the check. `$cid` must be set.
+fn natmap_host_addr() -> String {
+    r#"MAPPING=$(curl -sf --unix-socket /tmp/natmap.sock http://localhost/mappings \
+  | jq -r --arg id "$CID" '.docker[] | select(.container_id | startswith($id)) | .request.host_addr')"#
+        .to_string()
 }
 
+/// One scenario per bind source. `bind_ip` is taken verbatim; `bind_interface`
+/// is resolved to the interface's address; `bind_interface` also beats a
+/// `defaults:` block. All three must land on dummy0's 10.99.99.1.
+const BIND_SOURCES: [(&str, &str, &str, &str); 3] = [
+    ("it-bind-ip", "it-svc-b", "bind_ip: 10.99.99.1", ""),
+    ("it-iface", "it-svc-c", "bind_interface: dummy0", ""),
+    (
+        "it-iface-override",
+        "it-svc-override",
+        "bind_interface: dummy0",
+        "\n  bind_ip: 1.2.3.4\n",
+    ),
+];
+
 #[test]
-fn bind_interface_resolved_address() {
-    let cname = "it-iface";
-    let services_yaml = r#"
+fn docker_bind_address_from_config() {
+    for (cname, svc, bind_line, defaults_yaml) in BIND_SOURCES {
+        let services_yaml = format!(
+            r#"
 services:
-  it-svc-c:
+  {svc}:
     type: docker
     match:
-      project: it-svc-c
-    bind_interface: dummy0
+      project: {svc}
+    {bind_line}
     rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains:
-      - it-svc-c.test.local"#;
+      - {svc}.test.local"#
+        );
 
-    let script = format!(
-        r#"{setup}
-docker run -d --name {cname} -l "com.docker.compose.project=it-svc-c" nginx:alpine
+        let script = format!(
+            r#"{setup}
+docker run -d --name {cname} -l "com.docker.compose.project={svc}" nginx:alpine
 {registered}
 
-PORT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-c") | .value.Port')
-if [ -z "$PORT" ] || [ "$PORT" = "null" ]; then echo "FAIL: not registered with Consul" >&2; exit 1; fi
+PORT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "{svc}") | .value.Port')
+if [ -z "$PORT" ] || [ "$PORT" = "null" ]; then echo "FAIL: {svc} not registered with Consul" >&2; exit 1; fi
 
 CID=$(docker inspect -f '{{{{.Id}}}}' {cname} | cut -c1-12)
-MAPPING=$(lab-ops natmap --socket /tmp/natmap.sock ls | awk -v id="$CID" '$6 == id {{print $8}}')
+{mapping}
 EXPECTED="10.99.99.1:$PORT"
-if [ "$MAPPING" != "$EXPECTED" ]; then echo "FAIL: expected $EXPECTED, got $MAPPING" >&2; exit 1; fi
+if [ "$MAPPING" != "$EXPECTED" ]; then echo "FAIL: {svc}: expected $EXPECTED, got $MAPPING" >&2; exit 1; fi
 
-echo "PASS: bound to $EXPECTED"
+echo "PASS: {svc} bound to $EXPECTED"
 {teardown}
 "#,
-        setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
-        registered = wait_for_consul_service("it-svc-c", 30),
-        teardown = teardown(&[cname]),
-        cname = cname,
-    );
+            setup = new_format_setup_with_defaults_ext(
+                &services_yaml,
+                defaults_yaml,
+                "",
+                "--no-forwarding"
+            ),
+            registered = wait_for_consul_service(svc, 30),
+            mapping = natmap_host_addr(),
+            teardown = teardown(&[cname]),
+            cname = cname,
+            svc = svc,
+        );
 
-    let out = run(&script);
-    assert_pass(&out, "Test C — bind_interface");
-}
-
-#[test]
-fn bind_interface_overrides_defaults() {
-    let cname = "it-iface-override";
-    let services_yaml = r#"
-services:
-  it-svc-override:
-    type: docker
-    match:
-      project: it-svc-override
-    bind_interface: dummy0
-    rproxylocal:
-    - port: 80
-      template: HTTP_PROXY
-      domains:
-      - it-svc-override.test.local"#;
-
-    let defaults_yaml = r#"
-  bind_ip: 1.2.3.4
-"#;
-
-    let script = format!(
-        r#"{setup}
-docker run -d --name {cname} -l "com.docker.compose.project=it-svc-override" nginx:alpine
-{registered}
-
-PORT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-override") | .value.Port')
-if [ -z "$PORT" ] || [ "$PORT" = "null" ]; then echo "FAIL: not registered with Consul" >&2; exit 1; fi
-
-CID=$(docker inspect -f '{{{{.Id}}}}' {cname} | cut -c1-12)
-MAPPING=$(lab-ops natmap --socket /tmp/natmap.sock ls | awk -v id="$CID" '$6 == id {{print $8}}')
-EXPECTED="10.99.99.1:$PORT"
-if [ "$MAPPING" != "$EXPECTED" ]; then echo "FAIL: expected $EXPECTED, got $MAPPING" >&2; exit 1; fi
-
-echo "PASS: bound to $EXPECTED, ignored default 1.2.3.4"
-{teardown}
-"#,
-        setup =
-            new_format_setup_with_defaults_ext(services_yaml, defaults_yaml, "", "--no-forwarding"),
-        registered = wait_for_consul_service("it-svc-override", 30),
-        teardown = teardown(&[cname]),
-        cname = cname,
-    );
-
-    let out = run(&script);
-    assert_pass(&out, "Test C — bind_interface_overrides_defaults");
+        let out = run(&script);
+        assert_pass(&out, &format!("bind address from {svc}"));
+    }
 }

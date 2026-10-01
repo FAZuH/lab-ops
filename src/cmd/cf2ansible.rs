@@ -231,7 +231,21 @@ fn print_ansible_tasks_to<W: io::Write>(
 
 #[cfg(test)]
 mod tests {
+    use serde::Deserialize;
+
     use super::*;
+
+    #[derive(Deserialize)]
+    struct RenderedTask {
+        #[serde(rename = "community.general.cloudflare_dns")]
+        args: RenderedArgs,
+    }
+
+    #[derive(Deserialize)]
+    struct RenderedArgs {
+        #[serde(rename = "type")]
+        rtype: String,
+    }
 
     const SAMPLE_ZONE: &str = r#";;
 ;; Domain:     example.com.
@@ -268,17 +282,19 @@ _25._tcp.mail.example.com.	1	IN	TLSA	3 1 1 CERTDATA
 "#;
 
     #[test]
-    fn output_produces_yaml() {
+    fn print_ansible_tasks_renders_every_record_type() {
         let records = dns_parser::parse_zone(SAMPLE_ZONE);
-        let types: Vec<&str> = records.iter().map(|r| r.rtype.as_str()).collect();
-        assert!(types.contains(&"A"), "Missing A");
-        assert!(types.contains(&"AAAA"), "Missing AAAA");
-        assert!(types.contains(&"NS"), "Missing NS");
-        assert!(types.contains(&"CNAME"), "Missing CNAME");
-        assert!(types.contains(&"MX"), "Missing MX");
-        assert!(types.contains(&"TXT"), "Missing TXT");
-        assert!(types.contains(&"SRV"), "Missing SRV");
-        assert!(types.contains(&"TLSA"), "Missing TLSA");
+        let mut buf = Vec::new();
+        print_ansible_tasks_to(&records, "example.com", &mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        let rendered: Vec<RenderedTask> =
+            serde_yaml::from_str(&output).expect("emitter produced invalid YAML");
+
+        for rtype in ["A", "AAAA", "NS", "CNAME", "MX", "TXT", "SRV", "TLSA"] {
+            let count = rendered.iter().filter(|t| t.args.rtype == rtype).count();
+            assert!(count > 0, "Missing {rtype} task");
+        }
     }
 
     #[test]
@@ -300,7 +316,10 @@ _25._tcp.mail.example.com.	1	IN	TLSA	3 1 1 CERTDATA
     #[test]
     fn ns_records_not_proxied() {
         let records = dns_parser::parse_zone(SAMPLE_ZONE);
-        for rec in records.iter().filter(|r| r.rtype == "NS") {
+        let ns_records: Vec<_> = records.iter().filter(|r| r.rtype == "NS").collect();
+        assert_eq!(ns_records.len(), 1, "SAMPLE_ZONE must carry NS records");
+
+        for rec in ns_records {
             assert_eq!(rec.proxied, None, "NS records should not have proxied flag");
         }
     }

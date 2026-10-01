@@ -47,9 +47,10 @@ fn add_mapping_request_serialize_defaults() {
         proto: TransportProtocol::Tcp,
         ..Default::default()
     };
-    let json = serde_json::to_string(&req).unwrap();
-    assert!(json.contains("\"host_ip\":\"0.0.0.0\""));
-    assert!(json.contains("\"proto\":\"tcp\""));
+    let value = serde_json::to_value(&req).unwrap();
+    assert_eq!(value["host_ip"], "0.0.0.0");
+    assert_eq!(value["proto"], "tcp");
+    assert_eq!(value["target_ip"], serde_json::Value::Null);
 }
 
 #[test]
