@@ -1,10 +1,55 @@
 use std::process::Command;
 
-struct TestOutput {
-    stdout: String,
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct Task {
+    #[serde(rename = "community.general.cloudflare_dns")]
+    dns: DnsArgs,
+    tags: Vec<String>,
+    data: Option<serde_yaml::Value>,
 }
 
-impl TestOutput {
+#[derive(Deserialize)]
+struct DnsArgs {
+    zone: String,
+    record: String,
+    #[serde(rename = "type")]
+    rtype: String,
+    value: String,
+    api_token: String,
+    state: String,
+    ttl: Option<u32>,
+    proxied: Option<bool>,
+    service: Option<String>,
+    proto: Option<String>,
+    port: Option<u32>,
+    priority: Option<u32>,
+    weight: Option<u32>,
+    cert_usage: Option<u32>,
+    selector: Option<u32>,
+    hash_type: Option<u32>,
+}
+
+const API_TOKEN: &str = "{{ cloudflare_api_token }}";
+
+const ZONE_FILES: [&str; 4] = [
+    "domain0.com.txt",
+    "domain1.id.txt",
+    "domain2.com.txt",
+    "domain3.com.txt",
+];
+
+/// The Ansible tasks the binary emitted for one zone file, parsed into the
+/// structure the playbook carries. Every assertion reads a field, so a
+/// reformat of the emitter — indentation, quoting, key order — cannot change
+/// the outcome.
+struct Tasks {
+    zone: String,
+    tasks: Vec<Task>,
+}
+
+impl Tasks {
     fn new(file: &str) -> Self {
         let output = Command::new(env!("CARGO_BIN_EXE_lab-ops"))
             .arg(lab_ops::consts::CMD_CF2ANSIBLE)
@@ -20,142 +65,249 @@ impl TestOutput {
         );
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        TestOutput { stdout }
+        let tasks: Vec<Task> =
+            serde_yaml::from_str(&stdout).unwrap_or_else(|e| panic!("{file} is not YAML: {e}"));
+        assert!(!tasks.is_empty(), "{file} produced no tasks");
+
+        Tasks {
+            zone: file.trim_end_matches(".txt").to_string(),
+            tasks,
+        }
     }
 
-    fn count(&self, needle: &str) -> usize {
-        self.stdout.matches(needle).count()
+    fn count(&self, rtype: &str) -> usize {
+        self.tasks.iter().filter(|t| t.dns.rtype == rtype).count()
     }
 
-    fn contains(&self, needle: &str) -> bool {
-        self.stdout.contains(needle)
+    /// Every task of `rtype` whose record name is `record`, ordered as emitted.
+    fn matching(&self, rtype: &str, record: &str) -> Vec<&DnsArgs> {
+        self.tasks
+            .iter()
+            .filter(|t| t.dns.rtype == rtype && t.dns.record == record)
+            .map(|t| &t.dns)
+            .collect()
     }
 
-    fn assert_common(&self, zone: &str) {
+    /// The single task of `rtype` for `record`, or a panic naming what is there.
+    fn task(&self, rtype: &str, record: &str) -> &DnsArgs {
+        let mut found = self.matching(rtype, record).into_iter();
+        let task = found
+            .next()
+            .unwrap_or_else(|| panic!("no {rtype} task for record {record} in {}", self.zone));
         assert!(
-            self.stdout.starts_with("---"),
-            "Should start with YAML marker"
+            found.next().is_none(),
+            "more than one {rtype} task for record {record} in {}",
+            self.zone
         );
-        assert!(self.contains(zone), "Should contain zone name");
-        assert!(!self.contains("SOA"), "Should NOT contain SOA records");
-        assert!(
-            self.contains("api_token: \"{{ cloudflare_api_token }}\""),
-            "Every task should include api_token"
-        );
-        assert!(self.contains("state: present"));
-        assert!(self.contains("tags: [\"dns\"]"));
-        assert!(!self.contains("data:"), "Should not use data block");
-        self.assert_api_token_in_every_task();
+        task
     }
 
-    fn assert_api_token_in_every_task(&self) {
-        let task_count = self.count("- name:");
-        let token_count = self.count("api_token:");
-        assert_eq!(
-            token_count, task_count,
-            "expected api_token in every task ({task_count} tasks, {token_count} tokens)"
-        );
-    }
-
-    fn assert_type_count(&self, rtype: &str, expected: usize) {
-        let needle = format!("\n    type: {rtype}\n");
-        assert_eq!(
-            self.count(&needle),
-            expected,
-            "Expected {} {} records, got {}",
-            expected,
-            rtype,
-            self.count(&needle)
-        );
+    /// The `field` of every matching task, sorted so the assertion does not
+    /// depend on the order the zone file listed them in.
+    fn field<T: Ord + Copy>(
+        &self,
+        rtype: &str,
+        record: &str,
+        field: impl Fn(&DnsArgs) -> T,
+    ) -> Vec<T> {
+        let mut values: Vec<T> = self
+            .matching(rtype, record)
+            .iter()
+            .map(|t| field(t))
+            .collect();
+        values.sort();
+        values
     }
 }
 
 #[test]
-fn domain0() {
-    let t = TestOutput::new("domain0.com.txt");
-    t.assert_common("domain0.com");
-
-    t.assert_type_count("NS", 2);
-    t.assert_type_count("AAAA", 1);
-    // A and AAAA must be counted separately since "type: A" would also match "type: AAAA"
-    let a_count = t.count("\n    type: A\n");
-    assert_eq!(a_count, 3, "Expected 3 A records, got {a_count}");
-    t.assert_type_count("CNAME", 13);
-    t.assert_type_count("MX", 1);
-    t.assert_type_count("SRV", 12);
-    t.assert_type_count("TLSA", 1);
-    t.assert_type_count("TXT", 6);
-
-    // Deep subdomain
-    assert!(t.contains("domain0-sg-proxmox-1.server"));
-    assert!(t.contains("record: domain0-sg-proxmox-1.server"));
-
-    // SRV subdomain (minecraft on mc subdomain)
-    assert!(t.contains("service: minecraft"));
-    assert!(t.contains("record: mc"));
-    assert!(t.contains("port: 25565"));
-    assert!(t.contains("weight: 5"));
-
-    // CNAME to external domain
-    assert!(t.contains("domain0.github.io"));
+fn cf2ansible_skips_soa_records() {
+    for file in ZONE_FILES {
+        let t = Tasks::new(file);
+        assert_eq!(t.count("SOA"), 0, "{file} emitted the SOA record");
+    }
 }
 
 #[test]
-fn domain1() {
-    let t = TestOutput::new("domain1.id.txt");
-    t.assert_common("domain1.id");
+fn cf2ansible_every_task_carries_shared_module_args() {
+    for file in ZONE_FILES {
+        let t = Tasks::new(file);
+        for task in &t.tasks {
+            let what = format!("{} {}/{}", t.zone, task.dns.rtype, task.dns.record);
+            assert_eq!(task.dns.zone, t.zone, "wrong zone on {what}");
+            assert_eq!(task.dns.api_token, API_TOKEN, "wrong api_token on {what}");
+            assert_eq!(task.dns.state, "present", "wrong state on {what}");
+            assert_eq!(task.tags, vec!["dns".to_string()], "wrong tags on {what}");
+            assert!(task.data.is_none(), "{what} used a data block");
+        }
+    }
+}
 
-    t.assert_type_count("NS", 2);
-    t.assert_type_count("A", 2);
-    t.assert_type_count("CNAME", 6);
-    t.assert_type_count("MX", 1);
-    t.assert_type_count("SRV", 11);
-    t.assert_type_count("TLSA", 1);
-    t.assert_type_count("TXT", 5);
+/// One task per non-SOA record, with the per-type tally the zone file implies.
+/// `A` and `AAAA` are counted from the parsed `type` field, so neither can
+/// mask the other.
+#[test]
+fn cf2ansible_record_type_counts() {
+    let expected: &[(&str, &[(&str, usize)])] = &[
+        (
+            "domain0.com.txt",
+            &[
+                ("NS", 2),
+                ("A", 3),
+                ("AAAA", 1),
+                ("CNAME", 13),
+                ("MX", 1),
+                ("SRV", 12),
+                ("TLSA", 1),
+                ("TXT", 6),
+            ],
+        ),
+        (
+            "domain1.id.txt",
+            &[
+                ("NS", 2),
+                ("A", 2),
+                ("AAAA", 0),
+                ("CNAME", 6),
+                ("MX", 1),
+                ("SRV", 11),
+                ("TLSA", 1),
+                ("TXT", 5),
+            ],
+        ),
+        (
+            "domain2.com.txt",
+            &[
+                ("NS", 2),
+                ("A", 2),
+                ("AAAA", 0),
+                ("CNAME", 5),
+                ("MX", 1),
+                ("SRV", 1),
+                ("TLSA", 1),
+                ("TXT", 4),
+            ],
+        ),
+        (
+            "domain3.com.txt",
+            &[
+                ("NS", 2),
+                ("A", 2),
+                ("AAAA", 0),
+                ("CNAME", 5),
+                ("MX", 1),
+                ("SRV", 11),
+                ("TLSA", 1),
+                ("TXT", 6),
+            ],
+        ),
+    ];
 
-    assert!(t.contains("record: \"@\""));
-    assert!(t.contains("service: autodiscover"));
+    for (file, counts) in expected {
+        let t = Tasks::new(file);
+        for (rtype, want) in *counts {
+            assert_eq!(t.count(rtype), *want, "wrong {rtype} count in {file}");
+        }
+    }
+}
+
+/// The apex keeps the zone name as its record name; only the SRV and TLSA
+/// labels collapse to `@`.
+#[test]
+fn cf2ansible_apex_record_name() {
+    let t = Tasks::new("domain1.id.txt");
+    assert_eq!(t.task("A", "domain1.id").value, "203.0.113.2");
+    assert_eq!(t.task("MX", "domain1.id").value, "mail.domain1.id");
+    assert_eq!(t.task("TXT", "domain1.id").value, "TRUNCATED");
+
+    let t = Tasks::new("domain0.com.txt");
+    assert_eq!(t.task("A", "domain0.com").value, "203.0.113.3");
+    assert_eq!(t.task("AAAA", "domain0.com").value, "2402:1f00:8001:82b::1");
 }
 
 #[test]
-fn domain2() {
-    let t = TestOutput::new("domain2.com.txt");
-    t.assert_common("domain2.com");
-
-    t.assert_type_count("NS", 2);
-    t.assert_type_count("A", 2);
-    t.assert_type_count("CNAME", 5);
-    t.assert_type_count("MX", 1);
-    t.assert_type_count("SRV", 1);
-    t.assert_type_count("TLSA", 1);
-    t.assert_type_count("TXT", 4);
-
-    assert!(t.contains("proxied: true"));
-    assert!(t.contains("ttl: 3600"));
+fn cf2ansible_preserves_deep_subdomain_record() {
+    let t = Tasks::new("domain0.com.txt");
+    let deep = t.task("A", "domain0-sg-proxmox-1.server");
+    assert_eq!(deep.value, "203.0.113.3");
+    assert_eq!(deep.zone, "domain0.com");
 }
 
 #[test]
-fn domain3() {
-    let t = TestOutput::new("domain3.com.txt");
-    t.assert_common("domain3.com");
+fn cf2ansible_srv_apex_service_split_out_of_record_name() {
+    for (file, target) in [
+        ("domain1.id.txt", "mail.domain1.id"),
+        ("domain3.com.txt", "mail.domain2.com"),
+    ] {
+        let t = Tasks::new(file);
+        let autodiscover = t
+            .matching("SRV", "@")
+            .into_iter()
+            .find(|s| s.service.as_deref() == Some("autodiscover"))
+            .expect("no autodiscover SRV task");
+        assert_eq!(autodiscover.proto.as_deref(), Some("tcp"));
+        assert_eq!(autodiscover.port, Some(443));
+        assert_eq!(autodiscover.value, target);
+    }
+}
 
-    t.assert_type_count("NS", 2);
-    t.assert_type_count("A", 2);
-    t.assert_type_count("CNAME", 5);
-    t.assert_type_count("MX", 1);
-    t.assert_type_count("SRV", 11);
-    t.assert_type_count("TLSA", 1);
-    t.assert_type_count("TXT", 6);
+#[test]
+fn cf2ansible_srv_subdomain_keeps_remaining_label() {
+    let t = Tasks::new("domain0.com.txt");
+    let srv = t.task("SRV", "mc");
+    assert_eq!(srv.service.as_deref(), Some("minecraft"));
+    assert_eq!(srv.proto.as_deref(), Some("tcp"));
+    assert_eq!(srv.port, Some(25565));
+    assert_eq!(srv.weight, Some(5));
+    assert_eq!(srv.value, "mc.domain0.com");
+}
 
-    assert!(t.contains("proxied: true"));
-    assert!(t.contains("proxied: false"));
-    assert!(t.contains("priority: 5"));
-    assert!(t.contains("ttl: 86400"));
-    assert!(t.contains("ttl: 3600"));
-    assert!(t.contains("service: autodiscover"));
-    assert!(t.contains("proto: tcp"));
-    assert!(t.contains("cert_usage: 3"));
-    assert!(t.contains("selector: 1"));
-    assert!(t.contains("hash_type: 1"));
-    assert!(t.contains("record: \"@\""));
+#[test]
+fn cf2ansible_cname_target_outside_zone_kept_whole() {
+    let t = Tasks::new("domain0.com.txt");
+    assert_eq!(t.task("CNAME", "notes").value, "domain0.github.io");
+}
+
+#[test]
+fn cf2ansible_proxied_flag_follows_annotation() {
+    let t = Tasks::new("domain3.com.txt");
+    assert_eq!(t.task("A", "domain3.com").proxied, Some(true));
+    assert_eq!(t.task("A", "mail").proxied, Some(false));
+
+    let t = Tasks::new("domain2.com.txt");
+    assert_eq!(t.task("CNAME", "www").proxied, Some(true));
+
+    let t = Tasks::new("domain0.com.txt");
+    assert_eq!(t.task("A", "domain0.com").proxied, Some(false));
+}
+
+#[test]
+fn cf2ansible_ttl_emitted_only_when_not_one() {
+    let t = Tasks::new("domain3.com.txt");
+    assert_eq!(t.field("NS", "domain3.com", |d| d.ttl), [Some(86400); 2]);
+    assert_eq!(t.field("TXT", "domain3.com", |d| d.ttl), [None, Some(3600)]);
+    assert_eq!(t.field("A", "domain3.com", |d| d.ttl), [None]);
+
+    let t = Tasks::new("domain2.com.txt");
+    assert_eq!(t.field("TXT", "domain2.com", |d| d.ttl), [None, Some(3600)]);
+}
+
+#[test]
+fn cf2ansible_mx_priority_from_zone_data() {
+    let t = Tasks::new("domain3.com.txt");
+    let mx = t.task("MX", "domain3.com");
+    assert_eq!(mx.priority, Some(5));
+    assert_eq!(mx.value, "mail.domain2.com");
+}
+
+#[test]
+fn cf2ansible_tlsa_fields_split_out_of_name_and_data() {
+    let t = Tasks::new("domain3.com.txt");
+    let tlsa = t.task("TLSA", "mail");
+    assert_eq!(tlsa.port, Some(25));
+    assert_eq!(tlsa.proto.as_deref(), Some("tcp"));
+    assert_eq!(tlsa.cert_usage, Some(3));
+    assert_eq!(tlsa.selector, Some(1));
+    assert_eq!(tlsa.hash_type, Some(1));
+    assert_eq!(tlsa.value, "TRUNCATED");
 }

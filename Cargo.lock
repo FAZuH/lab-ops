@@ -1010,6 +1010,8 @@ dependencies = [
  "lab-ops_lab-lib",
  "lab-ops_natmap",
  "regex",
+ "serde",
+ "serde_yaml",
  "tokio",
  "tracing-subscriber",
 ]
