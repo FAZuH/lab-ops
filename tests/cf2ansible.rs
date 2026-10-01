@@ -1,3 +1,5 @@
+//! End-to-end test for the `cf2ansible` zone-to-Ansible conversion.
+
 use std::process::Command;
 
 use serde::Deserialize;

@@ -1,3 +1,5 @@
+//! Docker integration tests for auto-discover's Consul-driven forwarding sync.
+
 use super::*;
 
 #[test]

@@ -1,3 +1,5 @@
+//! Command-name constants shared by the CLI parser and its subprocess callers.
+
 /// The lab-ops CLI command name (for subprocess invocations).
 pub const CMD: &str = "lab-ops";
 

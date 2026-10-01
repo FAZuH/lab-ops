@@ -4,6 +4,9 @@
 //! iptables NAT rules, and service discovery. The binary is split into
 //! subcommands routed through [`cli::Cli`].
 
+/// Top-level CLI definition.
 pub mod cli;
+/// Inline subcommand implementations.
 pub mod cmd;
+/// Command-name constants.
 pub mod consts;

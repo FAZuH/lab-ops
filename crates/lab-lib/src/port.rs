@@ -19,9 +19,7 @@ use tracing::info;
 
 use crate::protocol::TransportProtocol;
 
-// ---------------------------------------------------------------------------
-// Low-level socket utilities
-// ---------------------------------------------------------------------------
+// --- Low-level socket utilities ---
 
 /// Creates and configures a `Socket` for `addr` with `SO_REUSEADDR`
 /// and the appropriate `IP_FREEBIND` option.
@@ -49,9 +47,7 @@ pub fn create_freebind_socket(addr: &SocketAddr, socket_type: Type) -> std::io::
     Ok(socket)
 }
 
-// ---------------------------------------------------------------------------
-// ReservedSocket — protocol-aware port reservation holder
-// ---------------------------------------------------------------------------
+// --- ReservedSocket ---
 
 /// A bound socket held as a port reservation.
 ///
@@ -62,10 +58,6 @@ enum ReservedSocket {
     Tcp(TcpListener),
     Udp(UdpSocket),
 }
-
-// ---------------------------------------------------------------------------
-// PortAllocator — runtime TCP/UDP pre-bind reservation
-// ---------------------------------------------------------------------------
 
 /// A concurrency-safe port reservation system backed by protocol-aware
 /// socket pre-bind.
@@ -78,6 +70,7 @@ pub struct PortAllocator {
 }
 
 impl PortAllocator {
+    /// Creates an allocator holding no reservations.
     pub fn new() -> Self {
         Self {
             sockets: RwLock::new(HashMap::new()),
@@ -92,11 +85,9 @@ impl PortAllocator {
     ///
     /// Returns an error if the port is already bound by another process.
     pub async fn allocate(&self, addr: SocketAddr, proto: TransportProtocol) -> Result<()> {
-        // `deallocate` releases by dropping the socket, and the port is not
-        // always bindable again on the very next attempt — the fd outlives the
-        // map entry by a moment. Releasing a stale mapping and immediately
-        // re-allocating the same port is a real daemon path (a recreated
-        // container keeps its host port), so retry briefly rather than fail.
+        // A released port is not always immediately bindable: the fd outlives
+        // the map entry by a moment. A recreated container keeps its host port,
+        // so retry briefly rather than fail the whole allocation.
         const ATTEMPTS: u32 = 25;
         const BACKOFF: std::time::Duration = std::time::Duration::from_millis(2);
         let mut last = None;
@@ -196,13 +187,10 @@ mod tests {
 
     #[tokio::test]
     async fn released_port_is_immediately_reallocatable() {
-        // Load check, not a reproduction. The rebind this covers failed
-        // intermittently only in the full parallel `lab-ops_natmap --lib`
-        // suite (5 failures in 40 runs) and never in this binary, so it cannot
-        // be turned into a test that fails without the retry in `allocate`.
-        // What this does guard: 2560 rebinds under concurrency, plus — in
-        // `allocate_fails_for_port_held_outside_the_allocator` — that the
-        // retry does not paper over a genuine conflict.
+        // Load check, not a reproduction: the rebind it covers failed only in
+        // the full parallel `lab-ops_natmap --lib` suite, never in this binary.
+        // It guards 2560 concurrent rebinds, and — with the test below — that
+        // the retry does not paper over a genuine conflict.
         let allocator = Arc::new(PortAllocator::new());
         let mut tasks = Vec::new();
         for t in 0..64u16 {

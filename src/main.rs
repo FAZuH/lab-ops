@@ -22,7 +22,7 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // Respect RUST_LOG env var; otherwise derive level from verbosity count.
+    // RUST_LOG wins; otherwise --verbose count picks the level.
     let filter = if let Ok(rust_log) = std::env::var("RUST_LOG") {
         tracing_subscriber::EnvFilter::new(rust_log)
     } else {
@@ -41,7 +41,7 @@ fn main() -> Result<()> {
         ColorMode::Auto => std::io::stderr().is_terminal(),
     };
 
-    // NO_COLOR and CLICOLOR env var overrides (per spec).
+    // NO_COLOR / CLICOLOR=0 override the --color flag.
     let no_color = std::env::var_os("NO_COLOR").is_some();
     let clicolor = std::env::var("CLICOLOR").ok();
     let ansi = match (no_color, clicolor.as_deref()) {
@@ -54,7 +54,6 @@ fn main() -> Result<()> {
         .with_ansi(ansi)
         .init();
 
-    // Use color for table output based on the resolved ANSI setting.
     let use_color = ansi;
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -97,7 +96,6 @@ fn generate_completions(shell: clap_complete::Shell, dir: Option<&Path>) -> Resu
 
     let mut buf = Vec::new();
 
-    // Output dynamic completion registration scripts
     let completer: &dyn EnvCompleter = match shell {
         clap_complete::Shell::Bash => &clap_complete::env::Bash,
         clap_complete::Shell::Elvish => &clap_complete::env::Elvish,
@@ -110,8 +108,8 @@ fn generate_completions(shell: clap_complete::Shell, dir: Option<&Path>) -> Resu
     completer.write_registration("COMPLETE", &name, &name, &name, &mut buf)?;
     let mut out = String::from_utf8(buf)?;
 
-    // For zsh, if writing to stdout, strip the #compdef line because `eval $(...)` without
-    // quotes in zsh will treat it as a comment for the entire collapsed string.
+    // zsh's `eval $(...)` treats `#compdef` as a comment for the whole collapsed
+    // string, so the line is only safe in a written file.
     if shell == clap_complete::Shell::Zsh
         && dir.is_none()
         && let Some(stripped) = out.strip_prefix(&format!("#compdef {name}\n"))

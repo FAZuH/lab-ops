@@ -12,5 +12,8 @@ pub mod port;
 /// The canonical [`TransportProtocol`] enum shared by every crate.
 pub mod protocol;
 
+/// The natmap socket path, re-exported so callers need only this crate root.
 pub use consts::NATMAP_SOCKET;
+/// The canonical [`TransportProtocol`], re-exported so callers need only this
+/// crate root.
 pub use protocol::TransportProtocol;

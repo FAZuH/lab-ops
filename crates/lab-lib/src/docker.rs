@@ -227,7 +227,6 @@ impl DockerClient {
         Ok(DockerClient { docker })
     }
 
-    /// List all running containers.
     pub async fn list_running_containers(&self) -> Result<Vec<ContainerInfo>> {
         let options = ListContainersOptionsBuilder::default().all(false).build();
 
@@ -243,7 +242,6 @@ impl DockerClient {
         Ok(infos)
     }
 
-    /// Inspect a single container.
     pub async fn inspect_container(&self, container_id: impl AsRef<str>) -> Result<ContainerInfo> {
         let id = container_id.as_ref();
         let inspect = self
@@ -377,8 +375,6 @@ mod tests {
         from_str(json).expect("canned inspect fixture must deserialize")
     }
 
-    // ── parse_container_inspect ──
-
     #[test]
     fn parse_container_inspect_single_network() {
         let info = parse_container_inspect(&make_inspect(INSPECT_SINGLE_NETWORK));
@@ -405,7 +401,6 @@ mod tests {
 
         assert_eq!(info.name, "app");
         assert_eq!(info.compose_project.as_deref(), Some("stack"));
-        // Networks sorted by name; primary IP is the first sorted network.
         assert_eq!(
             info.networks,
             vec![
@@ -460,8 +455,6 @@ mod tests {
         assert!(info.networks.is_empty());
     }
 
-    // ── From<ContainerSummary> ──
-
     #[test]
     fn container_info_from_summary_with_networks() {
         let summary: bollard::models::ContainerSummary = from_str(
@@ -506,8 +499,6 @@ mod tests {
         assert!(info.networks.is_empty());
     }
 
-    // ── parse_port_mappings ──
-
     #[test]
     fn parse_port_mappings_unspecified_host_ip_returns_v4_and_v6() {
         let inspect = make_inspect(INSPECT_SINGLE_NETWORK);
@@ -545,7 +536,6 @@ mod tests {
             mappings[0].host_addr,
             SocketAddr::new(IpAddr::from_str("127.0.0.1").unwrap(), 8443)
         );
-        // Primary IP comes from the first sorted network (backend).
         assert_eq!(
             mappings[0].container_addr,
             SocketAddr::new(IpAddr::from_str("10.0.2.5").unwrap(), 443)

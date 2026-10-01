@@ -1,3 +1,5 @@
+//! Docker integration tests for Consul registration and deregistration.
+
 use super::*;
 
 #[test]

@@ -38,6 +38,8 @@ pub fn header(cols: &[&str], use_color: bool) -> Vec<comfy_table::Cell> {
     }
 }
 
+// --- Listing ---
+
 /// Displays a combined listing of static iptables NAT rules and daemon-managed state.
 ///
 /// Reads live iptables rules via `iptables-save` (filtering to natmap-commented
@@ -158,6 +160,8 @@ pub async fn handle_list(
     Ok(())
 }
 
+// --- Static NAT handlers ---
+
 /// Adds or removes a static DNAT rule via the daemon API.
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_dnat(
@@ -265,6 +269,8 @@ pub async fn handle_clear(socket: impl AsRef<Path>) -> Result<()> {
     Ok(())
 }
 
+// --- Docker mapping handlers ---
+
 /// Remaps a container's host port to a new port without restarting the container.
 pub async fn remap(
     container_id: String,
@@ -289,6 +295,8 @@ pub async fn remap(
     }
     Ok(())
 }
+
+// --- Mapping parsing ---
 
 /// Parses a Docker mapping string into a [`DockerAddMapRequest`].
 ///

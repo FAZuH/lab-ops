@@ -1,3 +1,5 @@
+//! Docker integration tests for `preserve_src_ip` and its policy-route side effects.
+
 use super::*;
 
 #[test]
@@ -212,7 +214,6 @@ services:
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-preserve-idemp" nginx:alpine
 {registered}
 
-# Run sync manually again
 lab-ops auto-discover sync $CONSUL_HTTP_ADDR >/tmp/sync.log 2>&1 || true
 
 COUNT=$(ip rule show | grep -c "lookup 100" || true)

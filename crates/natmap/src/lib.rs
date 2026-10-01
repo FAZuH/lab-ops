@@ -14,16 +14,29 @@
 //! The daemon exposes an HTTP API over a Unix socket. CLI commands in the
 //! parent crate communicate with it through [`cli::run_cli`].
 
+/// HTTP handlers for the daemon's Unix-socket API.
 pub mod api;
+/// Argument parsing and dispatch for the `natmap` subcommand.
 pub mod cli;
+/// Typed client for the daemon API, used by auto-discover.
 pub mod client;
+/// CLI command handlers and the Docker mapping parser.
 pub mod command;
+/// Dynamic shell-completion sources.
 pub mod completions;
+/// Socket, state-file, and package-name constants.
 pub mod consts;
+/// The daemon itself: state, lifecycle, and Docker events.
 pub mod daemon;
+/// Docker discovery of published container port mappings.
 pub mod docker;
+/// systemd unit installation for the natmap daemon.
 pub mod install;
+/// Rule construction and installation.
 pub mod iptables;
+/// Request, response, config, and state types.
 pub mod models;
+/// `ip rule` / `ip route` management for source-IP preservation.
 pub mod policy_route;
+/// HTTP-over-Unix-socket request helper.
 pub mod utils;

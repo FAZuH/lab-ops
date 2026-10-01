@@ -1,3 +1,5 @@
+//! Docker integration tests for the daemon's startup race and fail-closed sweep.
+
 use super::*;
 
 #[test]
