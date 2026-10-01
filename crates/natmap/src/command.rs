@@ -14,18 +14,29 @@ use hyper::Method;
 use lab_ops_lab_lib::TransportProtocol;
 
 use crate::models::DnatConfig;
-use crate::models::DnatRequest;
 use crate::models::DockerAddMapRequest;
 use crate::models::DockerPortMap;
 use crate::models::DockerRemapRequest;
 use crate::models::HairpinConfig;
-use crate::models::HairpinRequest;
 use crate::models::ListResponse;
 use crate::models::PolicyRouteConfig;
-use crate::models::PolicyRouteRequest;
 use crate::models::SnatConfig;
-use crate::models::SnatRequest;
 use crate::utils::request_json;
+
+/// Builds a table header row, styled bold cyan when `use_color` is set.
+pub fn header(cols: &[&str], use_color: bool) -> Vec<comfy_table::Cell> {
+    if use_color {
+        cols.iter()
+            .map(|c| {
+                comfy_table::Cell::new(*c)
+                    .fg(Color::Cyan)
+                    .add_attribute(Attribute::Bold)
+            })
+            .collect()
+    } else {
+        cols.iter().map(|c| comfy_table::Cell::new(*c)).collect()
+    }
+}
 
 /// Displays a combined listing of static iptables NAT rules and daemon-managed state.
 ///
@@ -48,18 +59,7 @@ pub async fn handle_list(
                 println!("  (none)");
             } else {
                 let mut table = comfy_table::Table::new();
-                if use_color {
-                    table.set_header(vec![
-                        comfy_table::Cell::new("CHAIN")
-                            .fg(Color::Cyan)
-                            .add_attribute(Attribute::Bold),
-                        comfy_table::Cell::new("RULE")
-                            .fg(Color::Cyan)
-                            .add_attribute(Attribute::Bold),
-                    ]);
-                } else {
-                    table.set_header(vec!["CHAIN", "RULE"]);
-                }
+                table.set_header(header(&["CHAIN", "RULE"], use_color));
                 for r in &rules {
                     let rest = r.strip_prefix("-A ").unwrap_or(r);
                     let (chain, rule) = rest.split_once(' ').unwrap_or((rest, ""));
@@ -76,27 +76,10 @@ pub async fn handle_list(
         Ok(resp) => {
             if !resp.dnats.is_empty() {
                 let mut table = comfy_table::Table::new();
-                if use_color {
-                    table.set_header(vec![
-                        comfy_table::Cell::new("EXT IP")
-                            .fg(Color::Cyan)
-                            .add_attribute(Attribute::Bold),
-                        comfy_table::Cell::new("INT IP")
-                            .fg(Color::Cyan)
-                            .add_attribute(Attribute::Bold),
-                        comfy_table::Cell::new("PORTS")
-                            .fg(Color::Cyan)
-                            .add_attribute(Attribute::Bold),
-                        comfy_table::Cell::new("PROTO")
-                            .fg(Color::Cyan)
-                            .add_attribute(Attribute::Bold),
-                        comfy_table::Cell::new("IFACE")
-                            .fg(Color::Cyan)
-                            .add_attribute(Attribute::Bold),
-                    ]);
-                } else {
-                    table.set_header(vec!["EXT IP", "INT IP", "PORTS", "PROTO", "IFACE"]);
-                }
+                table.set_header(header(
+                    &["EXT IP", "INT IP", "PORTS", "PROTO", "IFACE"],
+                    use_color,
+                ));
                 for d in &resp.dnats {
                     let if_info = d.ext_if.as_deref().unwrap_or("-");
                     table.add_row(vec![
@@ -111,21 +94,7 @@ pub async fn handle_list(
             }
             if !resp.snats.is_empty() {
                 let mut table = comfy_table::Table::new();
-                if use_color {
-                    table.set_header(vec![
-                        comfy_table::Cell::new("INT IP")
-                            .fg(Color::Cyan)
-                            .add_attribute(Attribute::Bold),
-                        comfy_table::Cell::new("EXT IP")
-                            .fg(Color::Cyan)
-                            .add_attribute(Attribute::Bold),
-                        comfy_table::Cell::new("IFACE")
-                            .fg(Color::Cyan)
-                            .add_attribute(Attribute::Bold),
-                    ]);
-                } else {
-                    table.set_header(vec!["INT IP", "EXT IP", "IFACE"]);
-                }
+                table.set_header(header(&["INT IP", "EXT IP", "IFACE"], use_color));
                 for s in &resp.snats {
                     table.add_row(vec![s.int_ip.clone(), s.ext_ip.clone(), s.ext_if.clone()]);
                 }
@@ -133,24 +102,7 @@ pub async fn handle_list(
             }
             if !resp.hairpins.is_empty() {
                 let mut table = comfy_table::Table::new();
-                if use_color {
-                    table.set_header(vec![
-                        comfy_table::Cell::new("EXT IP")
-                            .fg(Color::Cyan)
-                            .add_attribute(Attribute::Bold),
-                        comfy_table::Cell::new("INT IP")
-                            .fg(Color::Cyan)
-                            .add_attribute(Attribute::Bold),
-                        comfy_table::Cell::new("PORTS")
-                            .fg(Color::Cyan)
-                            .add_attribute(Attribute::Bold),
-                        comfy_table::Cell::new("PROTO")
-                            .fg(Color::Cyan)
-                            .add_attribute(Attribute::Bold),
-                    ]);
-                } else {
-                    table.set_header(vec!["EXT IP", "INT IP", "PORTS", "PROTO"]);
-                }
+                table.set_header(header(&["EXT IP", "INT IP", "PORTS", "PROTO"], use_color));
                 for h in &resp.hairpins {
                     table.add_row(vec![
                         h.ext_ip.clone(),
@@ -167,37 +119,17 @@ pub async fn handle_list(
                     println!("{}", serde_json::to_string_pretty(&resp.docker)?);
                 } else {
                     let mut table = comfy_table::Table::new();
-                    if use_color {
-                        table.set_header(vec![
-                            comfy_table::Cell::new("ID")
-                                .fg(Color::Cyan)
-                                .add_attribute(Attribute::Bold),
-                            comfy_table::Cell::new("CONTAINER")
-                                .fg(Color::Cyan)
-                                .add_attribute(Attribute::Bold),
-                            comfy_table::Cell::new("CONTAINER ID")
-                                .fg(Color::Cyan)
-                                .add_attribute(Attribute::Bold),
-                            comfy_table::Cell::new("HOST ADDR")
-                                .fg(Color::Cyan)
-                                .add_attribute(Attribute::Bold),
-                            comfy_table::Cell::new("CONTAINER ADDR")
-                                .fg(Color::Cyan)
-                                .add_attribute(Attribute::Bold),
-                            comfy_table::Cell::new("PROTO")
-                                .fg(Color::Cyan)
-                                .add_attribute(Attribute::Bold),
-                        ]);
-                    } else {
-                        table.set_header(vec![
+                    table.set_header(header(
+                        &[
                             "ID",
                             "CONTAINER",
                             "CONTAINER ID",
                             "HOST ADDR",
                             "CONTAINER ADDR",
                             "PROTO",
-                        ]);
-                    }
+                        ],
+                        use_color,
+                    ));
                     for m in resp.docker {
                         if let Some(ref cid) = container_id
                             && !m.container_id.starts_with(cid)
@@ -238,7 +170,7 @@ pub async fn handle_dnat(
     preserve_src_ip: bool,
     socket: impl AsRef<Path>,
 ) -> Result<()> {
-    let req = DnatRequest {
+    let req = DnatConfig {
         ext_ip,
         int_ip,
         ports,
@@ -264,7 +196,7 @@ pub async fn handle_snat(
     delete: bool,
     socket: impl AsRef<Path>,
 ) -> Result<()> {
-    let req = SnatRequest {
+    let req = SnatConfig {
         int_ip,
         ext_if,
         ext_ip,
@@ -289,7 +221,7 @@ pub async fn handle_hairpin(
     delete: bool,
     socket: impl AsRef<Path>,
 ) -> Result<()> {
-    let req = HairpinRequest {
+    let req = HairpinConfig {
         ext_ip,
         int_ip,
         ports,
@@ -314,7 +246,7 @@ pub async fn handle_policy_route(
     delete: bool,
     socket: impl AsRef<Path>,
 ) -> Result<()> {
-    let req = PolicyRouteRequest { src_ip, via, table };
+    let req = PolicyRouteConfig { src_ip, via, table };
     if delete {
         let _: () = request_json(socket, Method::DELETE, "/policy-route", Some(req)).await?;
         tracing::info!("policy route removed");
@@ -331,56 +263,6 @@ pub async fn handle_clear(socket: impl AsRef<Path>) -> Result<()> {
     let _: () = request_json(socket, Method::DELETE, "/clear", None::<()>).await?;
     tracing::info!("all nat rules cleared");
     Ok(())
-}
-
-/// Lists Docker port mappings from the daemon (active mappings only).
-pub async fn list(container_id: Option<String>, socket: &str, json: bool) -> Result<()> {
-    let res: Vec<DockerPortMap> =
-        request_json(socket, Method::GET, "/mappings", None::<()>).await?;
-    let res = if let Some(cid) = container_id {
-        res.into_iter()
-            .filter(|m| m.container_id.starts_with(&cid) || m.container_name == cid)
-            .collect()
-    } else {
-        res
-    };
-    if json {
-        println!("{}", serde_json::to_string_pretty(&res)?);
-    } else {
-        let mut table = comfy_table::Table::new();
-        table.set_header(vec![
-            "ID",
-            "CONTAINER",
-            "CONTAINER ID",
-            "HOST ADDR",
-            "CONTAINER ADDR",
-            "PROTO",
-        ]);
-        for m in res {
-            table.add_row(vec![
-                m.id.to_string(),
-                m.container_name,
-                m.container_id.chars().take(12).collect::<String>(),
-                m.request.host_addr.to_string(),
-                m.request.container_addr.to_string(),
-                m.request.proto.to_string(),
-            ]);
-        }
-        println!("{table}");
-    }
-
-    Ok(())
-}
-
-/// Lists Docker mappings, silently returning a message when the daemon is not reachable.
-pub async fn try_list(socket: &str, container_id: Option<String>, json: bool) -> Result<()> {
-    match list(container_id, socket, json).await {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            println!("  (daemon not running)");
-            Ok(())
-        }
-    }
 }
 
 /// Remaps a container's host port to a new port without restarting the container.

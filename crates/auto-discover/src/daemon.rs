@@ -145,8 +145,6 @@ pub struct DiscoveryDaemon {
     consul: Arc<dyn ConsulOps>,
     natmap: Arc<dyn NatmapOps>,
     docker: Option<Arc<dyn DockerOps>>,
-    #[allow(dead_code)]
-    state_dir: PathBuf,
 }
 
 // --- Sync service types ---
@@ -177,13 +175,12 @@ struct PortDecision {
 }
 
 impl DiscoveryDaemon {
-    pub fn new(config_path: PathBuf, state_dir: PathBuf) -> Self {
+    pub fn new(config_path: PathBuf) -> Self {
         DiscoveryDaemon {
             config_path,
             consul: Arc::new(ConsulClient::from_env()),
             natmap: Arc::new(NatmapClient::default_socket()),
             docker: None,
-            state_dir,
         }
     }
 
@@ -763,9 +760,7 @@ mod tests {
     #[tokio::test]
     #[traced_test]
     async fn handle_container_start_span_fields() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let daemon =
-            DiscoveryDaemon::new(PathBuf::from("/dev/null"), temp_dir.path().to_path_buf());
+        let daemon = DiscoveryDaemon::new(PathBuf::from("/dev/null"));
 
         let _ = daemon
             .handle_container_start("123456789012", "my_project", "start")
@@ -778,9 +773,7 @@ mod tests {
     #[tokio::test]
     #[traced_test]
     async fn handle_container_die_logs_deregister() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let daemon =
-            DiscoveryDaemon::new(PathBuf::from("/dev/null"), temp_dir.path().to_path_buf());
+        let daemon = DiscoveryDaemon::new(PathBuf::from("/dev/null"));
 
         let _ = daemon.handle_container_die("123456789012").await;
 
@@ -966,7 +959,6 @@ mod tests {
             consul,
             natmap,
             docker: Some(docker),
-            state_dir: dir.path().to_path_buf(),
         }
     }
 
@@ -1039,7 +1031,6 @@ mod tests {
             ext_ip: "203.0.113.50".into(),
             ext_ports,
             hairpin: false,
-            proxy_on: None,
             preserve_src_ip,
             preserve_src_ip_gateway: gateway.map(str::to_string),
             preserve_src_ip_src: src.map(str::to_string),
@@ -1228,7 +1219,6 @@ mod tests {
             ResolvedPortType::RProxyLocal {
                 template: "web.ctmpl".into(),
                 domains: vec!["web.example.com".into()],
-                proxy_on: None,
                 proxy_ip: None,
             },
         );
@@ -1262,7 +1252,6 @@ mod tests {
             ResolvedPortType::RProxyLocal {
                 template: "web.ctmpl".into(),
                 domains: vec!["web.example.com".into()],
-                proxy_on: None,
                 proxy_ip: None,
             },
         );

@@ -40,18 +40,15 @@ impl std::str::FromStr for TransportProtocol {
     }
 }
 
-impl TransportProtocol {
-    /// Returns the lowercase protocol name.
-    pub fn to_lowercase(&self) -> &'static str {
-        match self {
-            Self::Tcp => "tcp",
-            Self::Udp => "udp",
-        }
-    }
-}
-
 impl Display for TransportProtocol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.to_lowercase())
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::Tcp => "tcp",
+                Self::Udp => "udp",
+            }
+        )
     }
 }

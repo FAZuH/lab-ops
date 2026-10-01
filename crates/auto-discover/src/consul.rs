@@ -419,7 +419,6 @@ mod tests {
             ResolvedPortType::RProxyLocal {
                 template: "example-drive.ctmpl".into(),
                 domains: vec!["drive.example.com".into()],
-                proxy_on: None,
                 proxy_ip: Some("203.0.113.43".into()),
             },
             extra,
@@ -513,7 +512,6 @@ mod tests {
             ResolvedPortType::RProxyLocal {
                 template: "dns.ctmpl".into(),
                 domains: vec!["dns.example.com".into()],
-                proxy_on: None,
                 proxy_ip: None,
             },
             HashMap::new(),
@@ -553,7 +551,6 @@ mod tests {
                 ext_ip: "203.0.113.43".into(),
                 ext_ports: vec![25565],
                 hairpin: true,
-                proxy_on: None,
                 preserve_src_ip: true,
                 preserve_src_ip_gateway: None,
                 preserve_src_ip_src: None,

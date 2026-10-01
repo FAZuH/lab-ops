@@ -13,20 +13,16 @@ use lab_ops_lab_lib::port::PortAllocator;
 use crate::daemon::AppState;
 use crate::daemon::ErrorResponse;
 use crate::models::DnatConfig;
-use crate::models::DnatRequest;
 use crate::models::DockerAddMapRequest;
 use crate::models::DockerPortMap;
 use crate::models::DockerPortMapRequest;
 use crate::models::DockerRemapRequest;
 use crate::models::HairpinConfig;
-use crate::models::HairpinRequest;
 use crate::models::ListResponse;
 use crate::models::LiveRule;
 use crate::models::PolicyRouteConfig;
-use crate::models::PolicyRouteRequest;
 use crate::models::RuleKind;
 use crate::models::SnatConfig;
-use crate::models::SnatRequest;
 use crate::models::TransportProtocol;
 
 // --- Read handlers ---
@@ -53,14 +49,10 @@ pub async fn list_mappings(State(state): State<AppState>) -> Json<ListResponse> 
 pub async fn list_rules(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<LiveRule>>, (StatusCode, Json<ErrorResponse>)> {
-    let lines = state.iptables.list_rules().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-    })?;
+    let lines = state
+        .iptables
+        .list_rules()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let mut rules: Vec<LiveRule> = lines.iter().filter_map(|l| parse_live_rule(l)).collect();
     rules.sort();
     rules.dedup();
@@ -76,24 +68,15 @@ pub async fn list_rules(
 ///
 /// Span fields: `ext.ip`, `int.ip`, `ports`, `proto`.
 #[tracing::instrument(skip_all, fields(
-    ext.ip = %req.ext_ip,
-    int.ip = %req.int_ip,
-    ports = %req.ports,
-    proto = %req.proto
+    ext.ip = %config.ext_ip,
+    int.ip = %config.int_ip,
+    ports = %config.ports,
+    proto = %config.proto
 ))]
 pub async fn add_dnat(
     State(state): State<AppState>,
-    Json(req): Json<DnatRequest>,
+    Json(config): Json<DnatConfig>,
 ) -> Result<Json<DnatConfig>, (StatusCode, Json<ErrorResponse>)> {
-    let config = DnatConfig {
-        ext_ip: req.ext_ip.clone(),
-        int_ip: req.int_ip.clone(),
-        ports: req.ports.clone(),
-        proto: req.proto,
-        ext_if: req.ext_if.clone(),
-        preserve_src_ip: req.preserve_src_ip,
-    };
-
     // Check if this DNAT already exists (idempotent add).
     {
         let lock = state.daemon_state.read().await;
@@ -116,12 +99,7 @@ pub async fn add_dnat(
     .await?;
     if let Err(e) = state.iptables.install_dnat(&config) {
         unbind_ports(state.ports, &config.ext_ip, &config.ports).await;
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        ));
+        return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
     }
     state.daemon_state.write().await.dnats.push(config.clone());
     state.persist().await;
@@ -132,20 +110,19 @@ pub async fn add_dnat(
 ///
 /// Span fields: `ext.ip`, `int.ip`, `ports`, `proto`.
 #[tracing::instrument(skip_all, fields(
-    ext.ip = %req.ext_ip,
-    int.ip = %req.int_ip,
-    ports = %req.ports,
-    proto = %req.proto
+    ext.ip = %config.ext_ip,
+    int.ip = %config.int_ip,
+    ports = %config.ports,
+    proto = %config.proto
 ))]
 pub async fn remove_dnat(
     State(state): State<AppState>,
-    Json(req): Json<DnatRequest>,
+    Json(config): Json<DnatConfig>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     let mut lock = state.daemon_state.write().await;
-    let idx = lock
-        .dnats
-        .iter()
-        .position(|d| d.ext_ip == req.ext_ip && d.int_ip == req.int_ip && d.ports == req.ports);
+    let idx = lock.dnats.iter().position(|d| {
+        d.ext_ip == config.ext_ip && d.int_ip == config.int_ip && d.ports == config.ports
+    });
     if let Some(i) = idx {
         let config = lock.dnats.remove(i);
         let _ = state.iptables.remove_dnat(&config);
@@ -157,14 +134,6 @@ pub async fn remove_dnat(
         // Not in daemon state but may still have stale iptables rules and port
         // reservations from a previous daemon instance (e.g. after restart with
         // reconciled DNATs). Clean them up so the caller can re-add cleanly.
-        let config = DnatConfig {
-            ext_ip: req.ext_ip,
-            int_ip: req.int_ip,
-            ports: req.ports,
-            proto: req.proto,
-            ext_if: req.ext_if,
-            preserve_src_ip: req.preserve_src_ip,
-        };
         let _ = state.iptables.remove_dnat(&config);
         unbind_ports(state.ports.clone(), &config.ext_ip, &config.ports).await;
         Ok(StatusCode::OK)
@@ -172,40 +141,30 @@ pub async fn remove_dnat(
 }
 
 /// `POST /snat` — Adds a static SNAT rule.
-#[tracing::instrument(skip_all, fields(int.ip = %req.int_ip, ext.ip = %req.ext_ip, ext.iface = %req.ext_if))]
+#[tracing::instrument(skip_all, fields(int.ip = %config.int_ip, ext.ip = %config.ext_ip, ext.iface = %config.ext_if))]
 pub async fn add_snat(
     State(state): State<AppState>,
-    Json(req): Json<SnatRequest>,
+    Json(config): Json<SnatConfig>,
 ) -> Result<Json<SnatConfig>, (StatusCode, Json<ErrorResponse>)> {
-    let config = SnatConfig {
-        int_ip: req.int_ip.clone(),
-        ext_ip: req.ext_ip.clone(),
-        ext_if: req.ext_if.clone(),
-    };
-    state.iptables.install_snat(&config).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-    })?;
+    state
+        .iptables
+        .install_snat(&config)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     state.daemon_state.write().await.snats.push(config.clone());
     state.persist().await;
     Ok(Json(config))
 }
 
 /// `DELETE /snat` — Removes a static SNAT rule.
-#[tracing::instrument(skip_all, fields(int.ip = %req.int_ip, ext.ip = %req.ext_ip))]
+#[tracing::instrument(skip_all, fields(int.ip = %config.int_ip, ext.ip = %config.ext_ip))]
 pub async fn remove_snat(
     State(state): State<AppState>,
-    Json(req): Json<SnatRequest>,
+    Json(config): Json<SnatConfig>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     let mut lock = state.daemon_state.write().await;
-    let idx = lock
-        .snats
-        .iter()
-        .position(|s| s.int_ip == req.int_ip && s.ext_ip == req.ext_ip && s.ext_if == req.ext_if);
+    let idx = lock.snats.iter().position(|s| {
+        s.int_ip == config.int_ip && s.ext_ip == config.ext_ip && s.ext_if == config.ext_if
+    });
     if let Some(i) = idx {
         let config = lock.snats.remove(i);
         let _ = state.iptables.remove_snat(&config);
@@ -213,28 +172,16 @@ pub async fn remove_snat(
         state.persist().await;
         Ok(StatusCode::OK)
     } else {
-        Err((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: "SNAT rule not found".into(),
-            }),
-        ))
+        Err(err(StatusCode::NOT_FOUND, "SNAT rule not found"))
     }
 }
 
 /// `POST /hairpin` — Adds a static hairpin NAT rule.
-#[tracing::instrument(skip_all, fields(ext.ip = %req.ext_ip, int.ip = %req.int_ip, ports = %req.ports, proto = %req.proto))]
+#[tracing::instrument(skip_all, fields(ext.ip = %config.ext_ip, int.ip = %config.int_ip, ports = %config.ports, proto = %config.proto))]
 pub async fn add_hairpin(
     State(state): State<AppState>,
-    Json(req): Json<HairpinRequest>,
+    Json(config): Json<HairpinConfig>,
 ) -> Result<Json<HairpinConfig>, (StatusCode, Json<ErrorResponse>)> {
-    let config = HairpinConfig {
-        ext_ip: req.ext_ip.clone(),
-        int_ip: req.int_ip.clone(),
-        ports: req.ports.clone(),
-        proto: req.proto,
-        lan_cidr: req.lan_cidr.clone(),
-    };
     bind_ports(
         state.ports.clone(),
         &config.ext_ip,
@@ -244,12 +191,7 @@ pub async fn add_hairpin(
     .await?;
     if let Err(e) = state.iptables.install_hairpin(&config) {
         unbind_ports(state.ports, &config.ext_ip, &config.ports).await;
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        ));
+        return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
     }
     state
         .daemon_state
@@ -262,16 +204,15 @@ pub async fn add_hairpin(
 }
 
 /// `DELETE /hairpin` — Removes a static hairpin NAT rule.
-#[tracing::instrument(skip_all, fields(ext.ip = %req.ext_ip, int.ip = %req.int_ip, ports = %req.ports))]
+#[tracing::instrument(skip_all, fields(ext.ip = %config.ext_ip, int.ip = %config.int_ip, ports = %config.ports))]
 pub async fn remove_hairpin(
     State(state): State<AppState>,
-    Json(req): Json<HairpinRequest>,
+    Json(config): Json<HairpinConfig>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     let mut lock = state.daemon_state.write().await;
-    let idx = lock
-        .hairpins
-        .iter()
-        .position(|h| h.ext_ip == req.ext_ip && h.int_ip == req.int_ip && h.ports == req.ports);
+    let idx = lock.hairpins.iter().position(|h| {
+        h.ext_ip == config.ext_ip && h.int_ip == config.int_ip && h.ports == config.ports
+    });
     if let Some(i) = idx {
         let config = lock.hairpins.remove(i);
         let _ = state.iptables.remove_hairpin(&config);
@@ -282,15 +223,8 @@ pub async fn remove_hairpin(
     } else {
         // Not in daemon state but may still have stale iptables rules and port
         // reservations from a previous daemon instance. Clean them up.
-        let config = HairpinConfig {
-            ext_ip: req.ext_ip,
-            int_ip: req.int_ip,
-            ports: req.ports,
-            proto: req.proto,
-            lan_cidr: None,
-        };
         let _ = state.iptables.remove_hairpin(&config);
-        unbind_ports(state.ports.clone(), &config.ext_ip, &config.ports).await;
+        unbind_ports(state.ports, &config.ext_ip, &config.ports).await;
         Ok(StatusCode::OK)
     }
 }
@@ -301,24 +235,13 @@ pub async fn remove_hairpin(
 ///
 /// Installs an `ip rule` + `ip route` entry for source IP preservation.
 /// Idempotent if the same policy route already exists.
-#[tracing::instrument(skip_all, fields(src.ip = %req.src_ip, via = %req.via, table = req.table))]
+#[tracing::instrument(skip_all, fields(src.ip = %config.src_ip, via = %config.via, table = config.table))]
 pub async fn add_policy_route(
     State(state): State<AppState>,
-    Json(req): Json<PolicyRouteRequest>,
+    Json(config): Json<PolicyRouteConfig>,
 ) -> Result<Json<PolicyRouteConfig>, (StatusCode, Json<ErrorResponse>)> {
-    let config = PolicyRouteConfig {
-        src_ip: req.src_ip.clone(),
-        via: req.via.clone(),
-        table: req.table,
-    };
-
     if let Err(e) = state.policy_route.install(&config) {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        ));
+        return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
     }
 
     state
@@ -335,16 +258,16 @@ pub async fn add_policy_route(
 ///
 /// Deletes the `ip rule` + `ip route` entry. Idempotent — returns OK
 /// even if the route was already removed from the kernel.
-#[tracing::instrument(skip_all, fields(src.ip = %req.src_ip, via = %req.via, table = req.table))]
+#[tracing::instrument(skip_all, fields(src.ip = %config.src_ip, via = %config.via, table = config.table))]
 pub async fn remove_policy_route(
     State(state): State<AppState>,
-    Json(req): Json<PolicyRouteRequest>,
+    Json(config): Json<PolicyRouteConfig>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     let mut lock = state.daemon_state.write().await;
     let idx = lock
         .policy_routes
         .iter()
-        .position(|r| r.src_ip == req.src_ip && r.via == req.via && r.table == req.table);
+        .position(|r| r.src_ip == config.src_ip && r.via == config.via && r.table == config.table);
     if let Some(i) = idx {
         let config = lock.policy_routes.remove(i);
         let _ = state.policy_route.remove(&config);
@@ -353,11 +276,6 @@ pub async fn remove_policy_route(
         Ok(StatusCode::OK)
     } else {
         // Not in daemon state, but still try to remove to be safe
-        let config = PolicyRouteConfig {
-            src_ip: req.src_ip,
-            via: req.via,
-            table: req.table,
-        };
         let _ = state.policy_route.remove(&config);
         Ok(StatusCode::OK)
     }
@@ -373,14 +291,10 @@ pub async fn remap_port(
     Json(req): Json<DockerRemapRequest>,
 ) -> Result<Json<Vec<DockerPortMap>>, (StatusCode, Json<ErrorResponse>)> {
     let mut lock = state.daemon_state.write().await;
-    let container_mappings = lock.mapping.get_mut(&container_id).ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: "Container not found".into(),
-            }),
-        )
-    })?;
+    let container_mappings = lock
+        .mapping
+        .get_mut(&container_id)
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "Container not found"))?;
 
     let mut to_replace = Vec::new();
     for (i, m) in container_mappings.iter().enumerate() {
@@ -389,12 +303,7 @@ pub async fn remap_port(
         }
     }
     if to_replace.is_empty() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: "Port mapping not found".into(),
-            }),
-        ));
+        return Err(err(StatusCode::NOT_FOUND, "Port mapping not found"));
     }
 
     let mut new_mappings = Vec::new();
@@ -414,23 +323,13 @@ pub async fn remap_port(
             .allocate(new_mapping.request.host_addr, old.request.proto)
             .await
         {
-            return Err((
-                StatusCode::CONFLICT,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            ));
+            return Err(err(StatusCode::CONFLICT, e.to_string()));
         }
         let _ = state.iptables.remove_mapping(old);
         if let Err(e) = state.iptables.install_dockermap(&new_mapping) {
             let _ = state.iptables.install_dockermap(old);
             state.ports.deallocate(new_mapping.request.host_addr).await;
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            ));
+            return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
         }
         state.ports.deallocate(old.request.host_addr).await;
         container_mappings[i] = new_mapping.clone();
@@ -457,49 +356,27 @@ pub async fn add_mapping(
     Json(req): Json<DockerAddMapRequest>,
 ) -> Result<Json<DockerPortMap>, (StatusCode, Json<ErrorResponse>)> {
     let (container_ip, container_name) = if let Some(target_ip_str) = &req.target_ip {
-        let ip = IpAddr::from_str(target_ip_str).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!("Invalid target IP: {e}"),
-                }),
-            )
-        })?;
+        let ip = IpAddr::from_str(target_ip_str)
+            .map_err(|e| err(StatusCode::BAD_REQUEST, format!("Invalid target IP: {e}")))?;
         (ip, container_id.clone())
     } else {
-        let docker = state.docker.as_ref().ok_or_else(|| {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(ErrorResponse {
-                    error: "Docker not available".into(),
-                }),
-            )
-        })?;
+        let docker = state
+            .docker
+            .as_ref()
+            .ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "Docker not available"))?;
         let inspect = docker
             .inspect_container(&container_id, None)
             .await
-            .map_err(|e| {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorResponse {
-                        error: format!("Container not found: {e}"),
-                    }),
-                )
-            })?;
+            .map_err(|e| err(StatusCode::NOT_FOUND, format!("Container not found: {e}")))?;
         let container_name = inspect
             .name
             .as_deref()
             .map(lab_ops_lab_lib::docker::trim_container_name)
             .unwrap_or("unknown")
             .to_string();
-        let network_settings = inspect.network_settings.ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "Container has no network settings".into(),
-                }),
-            )
-        })?;
+        let network_settings = inspect
+            .network_settings
+            .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Container has no network settings"))?;
         let container_ip = network_settings
             .networks
             .as_ref()
@@ -510,50 +387,23 @@ pub async fn add_mapping(
                         .and_then(|ip| IpAddr::from_str(ip).ok())
                 })
             })
-            .ok_or_else(|| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse {
-                        error: "Container has no IP address".into(),
-                    }),
-                )
-            })?;
+            .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Container has no IP address"))?;
         (container_ip, container_name)
     };
 
-    let proto = match req.proto.to_lowercase() {
-        "tcp" => TransportProtocol::Tcp,
-        "udp" => TransportProtocol::Udp,
-        other => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!("Unsupported protocol: {other}"),
-                }),
-            ));
-        }
-    };
-    let host_ip = IpAddr::from_str(&req.host_ip).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!("Invalid host IP: {e}"),
-            }),
-        )
-    })?;
+    let proto = req.proto;
+    let host_ip = IpAddr::from_str(&req.host_ip)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, format!("Invalid host IP: {e}")))?;
     let container_addr = SocketAddr::new(container_ip, req.container_port);
     let host_addr = if req.host_port == 0 {
         allocate_free_port(&state.ports, host_ip, proto).await?
     } else {
         let addr = SocketAddr::new(host_ip, req.host_port);
-        state.ports.allocate(addr, proto).await.map_err(|e| {
-            (
-                StatusCode::CONFLICT,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
+        state
+            .ports
+            .allocate(addr, proto)
+            .await
+            .map_err(|e| err(StatusCode::CONFLICT, e.to_string()))?;
         addr
     };
 
@@ -571,11 +421,9 @@ pub async fn add_mapping(
 
     if let Err(e) = state.iptables.install_dockermap(&mapping) {
         state.ports.deallocate(host_addr).await;
-        return Err((
+        return Err(err(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("iptables error: {e}"),
-            }),
+            format!("iptables error: {e}"),
         ));
     }
     state
@@ -598,14 +446,10 @@ pub async fn remove_mapping(
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     let port = port_str.parse::<u16>().unwrap_or(0);
     let mut lock = state.daemon_state.write().await;
-    let container_mappings = lock.mapping.get_mut(&container_id).ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: "Container not found".into(),
-            }),
-        )
-    })?;
+    let container_mappings = lock
+        .mapping
+        .get_mut(&container_id)
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "Container not found"))?;
     let pos = container_mappings
         .iter()
         .position(|m| m.request.host_addr.port() == port);
@@ -617,12 +461,7 @@ pub async fn remove_mapping(
         state.persist().await;
         Ok(StatusCode::OK)
     } else {
-        Err((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: "Port mapping not found".into(),
-            }),
-        ))
+        Err(err(StatusCode::NOT_FOUND, "Port mapping not found"))
     }
 }
 
@@ -643,11 +482,9 @@ pub async fn remove_mapping_by_id(
             return Ok(StatusCode::OK);
         }
     }
-    Err((
+    Err(err(
         StatusCode::NOT_FOUND,
-        Json(ErrorResponse {
-            error: format!("No mapping found with id {id}"),
-        }),
+        format!("No mapping found with id {id}"),
     ))
 }
 
@@ -695,6 +532,16 @@ pub async fn clear_all(
 
 // --- Internal helpers ---
 
+/// Builds the `(StatusCode, Json<ErrorResponse>)` tuple every handler returns on failure.
+fn err(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        status,
+        Json(ErrorResponse {
+            error: message.into(),
+        }),
+    )
+}
+
 /// Lower bound of the ephemeral port range the daemon allocates from.
 ///
 /// The natmap daemon is the single authority for this range.
@@ -718,11 +565,9 @@ async fn allocate_free_port(
             return Ok(addr);
         }
     }
-    Err((
+    Err(err(
         StatusCode::SERVICE_UNAVAILABLE,
-        Json(ErrorResponse {
-            error: "no free host port available in ephemeral range".into(),
-        }),
+        "no free host port available in ephemeral range",
     ))
 }
 
@@ -733,14 +578,10 @@ pub async fn bind_ports(
     proto: TransportProtocol,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     for addr in parse_socket_addrs(ip, ports_csv)? {
-        ports.allocate(addr, proto).await.map_err(|e| {
-            (
-                StatusCode::CONFLICT,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
+        ports
+            .allocate(addr, proto)
+            .await
+            .map_err(|e| err(StatusCode::CONFLICT, e.to_string()))?;
     }
     Ok(())
 }
@@ -757,26 +598,17 @@ fn parse_socket_addrs(
     ip: &str,
     ports_csv: &str,
 ) -> Result<Vec<SocketAddr>, (StatusCode, Json<ErrorResponse>)> {
-    let ip: IpAddr = ip.parse().map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!("Invalid IP: {ip}"),
-            }),
-        )
-    })?;
+    let ip: IpAddr = ip
+        .parse()
+        .map_err(|_| err(StatusCode::BAD_REQUEST, format!("Invalid IP: {ip}")))?;
 
     ports_csv
         .split(',')
         .map(|p| {
-            let port = p.trim().parse::<u16>().map_err(|_| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse {
-                        error: format!("Invalid port: {p}"),
-                    }),
-                )
-            })?;
+            let port = p
+                .trim()
+                .parse::<u16>()
+                .map_err(|_| err(StatusCode::BAD_REQUEST, format!("Invalid port: {p}")))?;
             Ok(SocketAddr::new(ip, port))
         })
         .collect()
@@ -1054,7 +886,7 @@ mod tests {
     #[tokio::test]
     async fn add_dnat_duplicate_is_idempotent() {
         let state = test_app_state();
-        let req = DnatRequest {
+        let req = DnatConfig {
             ext_ip: "1.2.3.4".into(),
             int_ip: "10.0.0.1".into(),
             ports: "80".into(),
@@ -1078,7 +910,7 @@ mod tests {
     #[tokio::test]
     async fn remove_dnat_not_found_still_returns_ok() {
         let state = test_app_state();
-        let req = DnatRequest {
+        let req = DnatConfig {
             ext_ip: "1.2.3.4".into(),
             int_ip: "10.0.0.1".into(),
             ports: "80".into(),
@@ -1093,7 +925,7 @@ mod tests {
     #[tokio::test]
     async fn add_dnat_invalid_port_csv_returns_error() {
         let state = test_app_state();
-        let req = DnatRequest {
+        let req = DnatConfig {
             ext_ip: "1.2.3.4".into(),
             int_ip: "10.0.0.1".into(),
             ports: "not-a-port".into(),
@@ -1109,7 +941,7 @@ mod tests {
     #[tokio::test]
     async fn remove_snat_not_found_returns_error() {
         let state = test_app_state();
-        let req = SnatRequest {
+        let req = SnatConfig {
             int_ip: "10.0.0.1".into(),
             ext_ip: "1.2.3.4".into(),
             ext_if: "eth0".into(),
@@ -1122,7 +954,7 @@ mod tests {
     #[tokio::test]
     async fn add_hairpin_invalid_ip_returns_error() {
         let state = test_app_state();
-        let req = HairpinRequest {
+        let req = HairpinConfig {
             ext_ip: "not-an-ip".into(),
             int_ip: "10.0.0.1".into(),
             ports: "80".into(),
@@ -1348,7 +1180,7 @@ mod tests {
     #[tokio::test]
     async fn remove_policy_route_not_found_returns_ok() {
         let state = test_app_state();
-        let req = PolicyRouteRequest {
+        let req = PolicyRouteConfig {
             src_ip: "10.0.0.1".into(),
             via: "192.168.1.1".into(),
             table: 100,

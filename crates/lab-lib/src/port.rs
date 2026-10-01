@@ -77,12 +77,6 @@ pub struct PortAllocator {
     sockets: RwLock<HashMap<SocketAddr, ReservedSocket>>,
 }
 
-impl Default for PortAllocator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl PortAllocator {
     pub fn new() -> Self {
         Self {

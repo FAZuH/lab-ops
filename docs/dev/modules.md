@@ -77,9 +77,9 @@ pub mod utils;
 
 `pub struct NatmapClient { socket: PathBuf }` — one typed method per daemon operation, speaking the same HTTP-over-Unix-socket protocol as the CLI's `request_json`:
 
-- Static NAT ops take the typed config struct + an explicit `delete: bool` and return `Result<Option<T>, NatmapError>` (daemon echo on install, `None` on delete): `dnat(DnatConfig, bool)`, `snat`, `hairpin`, `policy_route`.
-- Docker mapping ops mirror the daemon endpoints: `add_mapping(&str, DockerAddMapRequest) -> Result<DockerPortMap>`, `remove_mapping(&str, u16)`, `remove_mapping_by_id(u64)`, `remap_port(&str, DockerRemapRequest) -> Result<Vec<DockerPortMap>>`, `list_mappings() -> Result<ListResponse>`, `clear()`.
-- `new(impl Into<PathBuf>)` and `default_socket()` (env `NATMAP_SOCKET`, else `lab_ops_lab_lib::NATMAP_SOCKET`). Config → request conversion happens inside the client via `From` impls in `models.rs`. Re-exports `NatmapError` from `utils.rs`. Consumed by auto-discover (which previously built `cli::Cli` values and called `run_cli`).
+- Static NAT ops take the typed config struct + an explicit `delete: bool` and return `Result<Option<T>, NatmapError>` (daemon echo on install, `None` on delete): `dnat(DnatConfig, bool)`, `hairpin`, `policy_route`.
+- Docker mapping ops mirror the daemon endpoints: `add_mapping(&str, DockerAddMapRequest) -> Result<DockerPortMap>` and `rules() -> Result<Vec<LiveRule>>` (live rules parsed from `iptables-save`).
+- `new(impl Into<PathBuf>)` and `default_socket()` (env `NATMAP_SOCKET`, else `lab_ops_lab_lib::NATMAP_SOCKET`). Re-exports `NatmapError` from `utils.rs`. Consumed by auto-discover, which calls the config structs directly (it previously built `cli::Cli` values and called `run_cli`).
 
 ### `cli.rs` — CLI Definitions
 
@@ -133,7 +133,6 @@ Key types:
 | `DnatConfig` | Persisted DNAT rule (ext_ip, int_ip, ports, proto, ext_if, preserve_src_ip) |
 | `SnatConfig` | Persisted SNAT rule (int_ip, ext_ip, ext_if) |
 | `HairpinConfig` | Persisted hairpin rule (ext_ip, int_ip, ports, proto, optional lan_cidr) |
-| `DnatRequest` / `SnatRequest` / `HairpinRequest` | API request bodies |
 | `DaemonState` | Top-level persisted state (docker, dnats, snats, hairpins) |
 | `ListResponse` | API response for `GET /mappings` |
 | `DockerPortMap` | Running Docker mapping (id, request, container info, comment) |

@@ -443,7 +443,6 @@ services:
 kill %3 2>/dev/null || true
 sleep 1
 NO_COLOR=1 RUST_LOG_STYLE=never RUST_LOG="info,auto_discover=debug" lab-ops auto-discover daemon /tmp/discovery.yaml \
-    --state-dir /tmp/state \
     --no-forwarding \
     --consul-addr http://127.0.0.1:8500 \
     >/tmp/discovery-debug.log 2>&1 &

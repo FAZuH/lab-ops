@@ -130,6 +130,14 @@ fn default_proto() -> TransportProtocol {
 
 // --- Static NAT configs (persisted to state.json) ---
 
+/// A policy routing rule configuration (an `ip rule` + `ip route` pair).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyRouteConfig {
+    pub src_ip: String,
+    pub via: String,
+    pub table: u32,
+}
+
 /// A static DNAT (destination NAT) rule configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DnatConfig {
@@ -235,100 +243,6 @@ pub struct LiveRule {
     pub ports: Vec<u16>,
     /// Transport protocol.
     pub proto: TransportProtocol,
-}
-
-// --- API request types ---
-
-/// JSON body for creating or deleting a DNAT rule.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DnatRequest {
-    pub ext_ip: String,
-    pub int_ip: String,
-    pub ports: String,
-    pub proto: TransportProtocol,
-    pub ext_if: Option<String>,
-    #[serde(default)]
-    pub preserve_src_ip: bool,
-}
-
-/// JSON body for creating or deleting an SNAT rule.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SnatRequest {
-    pub int_ip: String,
-    pub ext_ip: String,
-    pub ext_if: String,
-}
-
-/// JSON body for creating or deleting a hairpin rule.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HairpinRequest {
-    pub ext_ip: String,
-    pub int_ip: String,
-    pub ports: String,
-    pub proto: TransportProtocol,
-    #[serde(default)]
-    pub lan_cidr: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PolicyRouteConfig {
-    pub src_ip: String,
-    pub via: String,
-    pub table: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PolicyRouteRequest {
-    pub src_ip: String,
-    pub via: String,
-    pub table: u32,
-}
-
-// --- Config → request conversions ---
-
-impl From<DnatConfig> for DnatRequest {
-    fn from(config: DnatConfig) -> Self {
-        Self {
-            ext_ip: config.ext_ip,
-            int_ip: config.int_ip,
-            ports: config.ports,
-            proto: config.proto,
-            ext_if: config.ext_if,
-            preserve_src_ip: config.preserve_src_ip,
-        }
-    }
-}
-
-impl From<SnatConfig> for SnatRequest {
-    fn from(config: SnatConfig) -> Self {
-        Self {
-            int_ip: config.int_ip,
-            ext_ip: config.ext_ip,
-            ext_if: config.ext_if,
-        }
-    }
-}
-
-impl From<HairpinConfig> for HairpinRequest {
-    fn from(config: HairpinConfig) -> Self {
-        Self {
-            ext_ip: config.ext_ip,
-            int_ip: config.int_ip,
-            ports: config.ports,
-            proto: config.proto,
-            lan_cidr: config.lan_cidr,
-        }
-    }
-}
-
-impl From<PolicyRouteConfig> for PolicyRouteRequest {
-    fn from(config: PolicyRouteConfig) -> Self {
-        Self {
-            src_ip: config.src_ip,
-            via: config.via,
-            table: config.table,
-        }
-    }
 }
 
 // --- Persisted daemon state ---

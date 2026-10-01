@@ -213,7 +213,6 @@ YAMLEOF
 {extra_setup}
 
 lab-ops auto-discover daemon /tmp/discovery.yaml \
-    --state-dir /tmp/state \
     {daemon_flags} \
     --consul-addr http://127.0.0.1:8500 \
     >/tmp/discovery.log 2>&1 &

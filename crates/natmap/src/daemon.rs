@@ -266,9 +266,6 @@ impl Daemon {
                 }
             });
         }
-
-        #[allow(unreachable_code)]
-        Ok(())
     }
 
     /// Loads persisted state from disk and reconciles with the current system state.

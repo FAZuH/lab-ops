@@ -10,8 +10,6 @@ use serde::Serialize;
 pub struct DiscoveryConfig {
     pub node: NodeConfig,
     #[serde(default)]
-    pub config_dir: Option<String>,
-    #[serde(default)]
     pub defaults: Defaults,
     #[serde(default)]
     pub services: HashMap<String, ServiceConfig>,
@@ -153,13 +151,11 @@ pub enum ResolvedPortType {
     RProxyLocal {
         template: String,
         domains: Vec<String>,
-        proxy_on: Option<String>,
         proxy_ip: Option<String>,
     },
     RProxyRemote {
         template: String,
         domains: Vec<String>,
-        proxy_on: String,
         proxy_ip: Option<String>,
     },
     ForwardLocal {
@@ -169,7 +165,6 @@ pub enum ResolvedPortType {
         ext_ip: String,
         ext_ports: Vec<u16>,
         hairpin: bool,
-        proxy_on: Option<String>,
         preserve_src_ip: bool,
         preserve_src_ip_gateway: Option<String>,
         preserve_src_ip_src: Option<String>,
@@ -275,10 +270,6 @@ impl DiscoveryConfig {
                     port_type: ResolvedPortType::RProxyLocal {
                         template: rp.template.clone(),
                         domains: rp.domains.clone(),
-                        proxy_on: rp
-                            .proxy_on
-                            .clone()
-                            .or_else(|| self.defaults.proxy_on.clone()),
                         proxy_ip: rp
                             .proxy_ip
                             .clone()
@@ -315,7 +306,6 @@ impl DiscoveryConfig {
                     port_type: ResolvedPortType::RProxyRemote {
                         template: rp.template.clone(),
                         domains: rp.domains.clone(),
-                        proxy_on: proxy_on.unwrap_or_default(),
                         proxy_ip: rp
                             .proxy_ip
                             .clone()
@@ -372,10 +362,6 @@ impl DiscoveryConfig {
                         ext_ip: fr.ext_ip.clone().unwrap_or_default(),
                         ext_ports: fr.ext_ports.clone().unwrap_or_default(),
                         hairpin: fr.hairpin.unwrap_or(false),
-                        proxy_on: fr
-                            .proxy_on
-                            .clone()
-                            .or_else(|| self.defaults.proxy_on.clone()),
                         preserve_src_ip: fr
                             .preserve_src_ip
                             .unwrap_or_else(|| self.defaults.preserve_src_ip.unwrap_or(false)),
@@ -443,7 +429,6 @@ mod tests {
             node: NodeConfig {
                 name: "test-node".into(),
             },
-            config_dir: None,
             defaults: Defaults {
                 preserve_src_ip: Some(true),
                 preserve_src_ip_gateway: Some("192.168.1.1".into()),
