@@ -321,6 +321,14 @@ www.example.com. 300 IN CNAME example.com.";
         assert!(parse_zone(zone).is_empty());
     }
 
+    #[test]
+    fn parse_zone_ttl_above_u32_max_falls_back_to_one() {
+        let zone = "example.com. 4294967296 IN A 192.0.2.1";
+        let records = parse_zone(zone);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].ttl, 1);
+    }
+
     // ── split_data_and_proxied ──
 
     #[test]
@@ -469,6 +477,14 @@ www.example.com. 300 IN CNAME example.com.";
         assert_eq!(proto, "tcp");
     }
 
+    #[test]
+    fn parse_tlsa_name_non_numeric_port_falls_back_to_zero() {
+        let (name, port, proto) = parse_tlsa_name("_abc._tcp.example.com.", "example.com.");
+        assert_eq!(name, "@");
+        assert_eq!(port, 0);
+        assert_eq!(proto, "tcp");
+    }
+
     // ── parse_txt_data ──
 
     #[test]
@@ -497,6 +513,19 @@ www.example.com. 300 IN CNAME example.com.";
     #[test]
     fn parse_txt_data_unicode() {
         assert_eq!(parse_txt_data(r#""안녕하세요""#), "안녕하세요");
+    }
+
+    #[test]
+    fn parse_txt_data_unterminated_quote_drops_partial() {
+        assert_eq!(parse_txt_data(r#""abc"#), "");
+    }
+
+    #[test]
+    fn parse_txt_data_unterminated_quote_keeps_closed_segments() {
+        assert_eq!(
+            parse_txt_data(r#""v=spf1" "include:_spf.example.com"#),
+            "v=spf1"
+        );
     }
 
     // ── can_proxy ──

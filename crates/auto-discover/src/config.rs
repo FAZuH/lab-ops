@@ -497,4 +497,123 @@ mod tests {
         assert_eq!(preserve_src_ip_gateway.as_deref(), Some("10.10.10.1"));
         assert_eq!(preserve_src_ip_src.as_deref(), Some("10.10.10.10"));
     }
+
+    #[test]
+    fn discovery_config_parses_full_yaml() {
+        let yaml = r#"
+node:
+  name: homelab-ünïcode
+defaults:
+  proxy_on: https://proxy.example.com
+services:
+  nginx:
+    type: docker
+    match:
+      project: web
+    rproxylocal:
+      - port: 80
+        template: "{service}-{port}"
+        domains: ["example.com", "www.example.com"]
+    forwardlocal:
+      - port: 443
+        proto: udp
+        bind_port: 8443
+    forwardremote:
+      - port: 8080
+        ext_ip: 203.0.113.50
+        ext_ports: [80, 443]
+        hairpin: true
+"#;
+        let cfg: DiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.node.name, "homelab-ünïcode");
+        let svc = &cfg.services["nginx"];
+        assert_eq!(svc.service_type, ServiceType::Docker);
+        assert_eq!(
+            svc.match_cfg.as_ref().unwrap().project.as_deref(),
+            Some("web")
+        );
+        assert_eq!(svc.rproxylocal[0].template, "{service}-{port}");
+        assert_eq!(
+            svc.rproxylocal[0].domains,
+            ["example.com", "www.example.com"]
+        );
+        assert_eq!(svc.forwardlocal[0].proto, Some(TransportProtocol::Udp));
+        assert_eq!(svc.forwardlocal[0].bind_port, Some(8443));
+        assert_eq!(
+            svc.forwardremote[0].ext_ports.as_deref(),
+            Some(&[80u16, 443][..])
+        );
+    }
+
+    #[test]
+    fn discovery_config_defaults_missing_optional_sections() {
+        let yaml = "node:\n  name: homelab\n";
+        let cfg: DiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(cfg.services.is_empty());
+        assert_eq!(cfg.defaults, Defaults::default());
+    }
+
+    #[test]
+    fn discovery_config_rejects_missing_node_name() {
+        let yaml = "node: {}\nservices: {}\n";
+        let err = serde_yaml::from_str::<DiscoveryConfig>(yaml).unwrap_err();
+        assert!(err.to_string().contains("name"), "{err}");
+    }
+
+    #[test]
+    fn service_config_rejects_unknown_type() {
+        let yaml = "node:\n  name: homelab\nservices:\n  api:\n    type: kubernetes\n";
+        let err = serde_yaml::from_str::<DiscoveryConfig>(yaml).unwrap_err();
+        assert!(err.to_string().contains("unknown variant"), "{err}");
+    }
+
+    #[test]
+    fn service_config_rejects_missing_type() {
+        let yaml = "node:\n  name: homelab\nservices:\n  api:\n    address: 127.0.0.1\n";
+        let err = serde_yaml::from_str::<DiscoveryConfig>(yaml).unwrap_err();
+        assert!(err.to_string().contains("type"), "{err}");
+    }
+
+    #[test]
+    fn rproxy_local_config_rejects_missing_template() {
+        let yaml = "node:\n  name: homelab\nservices:\n  api:\n    type: docker\n    rproxylocal:\n      - port: 80\n";
+        let err = serde_yaml::from_str::<DiscoveryConfig>(yaml).unwrap_err();
+        assert!(err.to_string().contains("template"), "{err}");
+    }
+
+    #[test]
+    fn forward_remote_config_rejects_missing_port() {
+        let yaml = "node:\n  name: homelab\nservices:\n  api:\n    type: docker\n    forwardremote:\n      - ext_ip: 203.0.113.50\n";
+        let err = serde_yaml::from_str::<DiscoveryConfig>(yaml).unwrap_err();
+        assert!(err.to_string().contains("port"), "{err}");
+    }
+
+    #[test]
+    fn forward_local_config_rejects_port_above_u16_max() {
+        let yaml = "node:\n  name: homelab\nservices:\n  api:\n    type: docker\n    forwardlocal:\n      - port: 65536\n";
+        let err = serde_yaml::from_str::<DiscoveryConfig>(yaml).unwrap_err();
+        assert!(err.to_string().contains("65536"), "{err}");
+    }
+
+    #[test]
+    fn forward_remote_config_rejects_port_above_u16_max() {
+        let yaml = "node:\n  name: homelab\nservices:\n  api:\n    type: docker\n    forwardremote:\n      - port: 65536\n";
+        let err = serde_yaml::from_str::<DiscoveryConfig>(yaml).unwrap_err();
+        assert!(err.to_string().contains("65536"), "{err}");
+    }
+
+    #[test]
+    fn forward_remote_config_rejects_ext_ports_above_u16_max() {
+        let yaml = "node:\n  name: homelab\nservices:\n  api:\n    type: docker\n    forwardremote:\n      - port: 8080\n        ext_ports: [80, 65536]\n";
+        let err = serde_yaml::from_str::<DiscoveryConfig>(yaml).unwrap_err();
+        assert!(err.to_string().contains("65536"), "{err}");
+    }
+
+    #[test]
+    fn forward_local_config_accepts_u16_boundary_ports() {
+        let yaml = "node:\n  name: homelab\nservices:\n  api:\n    type: docker\n    forwardlocal:\n      - port: 65535\n        bind_port: 0\n";
+        let cfg: DiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.services["api"].forwardlocal[0].port, 65535);
+        assert_eq!(cfg.services["api"].forwardlocal[0].bind_port, Some(0));
+    }
 }
