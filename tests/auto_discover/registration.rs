@@ -18,10 +18,10 @@ services:
     let script = format!(
         r#"{setup}
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-i" nginx:alpine
-sleep 4
+{registered}
 
 docker stop {cname}
-sleep 5
+{deregistered}
 
 PORT_AFTER=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-i") | .value.Port // empty')
 if [ -n "$PORT_AFTER" ]; then
@@ -35,6 +35,8 @@ kill %3 %2 %1 2>/dev/null || true
 sleep 1
 "#,
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
+        registered = wait_for_consul_service("it-svc-i", 30),
+        deregistered = wait_for_service_gone("it-svc-i", 30),
         cname = cname,
     );
 
@@ -59,7 +61,7 @@ services:
     let script = format!(
         r#"{setup}
 docker run -d --name {cname} --network host -l "com.docker.compose.project=it-svc-hostnet" nginx:alpine
-sleep 4
+{absent}
 
 SVC=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-hostnet") | .value.Port // empty')
 if [ -n "$SVC" ]; then echo "FAIL: host-networked container should not be registered, got port=$SVC" >&2; exit 1; fi
@@ -68,6 +70,7 @@ echo "PASS: host-networked container correctly skipped"
 {teardown}
 "#,
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
+        absent = assert_absent("it-svc-hostnet", "registered despite host networking"),
         teardown = teardown(&[cname]),
         cname = cname,
     );
@@ -93,7 +96,7 @@ services:
         r#"{setup}
 docker rm -f {cname} 2>/dev/null || true
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-noexp" nginx:alpine
-sleep 4
+{registered}
 
 SVC=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-noexp") | .value.Port // empty')
 if [ -z "$SVC" ]; then echo "FAIL: container not registered (port exposure not required)" >&2; exit 1; fi
@@ -102,6 +105,7 @@ echo "PASS: container matched despite no port exposure"
 {teardown}
 "#,
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
+        registered = wait_for_consul_service("it-svc-noexp", 30),
         teardown = teardown(&[cname]),
         cname = cname,
     );
@@ -129,7 +133,7 @@ services:
     let script = format!(
         r#"{setup}
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-extra" nginx:alpine
-sleep 4
+{registered}
 
 META=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq 'to_entries[] | select(.value.Service == "it-svc-extra") | .value.Meta')
 
@@ -143,6 +147,7 @@ echo "PASS: extra fields present in Consul meta"
 {teardown}
 "#,
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
+        registered = wait_for_consul_service("it-svc-extra", 30),
         teardown = teardown(&[cname]),
         cname = cname,
     );
@@ -167,7 +172,7 @@ services:
     let script = format!(
         r#"{setup}
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-slug" nginx:alpine
-sleep 4
+{registered}
 
 SVC_ID=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-slug") | .key')
 EXPECTED_SLUG="it-svc-slug-test-local"
@@ -181,6 +186,7 @@ echo "PASS: service ID contains domain slug: $SVC_ID"
 {teardown}
 "#,
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
+        registered = wait_for_consul_service("it-svc-slug", 30),
         teardown = teardown(&[cname]),
         cname = cname,
     );
@@ -204,7 +210,7 @@ services:
     let script = format!(
         r#"{setup}
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-nodomain" nginx:alpine
-sleep 4
+{registered}
 
 SVC_ID=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-nodomain") | .key')
 EXPECTED_PREFIX="int-test-node-it-svc-nodomain-"
@@ -218,6 +224,7 @@ echo "PASS: service ID uses name fallback: $SVC_ID"
 {teardown}
 "#,
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
+        registered = wait_for_consul_service("it-svc-nodomain", 30),
         teardown = teardown(&[cname]),
         cname = cname,
     );
@@ -242,7 +249,7 @@ services:
     let script = format!(
         r#"{setup}
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-cidmeta" nginx:alpine
-sleep 4
+{registered}
 
 CID=$(docker inspect -f '{{{{.Id}}}}' {cname})
 META_CID=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-cidmeta") | .value.Meta.container_id')
@@ -256,6 +263,7 @@ echo "PASS: Meta.container_id matches container: $META_CID"
 {teardown}
 "#,
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
+        registered = wait_for_consul_service("it-svc-cidmeta", 30),
         teardown = teardown(&[cname]),
         cname = cname,
     );
@@ -280,20 +288,20 @@ services:
     let script = format!(
         r#"{setup}
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-reuse" nginx:alpine
-sleep 4
+{registered}
 
 PORT_BEFORE=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-reuse") | .value.Port')
 if [ -z "$PORT_BEFORE" ] || [ "$PORT_BEFORE" = "null" ]; then echo "FAIL: first run not registered" >&2; exit 1; fi
 echo "Initial port: $PORT_BEFORE"
 
 docker stop {cname}
-sleep 4
+{deregistered}
 
 docker rm -f {cname} 2>/dev/null || true
-sleep 1
+{removed}
 
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-reuse" nginx:alpine
-sleep 5
+{reregistered}
 
 PORT_AFTER=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-reuse") | .value.Port')
 if [ -z "$PORT_AFTER" ] || [ "$PORT_AFTER" = "null" ]; then echo "FAIL: restarted container not registered" >&2; exit 1; fi
@@ -307,6 +315,14 @@ echo "PASS: port $PORT_AFTER reused across container restart"
 {teardown}
 "#,
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
+        registered = wait_for_consul_service("it-svc-reuse", 30),
+        deregistered = wait_for_service_gone("it-svc-reuse", 30),
+        removed = poll_until_empty(
+            &format!("docker inspect -f '{{{{.State.Running}}}}' {cname} 2>/dev/null | grep true"),
+            20,
+            "container never went away",
+        ),
+        reregistered = wait_for_consul_service("it-svc-reuse", 30),
         teardown = teardown(&[cname]),
         cname = cname,
     );
@@ -331,7 +347,7 @@ services:
     let script = format!(
         r#"{setup}
 docker run -d --name {cname} -l "com.docker.compose.project=nonexistent-project" nginx:alpine
-sleep 4
+{absent}
 
 SVC=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-mismatch") | .value.Port // empty')
 if [ -n "$SVC" ]; then echo "FAIL: mismatched project should not register" >&2; exit 1; fi
@@ -340,6 +356,7 @@ echo "PASS: mismatched compose project correctly skipped"
 {teardown}
 "#,
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
+        absent = assert_absent("it-svc-mismatch", "registered despite the project mismatch"),
         teardown = teardown(&[cname]),
         cname = cname,
     );
@@ -364,13 +381,13 @@ services:
     let script = format!(
         r#"{setup}
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-die" nginx:alpine
-sleep 4
+{registered}
 
 PORT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-die") | .value.Port // empty')
 if [ -z "$PORT" ]; then echo "FAIL: service not registered" >&2; exit 1; fi
 
 docker kill {cname} >/dev/null 2>&1
-sleep 5
+{deregistered}
 
 SVC_AFTER=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-die") | .value.Port // empty')
 if [ -n "$SVC_AFTER" ]; then echo "FAIL: service not deregistered after die event" >&2; exit 1; fi
@@ -381,6 +398,8 @@ kill %3 %2 %1 2>/dev/null || true
 sleep 1
 "#,
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
+        registered = wait_for_consul_service("it-svc-die", 30),
+        deregistered = wait_for_service_gone("it-svc-die", 30),
         cname = cname,
     );
     let out = run(&script);
@@ -405,10 +424,7 @@ fn concurrent_starts_all_registered() {
 for cn in {cnames_list}; do
     docker run -d --name "$cn" -l "com.docker.compose.project=$cn" nginx:alpine
 done
-sleep 10
-
-COUNT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq '[to_entries[] | select(.value.Service | startswith("it-edge-con-"))] | length')
-if [ "$COUNT" -lt 5 ]; then echo "FAIL: expected 5 services, got $COUNT" >&2; curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq keys; exit 1; fi
+{all}
 
 echo "PASS: all 5 concurrent containers registered"
 docker rm -f {cnames_list} 2>/dev/null || true
@@ -416,6 +432,12 @@ kill %3 %2 %1 2>/dev/null || true
 sleep 1
 "#,
         setup = new_format_setup(&services_yaml, ""),
+        all = poll_until(
+            "curl -sf $CONSUL_HTTP_ADDR/v1/agent/services 2>/dev/null | jq '[to_entries[] | select(.value.Service | startswith(\"it-edge-con-\"))] | if length >= 5 then length else empty end' 2>/dev/null",
+            "COUNT",
+            40,
+            "fewer than 5 services registered",
+        ) + "\nif [ \"$COUNT\" -lt 5 ]; then echo \"FAIL: expected 5 services, got $COUNT\" >&2; curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq keys; exit 1; fi\n",
         cnames_list = cnames.join(" "),
     );
     let out = run(&script);
@@ -440,17 +462,17 @@ services:
     let script = format!(
         r#"{setup}
 # Restart daemon with debug logging so fields are visible
-kill %3 2>/dev/null || true
-sleep 1
+{stop}
 NO_COLOR=1 RUST_LOG_STYLE=never RUST_LOG="info,auto_discover=debug" lab-ops auto-discover daemon /tmp/discovery.yaml \
     --no-forwarding \
     --consul-addr http://127.0.0.1:8500 \
     >/tmp/discovery-debug.log 2>&1 &
-sleep 3
+DEBUG_PID=$!
+{alive}
 
 RUST_LOG=debug docker run -d --name {cname} \
     -l "com.docker.compose.project=it-svc-log" nginx:alpine
-sleep 5
+{logged}
 
 if ! grep -q 'container.id=' /tmp/discovery-debug.log && \
    ! grep -q 'container_id=' /tmp/discovery-debug.log; then
@@ -469,6 +491,19 @@ echo "PASS: structured log fields present"
 {teardown}
 "#,
         setup = new_format_setup(services_yaml, ""),
+        stop = stop_daemon(),
+        alive = poll_until(
+            "kill -0 $DEBUG_PID 2>/dev/null && echo alive || true",
+            "ALIVE",
+            20,
+            "the debug daemon died on startup",
+        ),
+        logged = poll_until(
+            "grep -o 'container\\.id=\\|container_id=' /tmp/discovery-debug.log 2>/dev/null",
+            "HITS",
+            30,
+            "no structured container.id field appeared in the debug log",
+        ),
         teardown = teardown(&[cname]),
         cname = cname,
     );

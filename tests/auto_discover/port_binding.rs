@@ -18,7 +18,7 @@ services:
         r#"{setup}
 docker rm -f {cname} 2>/dev/null || true
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-fwd-local" nginx:alpine
-sleep 4
+{registered}
 
 SVC=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq 'to_entries[] | select(.value.Service == "it-svc-fwd-local") | .value')
 PORT=$(echo "$SVC" | jq -r '.Port')
@@ -34,6 +34,7 @@ echo "PASS: forwarding local bind_port=36000 with forwarding_type=local"
 {teardown}
 "#,
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
+        registered = wait_for_consul_service("it-svc-fwd-local", 30),
         teardown = teardown(&[cname]),
         cname = cname,
     );
@@ -65,7 +66,7 @@ services:
         r#"{setup}
 docker rm -f {cname} 2>/dev/null || true
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-fwd-local-tpl" nginx:alpine
-sleep 4
+{registered}
 
 # Expect 2 Consul entries: 1 forwardlocal + 1 rproxylocal (no merging)
 COUNT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq '[to_entries[] | select(.value.Service == "it-svc-fwd-local-tpl")] | length')
@@ -102,6 +103,7 @@ echo "PASS: forwardlocal + rproxylocal separate entries"
 {teardown}
 "#,
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
+        registered = wait_for_service_count("it-svc-fwd-local-tpl", 2, 30),
         teardown = teardown(&[cname]),
         cname = cname,
     );
@@ -167,7 +169,7 @@ services:
         r#"{setup}
 docker rm -f {cname} 2>/dev/null || true
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-fwd-local-nb" nginx:alpine
-sleep 4
+{registered}
 
 SVC=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq 'to_entries[] | select(.value.Service == "it-svc-fwd-local-nb") | .value')
 PORT=$(echo "$SVC" | jq -r '.Port')
@@ -184,6 +186,7 @@ echo "PASS: forwarding local no bind (ephemeral), port=$PORT with forwarding_typ
 {teardown}
 "#,
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
+        registered = wait_for_consul_service("it-svc-fwd-local-nb", 30),
         teardown = teardown(&[cname]),
         cname = cname,
     );
@@ -211,7 +214,7 @@ services:
     let script = format!(
         r#"{setup}
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-b" nginx:alpine
-sleep 4
+{registered}
 
 PORT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-b") | .value.Port')
 if [ -z "$PORT" ] || [ "$PORT" = "null" ]; then echo "FAIL: not registered with Consul" >&2; exit 1; fi
@@ -225,6 +228,7 @@ echo "PASS: bound to $EXPECTED"
 {teardown}
 "#,
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
+        registered = wait_for_consul_service("it-svc-b", 30),
         teardown = teardown(&[cname]),
         cname = cname,
     );
@@ -252,7 +256,7 @@ services:
     let script = format!(
         r#"{setup}
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-c" nginx:alpine
-sleep 4
+{registered}
 
 PORT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-c") | .value.Port')
 if [ -z "$PORT" ] || [ "$PORT" = "null" ]; then echo "FAIL: not registered with Consul" >&2; exit 1; fi
@@ -266,6 +270,7 @@ echo "PASS: bound to $EXPECTED"
 {teardown}
 "#,
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
+        registered = wait_for_consul_service("it-svc-c", 30),
         teardown = teardown(&[cname]),
         cname = cname,
     );
@@ -297,7 +302,7 @@ services:
     let script = format!(
         r#"{setup}
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-override" nginx:alpine
-sleep 4
+{registered}
 
 PORT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-override") | .value.Port')
 if [ -z "$PORT" ] || [ "$PORT" = "null" ]; then echo "FAIL: not registered with Consul" >&2; exit 1; fi
@@ -312,6 +317,7 @@ echo "PASS: bound to $EXPECTED, ignored default 1.2.3.4"
 "#,
         setup =
             new_format_setup_with_defaults_ext(services_yaml, defaults_yaml, "", "--no-forwarding"),
+        registered = wait_for_consul_service("it-svc-override", 30),
         teardown = teardown(&[cname]),
         cname = cname,
     );
