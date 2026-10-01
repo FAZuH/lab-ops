@@ -145,13 +145,16 @@ mod tests {
     use crate::daemon::tests::FakeIptables;
     use crate::daemon::tests::test_app_state_with;
     use crate::daemon::tests::test_port;
-    use crate::iptables::IptablesManager;
     use crate::models::DockerAddMapRequest;
     use crate::models::PolicyRouteConfig;
     use crate::models::RuleKind;
 
-    fn test_app_state() -> AppState {
-        test_app_state_with(Arc::new(IptablesManager::new()))
+    /// An [`AppState`] on the iptables fake, in a temp dir of its own. The dir
+    /// is returned because the state file and socket path live inside it.
+    fn test_app_state() -> (tempfile::TempDir, AppState) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_app_state_with(&dir, Arc::new(FakeIptables::default()));
+        (dir, state)
     }
 
     /// Serves the daemon router over a real Unix socket in a background task.
@@ -195,7 +198,8 @@ mod tests {
 
     #[tokio::test]
     async fn dnat_delete_returns_ok_when_not_found() {
-        let (_dir, socket) = spawn_daemon(test_app_state()).await;
+        let (_app_dir, state) = test_app_state();
+        let (_dir, socket) = spawn_daemon(state).await;
         let client = NatmapClient::new(socket);
 
         let result = client.dnat(dnat_config("80"), true).await;
@@ -205,7 +209,8 @@ mod tests {
 
     #[tokio::test]
     async fn dnat_add_invalid_ports_maps_bad_request() {
-        let (_dir, socket) = spawn_daemon(test_app_state()).await;
+        let (_app_dir, state) = test_app_state();
+        let (_dir, socket) = spawn_daemon(state).await;
         let client = NatmapClient::new(socket);
 
         let result = client.dnat(dnat_config("not-a-port"), false).await;
@@ -214,7 +219,7 @@ mod tests {
 
     #[tokio::test]
     async fn dnat_add_conflicts_when_port_allocated() {
-        let state = test_app_state();
+        let (_dir, state) = test_app_state();
         // Pre-allocated, so the daemon's bind_ports returns 409. Loopback binds
         // without freebind privileges.
         let port = test_port();
@@ -243,7 +248,8 @@ mod tests {
 
     #[tokio::test]
     async fn add_mapping_without_target_ip_maps_unavailable_when_no_docker() {
-        let (_dir, socket) = spawn_daemon(test_app_state()).await;
+        let (_app_dir, state) = test_app_state();
+        let (_dir, socket) = spawn_daemon(state).await;
         let client = NatmapClient::new(socket);
 
         let req = DockerAddMapRequest {
@@ -260,7 +266,8 @@ mod tests {
     #[tokio::test]
     async fn add_mapping_no_host_port_roundtrips_allocated_port() {
         let fake = Arc::new(FakeIptables::default());
-        let (_dir, socket) = spawn_daemon(test_app_state_with(fake)).await;
+        let dir = tempfile::tempdir().unwrap();
+        let (_dir, socket) = spawn_daemon(test_app_state_with(&dir, fake)).await;
         let client = NatmapClient::new(socket);
 
         let req = DockerAddMapRequest {
@@ -288,7 +295,8 @@ mod tests {
         fake.set_rules_lines(vec![
             r#"-A PREROUTING -d 203.0.113.50/32 -p tcp -m multiport --dports 80,443 -j DNAT --to-destination 10.0.0.99 -m comment --comment "natmap:dnat:203.0.113.50:80,443""#.into(),
         ]);
-        let (_dir, socket) = spawn_daemon(test_app_state_with(fake)).await;
+        let dir = tempfile::tempdir().unwrap();
+        let (_dir, socket) = spawn_daemon(test_app_state_with(&dir, fake)).await;
         let client = NatmapClient::new(socket);
 
         let rules = client.rules().await.unwrap();
@@ -302,7 +310,8 @@ mod tests {
 
     #[tokio::test]
     async fn policy_route_add_echoes_config() {
-        let (_dir, socket) = spawn_daemon(test_app_state()).await;
+        let (_app_dir, state) = test_app_state();
+        let (_dir, socket) = spawn_daemon(state).await;
         let client = NatmapClient::new(socket);
 
         let config = PolicyRouteConfig {
@@ -325,7 +334,8 @@ mod tests {
 
     #[tokio::test]
     async fn policy_route_delete_not_found_returns_ok() {
-        let (_dir, socket) = spawn_daemon(test_app_state()).await;
+        let (_app_dir, state) = test_app_state();
+        let (_dir, socket) = spawn_daemon(state).await;
         let client = NatmapClient::new(socket);
 
         let config = PolicyRouteConfig {

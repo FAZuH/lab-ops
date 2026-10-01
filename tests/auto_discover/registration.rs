@@ -42,8 +42,7 @@ sleep 1
         cname = cname,
     );
 
-    let out = run(&script);
-    assert_pass(&out, "Test I — deregister on stop");
+    run(&script);
 }
 
 #[test]
@@ -76,8 +75,7 @@ echo "PASS: host-networked container correctly skipped"
         teardown = teardown(&[cname]),
         cname = cname,
     );
-    let out = run(&script);
-    assert_pass(&out, "Phase 4 — host-networked skip");
+    run(&script);
 }
 
 #[test]
@@ -111,8 +109,7 @@ echo "PASS: container matched despite no port exposure"
         teardown = teardown(&[cname]),
         cname = cname,
     );
-    let out = run(&script);
-    assert_pass(&out, "Phase 4 — no port exposure still matched");
+    run(&script);
 }
 
 #[test]
@@ -153,8 +150,7 @@ echo "PASS: extra fields present in Consul meta"
         teardown = teardown(&[cname]),
         cname = cname,
     );
-    let out = run(&script);
-    assert_pass(&out, "Phase 5 — extra fields meta");
+    run(&script);
 }
 
 #[test]
@@ -192,8 +188,7 @@ echo "PASS: service ID contains domain slug: $SVC_ID"
         teardown = teardown(&[cname]),
         cname = cname,
     );
-    let out = run(&script);
-    assert_pass(&out, "Phase 6 — domain slug in service ID");
+    run(&script);
 }
 
 #[test]
@@ -230,8 +225,7 @@ echo "PASS: service ID uses name fallback: $SVC_ID"
         teardown = teardown(&[cname]),
         cname = cname,
     );
-    let out = run(&script);
-    assert_pass(&out, "Phase 6 — no-domain fallback ID");
+    run(&script);
 }
 
 #[test]
@@ -269,8 +263,7 @@ echo "PASS: Meta.container_id matches container: $META_CID"
         teardown = teardown(&[cname]),
         cname = cname,
     );
-    let out = run(&script);
-    assert_pass(&out, "Phase 6 — container_id meta");
+    run(&script);
 }
 
 #[test]
@@ -328,8 +321,7 @@ echo "PASS: port $PORT_AFTER reused across container restart"
         teardown = teardown(&[cname]),
         cname = cname,
     );
-    let out = run(&script);
-    assert_pass(&out, "Phase 9 — port reuse on restart");
+    run(&script);
 }
 
 #[test]
@@ -362,8 +354,7 @@ echo "PASS: mismatched compose project correctly skipped"
         teardown = teardown(&[cname]),
         cname = cname,
     );
-    let out = run(&script);
-    assert_pass(&out, "Phase 9 — compose project mismatch");
+    run(&script);
 }
 
 #[test]
@@ -404,8 +395,7 @@ sleep 1
         deregistered = wait_for_service_gone("it-svc-die", 30),
         cname = cname,
     );
-    let out = run(&script);
-    assert_pass(&out, "Phase 9 — die event deregistration");
+    run(&script);
 }
 
 #[test]
@@ -442,8 +432,7 @@ sleep 1
         ) + "\nif [ \"$COUNT\" -lt 5 ]; then echo \"FAIL: expected 5 services, got $COUNT\" >&2; curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq keys; exit 1; fi\n",
         cnames_list = cnames.join(" "),
     );
-    let out = run(&script);
-    assert_pass(&out, "Phase 9 — concurrent starts");
+    run(&script);
 }
 
 #[test]
@@ -510,6 +499,5 @@ echo "PASS: structured log fields present"
         cname = cname,
     );
 
-    let out = run(&script);
-    assert_pass(&out, "event_loop_logs_structured_fields");
+    run(&script);
 }

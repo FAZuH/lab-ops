@@ -804,7 +804,6 @@ pub(crate) mod tests {
     use super::resolve_stale_container;
     use super::untracked_container_ids;
     use crate::iptables::Iptables;
-    use crate::iptables::IptablesManager;
     use crate::models::DaemonState;
     use crate::models::DnatConfig;
     use crate::models::DockerPortMap;
@@ -842,7 +841,8 @@ pub(crate) mod tests {
             self.removed_mappings.lock().unwrap().clone()
         }
 
-        fn installed_dnats(&self) -> Vec<DnatConfig> {
+        /// Every dnat config the fake iptables was asked to install.
+        pub(crate) fn installed_dnats(&self) -> Vec<DnatConfig> {
             self.installed_dnats.lock().unwrap().clone()
         }
 
@@ -1027,6 +1027,7 @@ pub(crate) mod tests {
     ) -> Daemon {
         let daemon_state = Arc::new(RwLock::new(DaemonState::default()));
         let policy_route = Arc::new(PolicyRouteManager::new());
+        let socket_path = state_path.with_extension("sock");
 
         let state = AppState {
             daemon_state,
@@ -1037,7 +1038,7 @@ pub(crate) mod tests {
             next_id: Arc::new(AtomicU64::new(1)),
             ports,
             socket_group: "root".to_string(),
-            socket_path: PathBuf::from("/tmp/natmap.sock"),
+            socket_path,
         };
 
         Daemon {
@@ -1046,8 +1047,12 @@ pub(crate) mod tests {
         }
     }
 
-    /// Builds an [`AppState`] backed by the given iptables fake.
-    pub(crate) fn test_app_state_with(iptables: Arc<dyn Iptables>) -> AppState {
+    /// Builds an [`AppState`] backed by the given iptables fake, writing into
+    /// `dir` so concurrent tests cannot share a state file or a socket path.
+    pub(crate) fn test_app_state_with(
+        dir: &tempfile::TempDir,
+        iptables: Arc<dyn Iptables>,
+    ) -> AppState {
         let daemon_state = Arc::new(RwLock::new(DaemonState::default()));
         let policy_route = Arc::new(PolicyRouteManager::new());
 
@@ -1056,18 +1061,18 @@ pub(crate) mod tests {
             iptables,
             policy_route,
             docker: None,
-            state_path: PathBuf::from("/tmp/natmap-test-state.json"),
+            state_path: dir.path().join("state.json"),
             next_id: Arc::new(AtomicU64::new(1)),
             ports: Arc::new(PortAllocator::new()),
             socket_group: "root".to_string(),
-            socket_path: PathBuf::from("/tmp/natmap.sock"),
+            socket_path: dir.path().join("natmap.sock"),
         }
     }
 
     fn create_test_daemon(state_path: PathBuf) -> Daemon {
         test_daemon_with(
             state_path,
-            Arc::new(IptablesManager::new()),
+            Arc::new(FakeIptables::default()),
             Arc::new(PortAllocator::new()),
         )
     }
@@ -1092,10 +1097,18 @@ pub(crate) mod tests {
         let state_path = temp_dir.path().join("state.json");
 
         let daemon = create_test_daemon(state_path);
-        let docker = Docker::connect_with_local_defaults().unwrap();
+        // `handle_docker_event` takes a concrete `Docker`, and bollard refuses to
+        // build one for a socket path that does not exist. A `die` event never
+        // dials the handle, so a plain file stands in for the socket: the test
+        // reaches the real `on_container_stop` branch without a daemon.
+        let sock = temp_dir.path().join("docker.sock");
+        std::fs::write(&sock, b"").unwrap();
+        let docker =
+            Docker::connect_with_socket(sock.to_str().unwrap(), 1, bollard::API_DEFAULT_VERSION)
+                .unwrap();
 
         let event = EventMessage {
-            action: Some("start".to_string()),
+            action: Some("die".to_string()),
             actor: Some(EventActor {
                 id: Some("1234567890".to_string()),
                 ..Default::default()

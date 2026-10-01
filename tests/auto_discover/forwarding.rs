@@ -17,8 +17,7 @@ kill %1 %2 2>/dev/null || true
 sleep 1
 "#;
     let script = format!("set -e\n{infra}{body}");
-    let out = run(&script);
-    assert_pass(&out, "Phase 7 — forwarding sync DNAT");
+    run(&script);
 }
 
 #[test]
@@ -40,8 +39,7 @@ kill %1 %2 2>/dev/null || true
 sleep 1
 "#;
     let script = format!("set -e\n{infra}{body}");
-    let out = run(&script);
-    assert_pass(&out, "forwarding_sync_no_duplicate_rules");
+    run(&script);
 }
 
 #[test]
@@ -64,8 +62,7 @@ kill %1 %2 2>/dev/null || true
 sleep 1
 "#;
     let script = format!("set -e\n{infra}{body}");
-    let out = run(&script);
-    assert_pass(&out, "Phase 7 — stale rule cleanup");
+    run(&script);
 }
 
 #[test]
@@ -78,8 +75,7 @@ kill %1 %2 2>/dev/null || true
 sleep 1
 "#;
     let script = format!("set -e\n{infra}{body}");
-    let out = run(&script);
-    assert_pass(&out, "Phase 7 — noop forwarding sync");
+    run(&script);
 }
 
 #[test]
@@ -97,8 +93,7 @@ kill %1 %2 2>/dev/null || true
 sleep 1
 "#;
     let script = format!("set -e\n{infra}{body}");
-    let out = run(&script);
-    assert_pass(&out, "Phase 7 — multiple ports forwarding");
+    run(&script);
 }
 
 #[test]
@@ -144,8 +139,7 @@ echo "PASS: static port 36000 with forwarding meta"
         cname = cname,
     );
 
-    let out = run(&script);
-    assert_pass(&out, "Test D — forwarding static port");
+    run(&script);
 }
 
 #[test]
@@ -186,8 +180,7 @@ echo "PASS: static port 36001 with hairpin meta"
         cname = cname,
     );
 
-    let out = run(&script);
-    assert_pass(&out, "Test E — forwarding hairpin");
+    run(&script);
 }
 
 #[test]
@@ -220,8 +213,7 @@ kill %1 %2 2>/dev/null || true
 sleep 1
 "#;
     let script = format!("set -e\n{infra}{body}");
-    let out = run(&script);
-    assert_pass(&out, "forwarding_sync_preserve_src_ip_creates_lan_hairpin");
+    run(&script);
 }
 
 #[test]
@@ -247,6 +239,5 @@ kill %1 %2 2>/dev/null || true
 sleep 1
 "#;
     let script = format!("set -e\n{infra}{body}");
-    let out = run(&script);
-    assert_pass(&out, "forwarding_sync_hairpin_creates_masquerade");
+    run(&script);
 }

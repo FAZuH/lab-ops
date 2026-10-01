@@ -770,28 +770,19 @@ mod tests {
     use std::net::IpAddr;
     use std::str::FromStr;
     use std::sync::Arc;
-    use std::sync::atomic::AtomicU64;
 
     use super::*;
     use crate::daemon::tests::FakeIptables;
     use crate::daemon::tests::test_app_state_with;
     use crate::daemon::tests::test_port;
-    use crate::iptables::IptablesManager;
     use crate::models::*;
-    use crate::policy_route::PolicyRouteManager;
 
-    fn test_app_state() -> AppState {
-        AppState {
-            daemon_state: Arc::new(tokio::sync::RwLock::new(DaemonState::default())),
-            iptables: Arc::new(IptablesManager::new()),
-            policy_route: Arc::new(PolicyRouteManager::new()),
-            docker: None,
-            state_path: std::path::PathBuf::from("/tmp/natmap-test-state.json"),
-            next_id: Arc::new(AtomicU64::new(1)),
-            ports: Arc::new(lab_ops_lab_lib::port::PortAllocator::new()),
-            socket_group: "root".to_string(),
-            socket_path: std::path::PathBuf::from("/tmp/natmap.sock"),
-        }
+    /// An [`AppState`] on the iptables fake, in a temp dir of its own. The dir
+    /// is returned because the state file and socket path live inside it.
+    fn test_app_state() -> (tempfile::TempDir, AppState) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_app_state_with(&dir, Arc::new(FakeIptables::default()));
+        (dir, state)
     }
 
     fn make_addr(port: u16) -> SocketAddr {
@@ -857,7 +848,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_mappings_empty_state() {
-        let state = test_app_state();
+        let (_dir, state) = test_app_state();
         let res = list_mappings(State(state)).await.0;
         assert!(res.docker.is_empty());
         assert!(res.dnats.is_empty());
@@ -868,7 +859,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_mappings_reflects_dnat_state() {
-        let state = test_app_state();
+        let (_dir, state) = test_app_state();
         {
             let mut lock = state.daemon_state.write().await;
             lock.dnats.push(DnatConfig {
@@ -887,30 +878,41 @@ mod tests {
 
     #[tokio::test]
     async fn add_dnat_duplicate_is_idempotent() {
-        let state = test_app_state();
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Arc::new(FakeIptables::default());
+        let state = test_app_state_with(&dir, fake.clone());
         let req = DnatConfig {
-            ext_ip: "1.2.3.4".into(),
+            ext_ip: "127.0.0.1".into(),
             int_ip: "10.0.0.1".into(),
-            ports: "80".into(),
+            // `add_dnat` reserves the ext port with a real bind, so it has to be
+            // a loopback port below 1024 to run unprivileged.
+            ports: test_port().to_string(),
             proto: TransportProtocol::Tcp,
             ext_if: None,
             preserve_src_ip: false,
         };
 
-        let result = add_dnat(State(state.clone()), Json(req.clone())).await;
-        if result.is_err() {
-            return;
-        }
-        assert!(result.is_ok());
+        let first = add_dnat(State(state.clone()), Json(req.clone()))
+            .await
+            .unwrap()
+            .0;
+        let second = add_dnat(State(state.clone()), Json(req.clone()))
+            .await
+            .unwrap()
+            .0;
 
-        let second = add_dnat(State(state.clone()), Json(req.clone())).await;
-        assert!(second.is_ok());
+        assert_eq!(first, second);
         assert_eq!(state.daemon_state.read().await.dnats.len(), 1);
+        assert_eq!(
+            fake.installed_dnats(),
+            vec![req],
+            "a duplicate must not install a second rule"
+        );
     }
 
     #[tokio::test]
     async fn remove_dnat_not_found_still_returns_ok() {
-        let state = test_app_state();
+        let (_dir, state) = test_app_state();
         let req = DnatConfig {
             ext_ip: "1.2.3.4".into(),
             int_ip: "10.0.0.1".into(),
@@ -925,7 +927,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_dnat_invalid_port_csv_returns_error() {
-        let state = test_app_state();
+        let (_dir, state) = test_app_state();
         let req = DnatConfig {
             ext_ip: "1.2.3.4".into(),
             int_ip: "10.0.0.1".into(),
@@ -941,7 +943,7 @@ mod tests {
 
     #[tokio::test]
     async fn remove_snat_not_found_returns_error() {
-        let state = test_app_state();
+        let (_dir, state) = test_app_state();
         let req = SnatConfig {
             int_ip: "10.0.0.1".into(),
             ext_ip: "1.2.3.4".into(),
@@ -954,7 +956,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_hairpin_invalid_ip_returns_error() {
-        let state = test_app_state();
+        let (_dir, state) = test_app_state();
         let req = HairpinConfig {
             ext_ip: "not-an-ip".into(),
             int_ip: "10.0.0.1".into(),
@@ -969,7 +971,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_mapping_invalid_host_ip_returns_error() {
-        let state = test_app_state();
+        let (_dir, state) = test_app_state();
         let req = DockerAddMapRequest {
             host_ip: "bad-ip".into(),
             host_port: 8080,
@@ -984,7 +986,9 @@ mod tests {
 
     #[tokio::test]
     async fn add_mapping_with_target_ip_success() {
-        let state = test_app_state();
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Arc::new(FakeIptables::default());
+        let state = test_app_state_with(&dir, fake.clone());
         let req = DockerAddMapRequest {
             host_ip: "127.0.0.1".into(),
             host_port: 39050,
@@ -992,19 +996,28 @@ mod tests {
             target_ip: Some("10.0.0.2".into()),
             proto: TransportProtocol::Tcp,
         };
-        let result = add_mapping(State(state.clone()), Path("test123".into()), Json(req)).await;
-        if result.is_err() {
-            return;
-        }
-        assert!(result.is_ok());
-        let mapping = result.unwrap().0;
+        let mapping = add_mapping(State(state.clone()), Path("test123".into()), Json(req))
+            .await
+            .unwrap()
+            .0;
+
         assert_eq!(mapping.container_id, "test123");
+        assert_eq!(mapping.request.host_addr.to_string(), "127.0.0.1:39050");
+        assert_eq!(
+            mapping.request.container_addr.to_string(),
+            "10.0.0.2:80",
+            "the mapping must DNAT to the requested target IP"
+        );
+        let installed = fake.installed_mappings();
+        assert_eq!(installed, vec![mapping.clone()]);
+        assert!(state.ports.is_allocated(mapping.request.host_addr).await);
     }
 
     #[tokio::test]
     async fn add_mapping_no_host_port_allocates_and_returns_port() {
+        let dir = tempfile::tempdir().unwrap();
         let fake = Arc::new(FakeIptables::default());
-        let state = test_app_state_with(fake.clone());
+        let state = test_app_state_with(&dir, fake.clone());
         let req = DockerAddMapRequest {
             host_ip: "127.0.0.2".into(),
             host_port: 0,
@@ -1027,8 +1040,9 @@ mod tests {
 
     #[tokio::test]
     async fn add_mapping_taken_host_port_returns_conflict() {
+        let dir = tempfile::tempdir().unwrap();
         let fake = Arc::new(FakeIptables::default());
-        let state = test_app_state_with(fake.clone());
+        let state = test_app_state_with(&dir, fake.clone());
         let host_port = test_port();
         let addr = make_addr(host_port);
         state
@@ -1052,9 +1066,10 @@ mod tests {
 
     #[tokio::test]
     async fn add_mapping_install_failure_releases_allocated_port() {
+        let dir = tempfile::tempdir().unwrap();
         let fake = Arc::new(FakeIptables::default());
         fake.set_fail_dockermap(true);
-        let state = test_app_state_with(fake.clone());
+        let state = test_app_state_with(&dir, fake.clone());
         let req = DockerAddMapRequest {
             host_ip: "127.0.0.4".into(),
             host_port: 0,
@@ -1103,9 +1118,10 @@ mod tests {
 
     #[tokio::test]
     async fn add_mapping_explicit_port_install_failure_releases_allocated_port() {
+        let dir = tempfile::tempdir().unwrap();
         let fake = Arc::new(FakeIptables::default());
         fake.set_fail_dockermap(true);
-        let state = test_app_state_with(fake.clone());
+        let state = test_app_state_with(&dir, fake.clone());
         let req = DockerAddMapRequest {
             host_ip: "127.0.0.4".into(),
             host_port: 39040,
@@ -1139,7 +1155,7 @@ mod tests {
 
     #[tokio::test]
     async fn remove_mapping_not_found_returns_error() {
-        let state = test_app_state();
+        let (_dir, state) = test_app_state();
         let result = remove_mapping(State(state), Path(("nonexistent".into(), "80".into()))).await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().0, StatusCode::NOT_FOUND);
@@ -1147,7 +1163,7 @@ mod tests {
 
     #[tokio::test]
     async fn remove_mapping_by_id_not_found_returns_error() {
-        let state = test_app_state();
+        let (_dir, state) = test_app_state();
         let result = remove_mapping_by_id(State(state), Path(999)).await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().0, StatusCode::NOT_FOUND);
@@ -1155,7 +1171,7 @@ mod tests {
 
     #[tokio::test]
     async fn remap_port_container_not_found_returns_error() {
-        let state = test_app_state();
+        let (_dir, state) = test_app_state();
         let req = DockerRemapRequest {
             host_port: 8080,
             new_host_port: 9090,
@@ -1167,14 +1183,14 @@ mod tests {
 
     #[tokio::test]
     async fn clear_all_empty_state_succeeds() {
-        let state = test_app_state();
+        let (_dir, state) = test_app_state();
         let result = clear_all(State(state)).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn remove_policy_route_not_found_returns_ok() {
-        let state = test_app_state();
+        let (_dir, state) = test_app_state();
         let req = PolicyRouteConfig {
             src_ip: "10.0.0.1".into(),
             via: "192.168.1.1".into(),
@@ -1321,7 +1337,8 @@ mod tests {
             r#"-A PREROUTING -d 203.0.113.50/32 -p tcp -m tcp --dport 36000 -j DNAT --to-destination 10.0.0.99:36000 -m comment --comment "natmap:dnat:203.0.113.50:36000""#.into(),
             r#"-A NATMAP -d 172.17.0.3/32 -p tcp -m tcp --dport 8080 -j ACCEPT -m comment --comment "natmap:c1:8080""#.into(),
         ]);
-        let state = test_app_state_with(fake);
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_app_state_with(&dir, fake);
         let res = list_rules(State(state)).await.unwrap();
         assert_eq!(res.0.len(), 1);
         assert_eq!(res.0[0].kind, RuleKind::Dnat);

@@ -100,8 +100,13 @@ fn nix_wrapper(label: &str) -> Option<PathBuf> {
     Some(wrapper)
 }
 
-/// Runs `script` in the shared test container and returns its stdout.
-pub(crate) fn run(script: &str) -> String {
+/// Runs `script` in the shared test container.
+///
+/// Panics unless the script exited zero *and* printed a `PASS` marker. Every
+/// script reaches its `echo "PASS: …"` only after its own `exit 1` checks, so
+/// the exit code already carries the verdict; the marker catches the script
+/// that exits zero without having verified anything.
+pub(crate) fn run(script: &str) {
     let image = setup_image();
     let binary_path = env!("CARGO_BIN_EXE_lab-ops");
     let mut cmd = Command::new("docker");
@@ -141,7 +146,10 @@ pub(crate) fn run(script: &str) -> String {
         let stderr = String::from_utf8_lossy(&output.stderr);
         panic!("Test container failed.\nstdout:\n{stdout}\nstderr:\n{stderr}");
     }
-    stdout
+    assert!(
+        stdout.contains("PASS"),
+        "Test script exited 0 without a PASS marker, so it verified nothing.\nstdout:\n{stdout}"
+    );
 }
 
 /// Cleanup helper. Kills all background jobs by PID and removes Docker containers.
@@ -164,14 +172,6 @@ done
 {removes}
 "#
     )
-}
-
-/// Asserts the script printed a `PASS:` line, dumping the output on failure.
-pub(crate) fn assert_pass(output: &str, test_name: &str) {
-    assert!(
-        output.contains("PASS"),
-        "{test_name} failed.\nOutput:\n{output}"
-    );
 }
 
 /// Writes new-format YAML config via extra_setup overwrite.

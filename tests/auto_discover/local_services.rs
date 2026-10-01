@@ -32,8 +32,7 @@ sleep 1
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
         wait = wait_for_consul_service("it-local-app", 15),
     );
-    let out = run(&script);
-    assert_pass(&out, "local_service");
+    run(&script);
 }
 
 #[test]
@@ -77,8 +76,7 @@ sleep 1
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
         wait = wait_for_consul_service("it-local-fwd", 15),
     );
-    let out = run(&script);
-    assert_pass(&out, "local_forwarding_remote");
+    run(&script);
 }
 
 #[test]
@@ -128,8 +126,7 @@ echo "PASS: reachable, DNAT rules verified, container serving"
         teardown = teardown(&[cname]),
         cname = cname,
     );
-    let out = run(&script);
-    assert_pass(&out, "docker_reachability");
+    run(&script);
 }
 
 #[test]
@@ -195,6 +192,5 @@ echo "PASS: forwardremote + rproxylocal separate entries"
         cname = cname,
     );
 
-    let out = run(&script);
-    assert_pass(&out, "docker_rproxy_and_forwarding");
+    run(&script);
 }
