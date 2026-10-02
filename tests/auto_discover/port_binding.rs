@@ -5,6 +5,7 @@ use super::*;
 #[test]
 fn docker_forwarding_local_bind_port() {
     let cname = "it-fwd-local";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-fwd-local:
@@ -47,6 +48,7 @@ echo "PASS: forwarding local bind_port=36000 with forwarding_type=local"
 #[test]
 fn docker_forwarding_local_with_template() {
     let cname = "it-fwd-local-tpl";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-fwd-local-tpl:
@@ -154,6 +156,7 @@ sleep 1
 #[test]
 fn docker_forwarding_local_no_bind() {
     let cname = "it-fwd-local-nb";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-fwd-local-nb:
@@ -219,6 +222,7 @@ const BIND_SOURCES: [(&str, &str, &str, &str); 3] = [
 #[test]
 fn docker_bind_address_from_config() {
     for (cname, svc, bind_line, defaults_yaml) in BIND_SOURCES {
+        let _guard = ContainerGuard::new(&[cname]);
         let services_yaml = format!(
             r#"
 services:

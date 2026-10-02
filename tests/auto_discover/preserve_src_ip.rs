@@ -5,6 +5,7 @@ use super::*;
 #[test]
 fn preserve_src_ip_global_default_creates_policy_route() {
     let cname = "it-preserve-def";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-preserve:
@@ -66,6 +67,7 @@ echo "PASS: global preserve_src_ip created policy route with cloned local routes
 #[test]
 fn preserve_src_ip_per_service_overrides_default_false() {
     let cname = "it-preserve-svc";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-preserve-svc:
@@ -110,6 +112,7 @@ echo "PASS: per-service preserve_src_ip overrides default"
 #[test]
 fn preserve_src_ip_false_no_policy_route() {
     let cname = "it-preserve-false";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-preserve-false:
@@ -152,6 +155,7 @@ echo "PASS: preserve_src_ip false skips policy route"
 #[test]
 fn preserve_src_ip_consul_meta_propagated() {
     let cname = "it-preserve-meta";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-preserve-meta:
@@ -190,6 +194,7 @@ echo "PASS: preserve_src_ip meta propagated to consul"
 #[test]
 fn policy_route_idempotent() {
     let cname = "it-preserve-idemp";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-preserve-idemp:
@@ -229,6 +234,7 @@ echo "PASS: policy route is idempotent"
 #[test]
 fn container_stop_removes_policy_route() {
     let cname = "it-preserve-stop";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-preserve-stop:

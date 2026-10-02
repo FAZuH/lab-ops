@@ -20,6 +20,7 @@ echo "PASS: sync correctly rejected invalid YAML"
 #[test]
 fn restart_auto_discover_picks_up_missed_containers() {
     let cname = "it-restart-ad";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-restart:
@@ -59,6 +60,7 @@ docker rm -f {cname} 2>/dev/null || true
 
 #[test]
 fn restart_natmap_new_container_registered_after_recovery() {
+    let _guard = ContainerGuard::new(&["it-nmrestart-a", "it-nmrestart-b", "it-nmrestart-c"]);
     let services_yaml = r#"
 services:
   it-svc-nmrestart:
@@ -112,6 +114,7 @@ docker rm -f it-nmrestart-a it-nmrestart-c 2>/dev/null || true
 
 #[test]
 fn add_service_to_config_picked_up_on_sync() {
+    let _guard = ContainerGuard::new(&["it-cfg-a", "it-cfg-b"]);
     let first_yaml = r#"
 services:
   it-svc-cfg-a:
@@ -169,6 +172,7 @@ docker rm -f it-cfg-a it-cfg-b 2>/dev/null || true
 /// here as the config-emptied case.
 #[test]
 fn remove_all_services_clean_slate() {
+    let _guard = ContainerGuard::new(&["it-cfg-all"]);
     let services_yaml = r#"
 services:
   it-cfg-all-svc:
@@ -205,6 +209,7 @@ docker rm -f it-cfg-all 2>/dev/null || true
 
 #[test]
 fn change_bind_ip_service_reregisters() {
+    let _guard = ContainerGuard::new(&["it-cfg-ip"]);
     let first_yaml = r#"
 services:
   it-cfg-ip-svc:
@@ -277,6 +282,7 @@ fn large_config_many_services() {
         ));
         cnames.push(project);
     }
+    let _guard = ContainerGuard::new(&cnames);
     let services_yaml = format!("\nservices:\n{yaml_services}");
     let script = format!(
         r#"{setup}

@@ -5,6 +5,7 @@ use super::*;
 #[test]
 fn container_stop_kv_delete_and_deregister() {
     let cname = "it-stop";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-i:
@@ -48,6 +49,7 @@ sleep 1
 #[test]
 fn host_networked_container_skipped() {
     let cname = "it-host-net";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-hostnet:
@@ -81,6 +83,7 @@ echo "PASS: host-networked container correctly skipped"
 #[test]
 fn port_not_exposed_still_matched() {
     let cname = "it-no-exp";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-noexp:
@@ -115,6 +118,7 @@ echo "PASS: container matched despite no port exposure"
 #[test]
 fn extra_fields_passed_to_consul_meta() {
     let cname = "it-extra";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-extra:
@@ -156,6 +160,7 @@ echo "PASS: extra fields present in Consul meta"
 #[test]
 fn service_id_contains_domain_slug() {
     let cname = "it-slug";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-slug:
@@ -194,6 +199,7 @@ echo "PASS: service ID contains domain slug: $SVC_ID"
 #[test]
 fn service_id_no_domain_falls_back_to_name() {
     let cname = "it-nodomain";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-nodomain:
@@ -231,6 +237,7 @@ echo "PASS: service ID uses name fallback: $SVC_ID"
 #[test]
 fn container_id_in_consul_meta() {
     let cname = "it-cid-meta";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-cidmeta:
@@ -269,6 +276,7 @@ echo "PASS: Meta.container_id matches container: $META_CID"
 #[test]
 fn container_restart_reuses_port_from_state() {
     let cname = "it-reuse";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-reuse:
@@ -327,6 +335,7 @@ echo "PASS: port $PORT_AFTER reused across container restart"
 #[test]
 fn compose_project_mismatch_skipped() {
     let cname = "it-edge-mismatch";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-mismatch:
@@ -360,6 +369,7 @@ echo "PASS: mismatched compose project correctly skipped"
 #[test]
 fn container_die_event_deregistration() {
     let cname = "it-edge-die";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-die:
@@ -409,6 +419,7 @@ fn concurrent_starts_all_registered() {
         ));
         cnames.push(project);
     }
+    let _guard = ContainerGuard::new(&cnames);
     let services_yaml = format!("\nservices:\n{yaml_services}");
 
     let script = format!(
@@ -438,6 +449,7 @@ sleep 1
 #[test]
 fn event_loop_logs_structured_fields() {
     let cname = "it-log-fields";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-log:
