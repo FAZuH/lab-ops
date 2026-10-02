@@ -249,6 +249,9 @@ pub struct LiveRule {
 // --- Persisted daemon state ---
 
 /// The complete persisted state of the natmap daemon.
+///
+/// New fields must carry `#[serde(default)]` so state files written by older
+/// versions still load instead of failing as corrupt.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DaemonState {
     /// Docker container port mappings, keyed by container ID.
