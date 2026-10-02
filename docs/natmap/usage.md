@@ -62,6 +62,8 @@ The daemon persists state to `/var/lib/natmap/state.json`. On restart or crash r
 - Reads the state file and rebinds only rules whose ports are still available
 - Skips rules for ports taken by other services (logged as warnings)
 
+A missing state file starts with empty state. A present but unparseable state file (including a truncated write) is fatal: the daemon refuses to start with an error naming the path and the parse failure, and leaves the file untouched for inspection.
+
 ### Socket
 
 All CLI commands communicate with the daemon via a Unix socket. Default: `/run/natmap.sock`.

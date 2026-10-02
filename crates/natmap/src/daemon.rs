@@ -281,12 +281,12 @@ impl Daemon {
         let iptables = self.state.iptables.clone();
         let policy_route = self.state.policy_route.clone();
 
+        let mut daemon_state = self.create_daemon_state()?;
+
         // Ignore a flush failure: the rest of the cleanup is independent of it.
         let _ = iptables.flush_all_natmap();
         let _ = policy_route.flush_all(&state.daemon_state.read().await.policy_routes);
         ports.deallocate_all().await;
-
-        let mut daemon_state = self.create_daemon_state();
 
         let _ = self
             .reconcile_docker_portmaps(&mut daemon_state)
@@ -449,14 +449,22 @@ impl Daemon {
     }
 
     /// Create daemon state from [`AppState::state_path`] if exists, otherwise create default.
-    fn create_daemon_state(&self) -> DaemonState {
-        if self.state.state_path.exists()
-            && let Ok(data) = fs::read_to_string(&self.state.state_path)
-        {
-            serde_json::from_str(&data).unwrap_or_default()
-        } else {
-            DaemonState::default()
+    fn create_daemon_state(&self) -> Result<DaemonState> {
+        if !self.state.state_path.exists() {
+            return Ok(DaemonState::default());
         }
+        let data = fs::read_to_string(&self.state.state_path).map_err(|e| {
+            eyre!(
+                "Refusing to start: cannot read state file {}: {e}",
+                self.state.state_path.display()
+            )
+        })?;
+        serde_json::from_str(&data).map_err(|e| {
+            eyre!(
+                "Refusing to start: corrupt state file {}: {e}",
+                self.state.state_path.display()
+            )
+        })
     }
 
     /// Re-verifies and reinstalls a tracked mapping, dropping it on failure.
@@ -821,6 +829,7 @@ pub(crate) mod tests {
         installed_dnats: Mutex<Vec<DnatConfig>>,
         installed_hairpins: Mutex<Vec<HairpinConfig>>,
         rules_lines: Mutex<Vec<String>>,
+        flushed: AtomicBool,
         fail_dockermap: AtomicBool,
         fail_dnat: AtomicBool,
         fail_hairpin: AtomicBool,
@@ -850,6 +859,10 @@ pub(crate) mod tests {
             self.installed_hairpins.lock().unwrap().clone()
         }
 
+        fn flushed(&self) -> bool {
+            self.flushed.load(Ordering::SeqCst)
+        }
+
         /// Test hook: make the next `install_dockermap` fail.
         pub(crate) fn set_fail_dockermap(&self, fail: bool) {
             self.fail_dockermap.store(fail, Ordering::SeqCst);
@@ -866,6 +879,7 @@ pub(crate) mod tests {
         }
 
         fn flush_all_natmap(&self) -> color_eyre::Result<()> {
+            self.flushed.store(true, Ordering::SeqCst);
             Ok(())
         }
 
@@ -1721,6 +1735,65 @@ pub(crate) mod tests {
             fake.installed_hairpins(),
             vec![make_hairpin(&port.to_string())]
         );
+        assert!(ports.is_allocated(make_addr(port)).await);
+    }
+
+    #[test]
+    fn create_daemon_state_absent_returns_empty() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+        let daemon = create_test_daemon(state_path);
+
+        let state = daemon.create_daemon_state().unwrap();
+
+        assert!(state.mapping.is_empty());
+        assert!(state.dnats.is_empty());
+    }
+
+    #[test]
+    fn create_daemon_state_unparseable_is_fatal() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+        std::fs::write(&state_path, "{not valid json").unwrap();
+        let daemon = create_test_daemon(state_path.clone());
+
+        let err = daemon.create_daemon_state().unwrap_err().to_string();
+
+        assert!(err.contains(&state_path.display().to_string()), "{err}");
+    }
+
+    #[tokio::test]
+    async fn reload_truncated_state_is_fatal_and_preserves_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+        let truncated = r#"{"mapping": {"c1": [{"id": 1"#;
+        std::fs::write(&state_path, truncated).unwrap();
+        let daemon = create_test_daemon(state_path.clone());
+
+        let result = daemon.reload().await;
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(&state_path).unwrap(), truncated);
+    }
+
+    #[tokio::test]
+    async fn reload_corrupt_state_touches_nothing_before_failing() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+        std::fs::write(&state_path, "{not valid json").unwrap();
+        let fake = Arc::new(FakeIptables::default());
+        let ports = Arc::new(PortAllocator::new());
+        let port = test_port();
+        ports
+            .allocate(make_addr(port), TransportProtocol::Tcp)
+            .await
+            .unwrap();
+        let daemon = test_daemon_with(state_path, fake.clone(), ports.clone());
+
+        let result = daemon.reload().await;
+
+        assert!(result.is_err());
+        assert!(!fake.flushed());
         assert!(ports.is_allocated(make_addr(port)).await);
     }
 }
