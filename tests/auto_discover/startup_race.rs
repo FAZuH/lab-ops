@@ -5,6 +5,7 @@ use super::*;
 #[test]
 fn full_sync_failure_does_not_deregister_services() {
     let cname = "it-startup-race";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-startup:

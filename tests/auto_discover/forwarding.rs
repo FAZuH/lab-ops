@@ -99,6 +99,7 @@ sleep 1
 #[test]
 fn forwarding_static_port() {
     let cname = "it-fwd";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-d:
@@ -145,6 +146,7 @@ echo "PASS: static port 36000 with forwarding meta"
 #[test]
 fn forwarding_hairpin_meta() {
     let cname = "it-hairpin";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-e:

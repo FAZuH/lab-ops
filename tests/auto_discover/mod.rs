@@ -152,6 +152,29 @@ pub(crate) fn run(script: &str) {
     );
 }
 
+/// Owns one test's container names and removes them on drop, however the test
+/// returns. The in-script `teardown()` fragment never runs after `exit 1`.
+pub(crate) struct ContainerGuard(Vec<String>);
+
+impl ContainerGuard {
+    pub(crate) fn new(names: &[impl AsRef<str>]) -> Self {
+        Self(names.iter().map(|n| n.as_ref().to_string()).collect())
+    }
+}
+
+impl Drop for ContainerGuard {
+    fn drop(&mut self) {
+        if self.0.is_empty() {
+            return;
+        }
+        let _ = Command::new("docker")
+            .arg("rm")
+            .arg("-f")
+            .args(&self.0)
+            .status();
+    }
+}
+
 /// Cleanup helper. Kills all background jobs by PID and removes Docker containers.
 pub(crate) fn teardown(container_names: &[&str]) -> String {
     let removes: String = container_names

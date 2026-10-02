@@ -82,6 +82,7 @@ sleep 1
 #[test]
 fn docker_reachability() {
     let cname = "it-reach";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-reach:
@@ -132,6 +133,7 @@ echo "PASS: reachable, DNAT rules verified, container serving"
 #[test]
 fn docker_rproxy_and_forwarding() {
     let cname = "it-combo";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-combo:
