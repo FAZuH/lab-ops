@@ -68,8 +68,6 @@ mod tests {
     use super::*;
     use crate::models::TransportProtocol;
 
-    // ── mapping_from_port_mapping ──
-
     fn make_mapping() -> PortMapping {
         PortMapping {
             host_addr: SocketAddr::new(IpAddr::from_str("0.0.0.0").unwrap(), 8080),

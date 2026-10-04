@@ -69,15 +69,12 @@ use crate::policy_route::PolicyRouteManager;
 pub struct AppState {
     /// The in-memory daemon state.
     pub daemon_state: Arc<RwLock<DaemonState>>,
-    /// iptables rule manager.
     pub iptables: Arc<dyn Iptables>,
-    /// Policy routing manager.
     pub policy_route: Arc<PolicyRouteManager>,
     /// Docker client (None if Docker is unavailable).
     pub docker: Option<Docker>,
     /// Filesystem path for persisting state to JSON.
     pub state_path: PathBuf,
-    /// Path to natmap socket.
     pub socket_path: PathBuf,
     /// Group name owning the natmap socket.
     pub socket_group: String,
@@ -136,6 +133,8 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// The natmap daemon: iptables owner, state holder, and HTTP server over a
+/// Unix socket.
 #[derive(Clone)]
 pub struct Daemon {
     state: AppState,
@@ -143,6 +142,8 @@ pub struct Daemon {
 }
 
 impl Daemon {
+    /// Builds the daemon and its iptables chains. Fails when the chains cannot be
+    /// created; Docker is optional and its absence only disables auto-discovery.
     pub async fn new(
         socket_path: PathBuf,
         state_path: PathBuf,
@@ -266,9 +267,6 @@ impl Daemon {
                 }
             });
         }
-
-        #[allow(unreachable_code)]
-        Ok(())
     }
 
     /// Loads persisted state from disk and reconciles with the current system state.
@@ -283,20 +281,18 @@ impl Daemon {
         let iptables = self.state.iptables.clone();
         let policy_route = self.state.policy_route.clone();
 
-        // ignore flush fail. we still have more cleanup to do independent from flush
+        let mut daemon_state = self.create_daemon_state()?;
+
+        // Ignore a flush failure: the rest of the cleanup is independent of it.
         let _ = iptables.flush_all_natmap();
         let _ = policy_route.flush_all(&state.daemon_state.read().await.policy_routes);
         ports.deallocate_all().await;
 
-        let mut daemon_state = self.create_daemon_state();
-
-        // Reconcile Docker mappings
         let _ = self
             .reconcile_docker_portmaps(&mut daemon_state)
             .await
             .map_err(|e| tracing::error!(error = %format!("{e:#}"), "error when reconciling docker portmaps"));
 
-        // Reconcile NAT rules
         self.reconcile_hairpins(&mut daemon_state).await;
         self.reconcile_dnats(&mut daemon_state).await;
         self.reconcile_snats(&daemon_state).await;
@@ -453,14 +449,22 @@ impl Daemon {
     }
 
     /// Create daemon state from [`AppState::state_path`] if exists, otherwise create default.
-    fn create_daemon_state(&self) -> DaemonState {
-        if self.state.state_path.exists()
-            && let Ok(data) = fs::read_to_string(&self.state.state_path)
-        {
-            serde_json::from_str(&data).unwrap_or_default()
-        } else {
-            DaemonState::default()
+    fn create_daemon_state(&self) -> Result<DaemonState> {
+        if !self.state.state_path.exists() {
+            return Ok(DaemonState::default());
         }
+        let data = fs::read_to_string(&self.state.state_path).map_err(|e| {
+            eyre!(
+                "Refusing to start: cannot read state file {}: {e}",
+                self.state.state_path.display()
+            )
+        })?;
+        serde_json::from_str(&data).map_err(|e| {
+            eyre!(
+                "Refusing to start: corrupt state file {}: {e}",
+                self.state.state_path.display()
+            )
+        })
     }
 
     /// Re-verifies and reinstalls a tracked mapping, dropping it on failure.
@@ -475,8 +479,7 @@ impl Daemon {
     ) -> Option<DockerPortMap> {
         let host_addr = m.request.host_addr;
 
-        // Update container_addr from live Docker inspect if changed
-        // (silently falls back to stored IP if inspect failed above)
+        // Keep the stored IP when the re-inspect above failed.
         if let Some(&current_ctn_addr) = current_addrs.get(&host_addr) {
             let proto = m.request.proto;
             if reconcile_container_addr(
@@ -545,15 +548,13 @@ impl Daemon {
                 daemon_state.mapping.drain().collect();
             let mut new_docker = HashMap::new();
 
-            // iter containers
             for (id, maps) in old_maps {
                 if !running_ids.contains(&id) {
                     tracing::info!(container.id = %id, "container gone, removing mappings");
                     continue;
                 }
 
-                // Re-inspect container to get current IPs (may have changed if
-                // Docker network was recreated while daemon was down)
+                // Re-inspect: the network may have been recreated while the daemon was down.
                 let current_addrs: HashMap<SocketAddr, SocketAddr> =
                     docker::get_port_mappings(docker, &id)
                         .await
@@ -566,7 +567,6 @@ impl Daemon {
                         })
                         .collect();
 
-                // iter port mappings for this container
                 let mut kept = Vec::new();
                 for m in maps {
                     if let Some(m) = self.reconcile_tracked_mapping(&id, m, &current_addrs).await {
@@ -579,7 +579,6 @@ impl Daemon {
                 }
             }
 
-            // Discover untracked containers (started while daemon was down)
             let tracked: HashSet<String> = new_docker.keys().cloned().collect();
             for id in untracked_container_ids(&running_ids, &tracked) {
                 tracing::info!(container.id = %id, "discovering untracked container");
@@ -813,7 +812,6 @@ pub(crate) mod tests {
     use super::resolve_stale_container;
     use super::untracked_container_ids;
     use crate::iptables::Iptables;
-    use crate::iptables::IptablesManager;
     use crate::models::DaemonState;
     use crate::models::DnatConfig;
     use crate::models::DockerPortMap;
@@ -831,6 +829,7 @@ pub(crate) mod tests {
         installed_dnats: Mutex<Vec<DnatConfig>>,
         installed_hairpins: Mutex<Vec<HairpinConfig>>,
         rules_lines: Mutex<Vec<String>>,
+        flushed: AtomicBool,
         fail_dockermap: AtomicBool,
         fail_dnat: AtomicBool,
         fail_hairpin: AtomicBool,
@@ -842,6 +841,7 @@ pub(crate) mod tests {
             *self.rules_lines.lock().unwrap() = lines;
         }
 
+        /// Every mapping the fake iptables was asked to install.
         pub(crate) fn installed_mappings(&self) -> Vec<DockerPortMap> {
             self.installed_mappings.lock().unwrap().clone()
         }
@@ -850,7 +850,8 @@ pub(crate) mod tests {
             self.removed_mappings.lock().unwrap().clone()
         }
 
-        fn installed_dnats(&self) -> Vec<DnatConfig> {
+        /// Every dnat config the fake iptables was asked to install.
+        pub(crate) fn installed_dnats(&self) -> Vec<DnatConfig> {
             self.installed_dnats.lock().unwrap().clone()
         }
 
@@ -858,6 +859,11 @@ pub(crate) mod tests {
             self.installed_hairpins.lock().unwrap().clone()
         }
 
+        fn flushed(&self) -> bool {
+            self.flushed.load(Ordering::SeqCst)
+        }
+
+        /// Test hook: make the next `install_dockermap` fail.
         pub(crate) fn set_fail_dockermap(&self, fail: bool) {
             self.fail_dockermap.store(fail, Ordering::SeqCst);
         }
@@ -873,6 +879,7 @@ pub(crate) mod tests {
         }
 
         fn flush_all_natmap(&self) -> color_eyre::Result<()> {
+            self.flushed.store(true, Ordering::SeqCst);
             Ok(())
         }
 
@@ -955,6 +962,8 @@ pub(crate) mod tests {
             .collect()
     }
 
+    /// Hands out this test binary's next port, from a band below the daemon's
+    /// ephemeral scan so a concurrent run cannot take it.
     pub(crate) fn test_port() -> u16 {
         test_ports(1)[0]
     }
@@ -997,6 +1006,34 @@ pub(crate) mod tests {
         ids.iter().map(|&s| s.to_string()).collect()
     }
 
+    fn make_state(entries: &[(&str, u16, &str)]) -> Arc<RwLock<DaemonState>> {
+        let mut state = DaemonState::default();
+        for (idx, (id, host_port, container_ip)) in entries.iter().enumerate() {
+            state.mapping.insert(
+                (*id).to_string(),
+                vec![DockerPortMap::new(
+                    idx as u64 + 1,
+                    DockerPortMapRequest {
+                        host_addr: format!("0.0.0.0:{host_port}").parse().unwrap(),
+                        container_addr: format!("{container_ip}:{host_port}").parse().unwrap(),
+                        proto: TransportProtocol::Tcp,
+                    },
+                    (*id).to_string(),
+                    format!("{id}-container"),
+                )],
+            );
+        }
+        Arc::new(RwLock::new(state))
+    }
+
+    fn make_stored_request(host: &str, container: &str) -> DockerPortMapRequest {
+        DockerPortMapRequest {
+            host_addr: host.parse().unwrap(),
+            container_addr: container.parse().unwrap(),
+            proto: TransportProtocol::Tcp,
+        }
+    }
+
     fn test_daemon_with(
         state_path: PathBuf,
         iptables: Arc<dyn Iptables>,
@@ -1004,6 +1041,7 @@ pub(crate) mod tests {
     ) -> Daemon {
         let daemon_state = Arc::new(RwLock::new(DaemonState::default()));
         let policy_route = Arc::new(PolicyRouteManager::new());
+        let socket_path = state_path.with_extension("sock");
 
         let state = AppState {
             daemon_state,
@@ -1014,7 +1052,7 @@ pub(crate) mod tests {
             next_id: Arc::new(AtomicU64::new(1)),
             ports,
             socket_group: "root".to_string(),
-            socket_path: PathBuf::from("/tmp/natmap.sock"),
+            socket_path,
         };
 
         Daemon {
@@ -1023,8 +1061,12 @@ pub(crate) mod tests {
         }
     }
 
-    /// Builds an [`AppState`] backed by the given iptables fake.
-    pub(crate) fn test_app_state_with(iptables: Arc<dyn Iptables>) -> AppState {
+    /// Builds an [`AppState`] backed by the given iptables fake, writing into
+    /// `dir` so concurrent tests cannot share a state file or a socket path.
+    pub(crate) fn test_app_state_with(
+        dir: &tempfile::TempDir,
+        iptables: Arc<dyn Iptables>,
+    ) -> AppState {
         let daemon_state = Arc::new(RwLock::new(DaemonState::default()));
         let policy_route = Arc::new(PolicyRouteManager::new());
 
@@ -1033,18 +1075,18 @@ pub(crate) mod tests {
             iptables,
             policy_route,
             docker: None,
-            state_path: PathBuf::from("/tmp/natmap-test-state.json"),
+            state_path: dir.path().join("state.json"),
             next_id: Arc::new(AtomicU64::new(1)),
             ports: Arc::new(PortAllocator::new()),
             socket_group: "root".to_string(),
-            socket_path: PathBuf::from("/tmp/natmap.sock"),
+            socket_path: dir.path().join("natmap.sock"),
         }
     }
 
     fn create_test_daemon(state_path: PathBuf) -> Daemon {
         test_daemon_with(
             state_path,
-            Arc::new(IptablesManager::new()),
+            Arc::new(FakeIptables::default()),
             Arc::new(PortAllocator::new()),
         )
     }
@@ -1069,10 +1111,18 @@ pub(crate) mod tests {
         let state_path = temp_dir.path().join("state.json");
 
         let daemon = create_test_daemon(state_path);
-        let docker = Docker::connect_with_local_defaults().unwrap();
+        // `handle_docker_event` takes a concrete `Docker`, and bollard refuses to
+        // build one for a socket path that does not exist. A `die` event never
+        // dials the handle, so a plain file stands in for the socket: the test
+        // reaches the real `on_container_stop` branch without a daemon.
+        let sock = temp_dir.path().join("docker.sock");
+        std::fs::write(&sock, b"").unwrap();
+        let docker =
+            Docker::connect_with_socket(sock.to_str().unwrap(), 1, bollard::API_DEFAULT_VERSION)
+                .unwrap();
 
         let event = EventMessage {
-            action: Some("start".to_string()),
+            action: Some("die".to_string()),
             actor: Some(EventActor {
                 id: Some("1234567890".to_string()),
                 ..Default::default()
@@ -1088,7 +1138,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn resolve_stale_returns_none_when_no_mapping() {
-        let state = Arc::new(RwLock::new(DaemonState::default()));
+        let state = make_state(&[]);
         let addr: SocketAddr = "0.0.0.0:9000".parse().unwrap();
         let result = resolve_stale_container(&state, addr, "new-container").await;
         assert!(result.is_none());
@@ -1096,20 +1146,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn resolve_stale_returns_none_when_no_match() {
-        let state = Arc::new(RwLock::new(DaemonState::default()));
-        state.write().await.mapping.insert(
-            "other".into(),
-            vec![DockerPortMap::new(
-                1,
-                DockerPortMapRequest {
-                    host_addr: "0.0.0.0:8080".parse().unwrap(),
-                    container_addr: "10.0.0.2:8080".parse().unwrap(),
-                    proto: TransportProtocol::Tcp,
-                },
-                "other".into(),
-                "other-container".into(),
-            )],
-        );
+        let state = make_state(&[("other", 8080, "10.0.0.2")]);
         let addr: SocketAddr = "0.0.0.0:9000".parse().unwrap();
         let result = resolve_stale_container(&state, addr, "new-container").await;
         assert!(result.is_none());
@@ -1117,20 +1154,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn resolve_stale_returns_stale_id_when_match() {
-        let state = Arc::new(RwLock::new(DaemonState::default()));
-        state.write().await.mapping.insert(
-            "stale".into(),
-            vec![DockerPortMap::new(
-                1,
-                DockerPortMapRequest {
-                    host_addr: "0.0.0.0:9000".parse().unwrap(),
-                    container_addr: "10.0.0.2:9000".parse().unwrap(),
-                    proto: TransportProtocol::Tcp,
-                },
-                "stale".into(),
-                "old-container".into(),
-            )],
-        );
+        let state = make_state(&[("stale", 9000, "10.0.0.2")]);
         let addr: SocketAddr = "0.0.0.0:9000".parse().unwrap();
         let result = resolve_stale_container(&state, addr, "new-container").await;
         assert_eq!(result, Some("stale".to_string()));
@@ -1138,20 +1162,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn resolve_stale_returns_none_for_same_container() {
-        let state = Arc::new(RwLock::new(DaemonState::default()));
-        state.write().await.mapping.insert(
-            "same".into(),
-            vec![DockerPortMap::new(
-                1,
-                DockerPortMapRequest {
-                    host_addr: "0.0.0.0:9000".parse().unwrap(),
-                    container_addr: "10.0.0.2:9000".parse().unwrap(),
-                    proto: TransportProtocol::Tcp,
-                },
-                "same".into(),
-                "same-container".into(),
-            )],
-        );
+        let state = make_state(&[("same", 9000, "10.0.0.2")]);
         let addr: SocketAddr = "0.0.0.0:9000".parse().unwrap();
         let result = resolve_stale_container(&state, addr, "same").await;
         assert!(result.is_none(), "same container should not be stale");
@@ -1159,33 +1170,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn resolve_stale_returns_correct_id_when_multiple_containers() {
-        let state = Arc::new(RwLock::new(DaemonState::default()));
-        state.write().await.mapping.insert(
-            "alpha".into(),
-            vec![DockerPortMap::new(
-                1,
-                DockerPortMapRequest {
-                    host_addr: "0.0.0.0:8080".parse().unwrap(),
-                    container_addr: "10.0.0.2:8080".parse().unwrap(),
-                    proto: TransportProtocol::Tcp,
-                },
-                "alpha".into(),
-                "alpha-container".into(),
-            )],
-        );
-        state.write().await.mapping.insert(
-            "bravo".into(),
-            vec![DockerPortMap::new(
-                2,
-                DockerPortMapRequest {
-                    host_addr: "0.0.0.0:9000".parse().unwrap(),
-                    container_addr: "10.0.0.3:9000".parse().unwrap(),
-                    proto: TransportProtocol::Tcp,
-                },
-                "bravo".into(),
-                "bravo-container".into(),
-            )],
-        );
+        let state = make_state(&[("alpha", 8080, "10.0.0.2"), ("bravo", 9000, "10.0.0.3")]);
         let addr: SocketAddr = "0.0.0.0:9000".parse().unwrap();
         let result = resolve_stale_container(&state, addr, "new-container").await;
         assert_eq!(result, Some("bravo".to_string()));
@@ -1226,16 +1211,8 @@ pub(crate) mod tests {
 
     #[test]
     fn reconcile_addr_no_change() {
-        let mut stored = DockerPortMapRequest {
-            host_addr: "0.0.0.0:9000".parse().unwrap(),
-            container_addr: "10.0.0.2:9000".parse().unwrap(),
-            proto: TransportProtocol::Tcp,
-        };
-        let current = DockerPortMapRequest {
-            host_addr: "0.0.0.0:9000".parse().unwrap(),
-            container_addr: "10.0.0.2:9000".parse().unwrap(),
-            proto: TransportProtocol::Tcp,
-        };
+        let mut stored = make_stored_request("0.0.0.0:9000", "10.0.0.2:9000");
+        let current = make_stored_request("0.0.0.0:9000", "10.0.0.2:9000");
         assert!(!reconcile_container_addr(&mut stored, &current));
         assert_eq!(
             stored.container_addr,
@@ -1245,16 +1222,8 @@ pub(crate) mod tests {
 
     #[test]
     fn reconcile_addr_updated() {
-        let mut stored = DockerPortMapRequest {
-            host_addr: "0.0.0.0:9000".parse().unwrap(),
-            container_addr: "10.0.0.2:9000".parse().unwrap(),
-            proto: TransportProtocol::Tcp,
-        };
-        let current = DockerPortMapRequest {
-            host_addr: "0.0.0.0:9000".parse().unwrap(),
-            container_addr: "10.0.0.3:9000".parse().unwrap(),
-            proto: TransportProtocol::Tcp,
-        };
+        let mut stored = make_stored_request("0.0.0.0:9000", "10.0.0.2:9000");
+        let current = make_stored_request("0.0.0.0:9000", "10.0.0.3:9000");
         assert!(reconcile_container_addr(&mut stored, &current));
         assert_eq!(
             stored.container_addr,
@@ -1264,16 +1233,8 @@ pub(crate) mod tests {
 
     #[test]
     fn reconcile_addr_different_host_port_same_container_ip() {
-        let mut stored = DockerPortMapRequest {
-            host_addr: "0.0.0.0:8080".parse().unwrap(),
-            container_addr: "10.0.0.2:80".parse().unwrap(),
-            proto: TransportProtocol::Tcp,
-        };
-        let current = DockerPortMapRequest {
-            host_addr: "0.0.0.0:9090".parse().unwrap(),
-            container_addr: "10.0.0.2:80".parse().unwrap(),
-            proto: TransportProtocol::Tcp,
-        };
+        let mut stored = make_stored_request("0.0.0.0:8080", "10.0.0.2:80");
+        let current = make_stored_request("0.0.0.0:9090", "10.0.0.2:80");
         assert!(!reconcile_container_addr(&mut stored, &current));
         assert_eq!(
             stored.container_addr,
@@ -1774,6 +1735,65 @@ pub(crate) mod tests {
             fake.installed_hairpins(),
             vec![make_hairpin(&port.to_string())]
         );
+        assert!(ports.is_allocated(make_addr(port)).await);
+    }
+
+    #[test]
+    fn create_daemon_state_absent_returns_empty() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+        let daemon = create_test_daemon(state_path);
+
+        let state = daemon.create_daemon_state().unwrap();
+
+        assert!(state.mapping.is_empty());
+        assert!(state.dnats.is_empty());
+    }
+
+    #[test]
+    fn create_daemon_state_unparseable_is_fatal() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+        std::fs::write(&state_path, "{not valid json").unwrap();
+        let daemon = create_test_daemon(state_path.clone());
+
+        let err = daemon.create_daemon_state().unwrap_err().to_string();
+
+        assert!(err.contains(&state_path.display().to_string()), "{err}");
+    }
+
+    #[tokio::test]
+    async fn reload_truncated_state_is_fatal_and_preserves_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+        let truncated = r#"{"mapping": {"c1": [{"id": 1"#;
+        std::fs::write(&state_path, truncated).unwrap();
+        let daemon = create_test_daemon(state_path.clone());
+
+        let result = daemon.reload().await;
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(&state_path).unwrap(), truncated);
+    }
+
+    #[tokio::test]
+    async fn reload_corrupt_state_touches_nothing_before_failing() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+        std::fs::write(&state_path, "{not valid json").unwrap();
+        let fake = Arc::new(FakeIptables::default());
+        let ports = Arc::new(PortAllocator::new());
+        let port = test_port();
+        ports
+            .allocate(make_addr(port), TransportProtocol::Tcp)
+            .await
+            .unwrap();
+        let daemon = test_daemon_with(state_path, fake.clone(), ports.clone());
+
+        let result = daemon.reload().await;
+
+        assert!(result.is_err());
+        assert!(!fake.flushed());
         assert!(ports.is_allocated(make_addr(port)).await);
     }
 }

@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
+/// Re-exported so callers need only the `lab_ops_natmap::models` path.
 pub use lab_ops_lab_lib::TransportProtocol;
 use serde::Deserialize;
 use serde::Serialize;
@@ -130,6 +131,14 @@ fn default_proto() -> TransportProtocol {
 
 // --- Static NAT configs (persisted to state.json) ---
 
+/// A policy routing rule configuration (an `ip rule` + `ip route` pair).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyRouteConfig {
+    pub src_ip: String,
+    pub via: String,
+    pub table: u32,
+}
+
 /// A static DNAT (destination NAT) rule configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DnatConfig {
@@ -143,8 +152,9 @@ pub struct DnatConfig {
     pub proto: TransportProtocol,
     /// Optional external network interface.
     pub ext_if: Option<String>,
-    /// Preserve the source IP of forwarded traffic (metadata only — the
-    /// daemon does not apply a MASQUERADE rule for this mapping).
+    /// Signal that forwarded traffic must keep its source IP. Metadata only: it
+    /// selects the hairpin path (see [`HairpinConfig::lan_cidr`]) instead of a
+    /// MASQUERADE, and a DNAT rule installs no MASQUERADE either way.
     #[serde(default)]
     pub preserve_src_ip: bool,
 }
@@ -225,7 +235,6 @@ pub enum RuleKind {
 /// a deterministic, deduplicated listing.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct LiveRule {
-    /// Kind of rule.
     pub kind: RuleKind,
     /// External IP address.
     pub ext_ip: String,
@@ -237,103 +246,12 @@ pub struct LiveRule {
     pub proto: TransportProtocol,
 }
 
-// --- API request types ---
-
-/// JSON body for creating or deleting a DNAT rule.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DnatRequest {
-    pub ext_ip: String,
-    pub int_ip: String,
-    pub ports: String,
-    pub proto: TransportProtocol,
-    pub ext_if: Option<String>,
-    #[serde(default)]
-    pub preserve_src_ip: bool,
-}
-
-/// JSON body for creating or deleting an SNAT rule.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SnatRequest {
-    pub int_ip: String,
-    pub ext_ip: String,
-    pub ext_if: String,
-}
-
-/// JSON body for creating or deleting a hairpin rule.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HairpinRequest {
-    pub ext_ip: String,
-    pub int_ip: String,
-    pub ports: String,
-    pub proto: TransportProtocol,
-    #[serde(default)]
-    pub lan_cidr: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PolicyRouteConfig {
-    pub src_ip: String,
-    pub via: String,
-    pub table: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PolicyRouteRequest {
-    pub src_ip: String,
-    pub via: String,
-    pub table: u32,
-}
-
-// --- Config → request conversions ---
-
-impl From<DnatConfig> for DnatRequest {
-    fn from(config: DnatConfig) -> Self {
-        Self {
-            ext_ip: config.ext_ip,
-            int_ip: config.int_ip,
-            ports: config.ports,
-            proto: config.proto,
-            ext_if: config.ext_if,
-            preserve_src_ip: config.preserve_src_ip,
-        }
-    }
-}
-
-impl From<SnatConfig> for SnatRequest {
-    fn from(config: SnatConfig) -> Self {
-        Self {
-            int_ip: config.int_ip,
-            ext_ip: config.ext_ip,
-            ext_if: config.ext_if,
-        }
-    }
-}
-
-impl From<HairpinConfig> for HairpinRequest {
-    fn from(config: HairpinConfig) -> Self {
-        Self {
-            ext_ip: config.ext_ip,
-            int_ip: config.int_ip,
-            ports: config.ports,
-            proto: config.proto,
-            lan_cidr: config.lan_cidr,
-        }
-    }
-}
-
-impl From<PolicyRouteConfig> for PolicyRouteRequest {
-    fn from(config: PolicyRouteConfig) -> Self {
-        Self {
-            src_ip: config.src_ip,
-            via: config.via,
-            table: config.table,
-        }
-    }
-}
-
 // --- Persisted daemon state ---
 
 /// The complete persisted state of the natmap daemon.
+///
+/// New fields must carry `#[serde(default)]` so state files written by older
+/// versions still load instead of failing as corrupt.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DaemonState {
     /// Docker container port mappings, keyed by container ID.
@@ -366,8 +284,6 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
-
-    // ── DockerPortMapRequest::is_ipv6 ──
 
     #[test]
     fn is_ipv6_ipv4_returns_false() {
@@ -409,8 +325,6 @@ mod tests {
         assert!(req.is_ipv6());
     }
 
-    // ── DockerPortMap::new ──
-
     #[test]
     fn new_docker_port_map_comment_format() {
         let req = DockerPortMapRequest {
@@ -448,8 +362,6 @@ mod tests {
         assert_eq!(m.id, 0);
         assert_eq!(m.rule_comment, "natmap:id-zero:0");
     }
-
-    // ── DnatConfig::rule_comment ──
 
     #[test]
     fn dnat_rule_comment_basic() {
@@ -490,8 +402,6 @@ mod tests {
         assert_eq!(cfg.rule_comment(), "natmap:dnat:198.51.100.10:53");
     }
 
-    // ── SnatConfig::rule_comment ──
-
     #[test]
     fn snat_rule_comment_basic() {
         let cfg = SnatConfig {
@@ -511,8 +421,6 @@ mod tests {
         };
         assert_eq!(cfg.rule_comment(), "natmap:snat:2001:db8::1:2001:db8::ff");
     }
-
-    // ── HairpinConfig::rule_comment ──
 
     #[test]
     fn hairpin_rule_comment_basic() {

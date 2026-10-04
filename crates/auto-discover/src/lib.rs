@@ -13,6 +13,7 @@
 //! The CLI is exposed through [`cli::run_cli`] and integrated as the
 //! `lab-ops auto-discover` subcommand.
 
+/// Argument parsing and dispatch for the `auto-discover` subcommand.
 pub mod cli;
 mod config;
 mod consul;

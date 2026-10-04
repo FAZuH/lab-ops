@@ -1,12 +1,17 @@
+//! Docker integration tests for the natmap daemon, run inside a privileged container.
+
 #[cfg(feature = "docker-tests")]
 mod natmap_docker {
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::path::PathBuf;
     use std::process::Command;
+    use std::sync::Mutex;
     use std::sync::Once;
 
     static INIT: Once = Once::new();
+    // Docker suites share the host daemon state; intra-suite parallel bodies flake, so serialize.
+    static DOCKER_LOCK: Mutex<()> = Mutex::new(());
 
     fn setup_docker_image() -> &'static str {
         let image_name = "lab-ops-natmap-test:latest";
@@ -56,6 +61,7 @@ mod natmap_docker {
     }
 
     fn run_in_docker(args: &[&str]) -> String {
+        let _g = DOCKER_LOCK.lock().unwrap();
         let image = setup_docker_image();
         let binary_path = env!("CARGO_BIN_EXE_lab-ops");
         let mut cmd = Command::new("docker");
@@ -91,11 +97,51 @@ mod natmap_docker {
         String::from_utf8_lossy(&output.stdout).to_string()
     }
 
+    /// Bounded poll for the daemon socket. The loop this replaces exited 0 on
+    /// its last `sleep` whether or not the socket appeared, so a daemon that
+    /// died before binding only surfaced later as an unrelated client error.
+    const WAIT_SOCKET: &str = "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done; [ -S /tmp/ns ] || { echo 'FAIL: natmap socket never appeared' >&2; exit 1; }";
+
+    /// Fails unless the script actually exercised its scenario.
+    ///
+    /// A script that soft-skips exits zero having verified nothing, and the
+    /// harness would report that as a pass — indistinguishable from coverage.
+    /// Rust has no dynamic skip, so a skip surfaces here as a failure whose
+    /// message names what was missing.
+    fn assert_scenario_ran(output: &str, test_name: &str) {
+        assert!(
+            !output.contains("SKIP:"),
+            "{test_name} SKIPPED and verified nothing:\n{output}"
+        );
+        assert!(
+            output.contains("PASS"),
+            "{test_name} printed no PASS marker:\n{output}"
+        );
+    }
+
+    /// Kills the job named by `pid` and waits for it to be gone, so a following
+    /// command cannot race a shutdown. `pid` is a shell expression; pass
+    /// `$DAEMON_PID`, captured with `$!`. Never `%1`: that is bash job-control
+    /// syntax, and the container's `sh` is dash, where it resolves to nothing, so
+    /// the kill fails silently, `kill -0 %1` fails the same way, and the liveness
+    /// check below passes on a daemon that is still running. Polling the socket
+    /// instead would break on its first iteration — the socket outlives the
+    /// daemon — and let a shutdown assertion race the shutdown it is meant to
+    /// observe. The kill is `|| true` and stays inside this fragment: as a bare
+    /// `&&` element it would stop the chain, and a job that died on its own would
+    /// skip every assertion after it. The expiry check is an `if`, so a job that
+    /// did exit leaves this fragment at status 0 and the `&&` chain continues.
+    fn stop_job(pid: &str, signal: &str) -> String {
+        format!(
+            "kill {signal} {pid} 2>/dev/null || true; for i in $(seq 1 20); do kill -0 {pid} 2>/dev/null || break; sleep 0.2; done; if kill -0 {pid} 2>/dev/null; then echo 'FAIL: {pid} still alive 4s after the kill' >&2; exit 1; fi"
+        )
+    }
+
     #[test]
     fn natmap_forward() {
         let out = run_in_docker(&[
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
             "lab-ops natmap --socket /tmp/ns dnat --ext-ip 1.2.3.4 --int-ip 10.0.0.1 --ports 8080",
             "&&",
@@ -113,7 +159,7 @@ mod natmap_docker {
     fn natmap_snat() {
         let out = run_in_docker(&[
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
             "lab-ops natmap --socket /tmp/ns snat --ext-ip 1.2.3.4 --int-ip 10.0.0.1 --ext-if eth0",
             "&&",
@@ -131,7 +177,7 @@ mod natmap_docker {
     fn natmap_hairpin() {
         let out = run_in_docker(&[
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
             "lab-ops natmap --socket /tmp/ns hairpin --ext-ip 1.2.3.4 --int-ip 10.0.0.1 --ports 8080",
             "&&",
@@ -151,15 +197,14 @@ mod natmap_docker {
     #[test]
     fn flush_postrouting_natmap_rules_on_startup() {
         run_in_docker(&[
-            // Add a natmap-commented MASQUERADE rule (simulating stale Docker mapping hairpin)
             "iptables -t nat -A POSTROUTING -s 10.0.0.1 -d 10.0.0.1 -p tcp --dport 8080 -j MASQUERADE -m comment --comment 'natmap:deadbeef:32771'",
             "&&",
             "iptables -t nat -S POSTROUTING | grep -q 'natmap:deadbeef' || (echo 'FAIL: rule not added' >&2 && exit 1)",
             "&&",
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
-            "iptables -t nat -S POSTROUTING | grep -q 'natmap:deadbeef' && (echo 'FAIL: natmap rule not flushed from POSTROUTING' >&2 && exit 1) || echo 'PASS'",
+            "if iptables -t nat -S POSTROUTING | grep -q 'natmap:deadbeef'; then echo 'FAIL: natmap rule not flushed from POSTROUTING' >&2; iptables -t nat -S POSTROUTING >&2; exit 1; fi",
         ]);
     }
 
@@ -172,9 +217,9 @@ mod natmap_docker {
             "iptables -t nat -S OUTPUT | grep -q 'natmap:cafebabe' || (echo 'FAIL: rule not added' >&2 && exit 1)",
             "&&",
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
-            "iptables -t nat -S OUTPUT | grep -q 'natmap:cafebabe' && (echo 'FAIL: natmap rule not flushed from OUTPUT' >&2 && exit 1) || echo 'PASS'",
+            "if iptables -t nat -S OUTPUT | grep -q 'natmap:cafebabe'; then echo 'FAIL: natmap rule not flushed from OUTPUT' >&2; iptables -t nat -S OUTPUT >&2; exit 1; fi",
         ]);
     }
 
@@ -187,7 +232,7 @@ mod natmap_docker {
             "iptables -t nat -S POSTROUTING | grep -q '10.0.0.0/24' || (echo 'FAIL: non-natmap rule not added' >&2 && exit 1)",
             "&&",
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
             "iptables -t nat -S POSTROUTING | grep -q '10.0.0.0/24' || (echo 'FAIL: non-natmap rule was incorrectly flushed' >&2 && exit 1)",
             "&&",
@@ -204,7 +249,7 @@ mod natmap_docker {
             "iptables -t nat -S OUTPUT | grep -q 'REDIRECT' || (echo 'FAIL: non-natmap rule not added' >&2 && exit 1)",
             "&&",
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
             "iptables -t nat -S OUTPUT | grep -q 'REDIRECT' || (echo 'FAIL: non-natmap rule was incorrectly flushed' >&2 && exit 1)",
             "&&",
@@ -213,10 +258,15 @@ mod natmap_docker {
     }
 
     /// Daemon startup must flush natmap-commented rules via ip6tables too.
+    ///
+    /// The script soft-skips when the image has no `ip6tables`. libtest has no
+    /// dynamic skip, so a soft skip that stayed green would report coverage the
+    /// run never produced — `assert_scenario_ran` turns the skip into a visible
+    /// failure instead. The `iptables` package in this image ships `ip6tables`,
+    /// so the skip branch is only reached on a custom image.
     #[test]
     fn flush_ip6tables_postrouting_natmap_rules() {
-        run_in_docker(&[
-            // ip6tables may not be available in all environments; skip if missing
+        let out = run_in_docker(&[
             "which ip6tables || (echo 'SKIP: ip6tables not available' && exit 0)",
             "&&",
             "ip6tables -t nat -A POSTROUTING -s fc00::1 -d fc00::1 -p tcp --dport 8080 -j MASQUERADE -m comment --comment 'natmap:ipv6dead:32771'",
@@ -224,10 +274,13 @@ mod natmap_docker {
             "ip6tables -t nat -S POSTROUTING | grep -q 'natmap:ipv6dead' || (echo 'FAIL: ip6tables rule not added' >&2 && exit 1)",
             "&&",
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
-            "ip6tables -t nat -S POSTROUTING | grep -q 'natmap:ipv6dead' && (echo 'FAIL: ip6tables natmap rule not flushed' >&2 && exit 1) || echo 'PASS'",
+            "if ip6tables -t nat -S POSTROUTING | grep -q 'natmap:ipv6dead'; then echo 'FAIL: ip6tables natmap rule not flushed' >&2; ip6tables -t nat -S POSTROUTING >&2; exit 1; fi",
+            "&&",
+            "echo 'PASS'",
         ]);
+        assert_scenario_ran(&out, "flush_ip6tables_postrouting_natmap_rules");
     }
 
     /// Multiple natmap rules in the same chain must all be cleaned.
@@ -243,9 +296,11 @@ mod natmap_docker {
             "iptables -t nat -S POSTROUTING | grep -c 'natmap:' | grep -q '3' || (echo 'FAIL: expected 3 natmap rules' >&2 && exit 1)",
             "&&",
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
-            "iptables -t nat -S POSTROUTING | grep -q 'natmap:' && (echo 'FAIL: natmap rules not flushed' >&2 && exit 1) || echo 'PASS'",
+            "if iptables -t nat -S POSTROUTING | grep -q 'natmap:'; then echo 'FAIL: natmap rules not flushed' >&2; iptables -t nat -S POSTROUTING >&2; exit 1; fi",
+            "&&",
+            "echo 'PASS'",
         ]);
     }
 
@@ -253,25 +308,25 @@ mod natmap_docker {
     #[test]
     fn flush_natmap_chain_in_filter_table() {
         run_in_docker(&[
-            // The daemon setup() creates NATMAP chain, then flush_all_natmap() flushes it.
-            // We start a daemon, stop it, manually add a stale rule to NATMAP chain,
-            // restart, and verify it's gone.
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            "DAEMON_PID=$!",
             "&&",
-            "kill %1 2>/dev/null; for i in $(seq 1 20); do kill -0 %1 2>/dev/null || break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
-            // Now add a stale rule to filter/NATMAP manually
+            &stop_job("$DAEMON_PID", "-TERM"),
+            "&&",
+            "rm -f /tmp/ns",
+            "&&",
             "iptables -t filter -A NATMAP -d 10.0.0.1 -p tcp --dport 80 -j ACCEPT -m comment --comment 'natmap:stale:32771'",
             "&&",
             "iptables -t filter -S NATMAP | grep -q 'natmap:stale' || (echo 'FAIL: stale rule not added' >&2 && exit 1)",
             "&&",
-            // Restart daemon which should flush the stale rule via flush_all_natmap
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
-            // NATMAP chain is flushed AND deleted (-X), so listing it should fail or be empty
-            "iptables -t filter -S NATMAP 2>/dev/null | grep -q 'natmap:stale' && (echo 'FAIL: stale rule not flushed from filter/NATMAP' >&2 && exit 1) || echo 'PASS'",
+            "if iptables -t filter -S NATMAP | grep -q 'natmap:stale'; then echo 'FAIL: stale rule not flushed from filter/NATMAP' >&2; iptables -t filter -S NATMAP >&2; exit 1; fi",
+            "&&",
+            "echo 'PASS'",
         ]);
     }
 
@@ -280,18 +335,24 @@ mod natmap_docker {
     fn flush_natmap_chain_in_nat_table() {
         run_in_docker(&[
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            "DAEMON_PID=$!",
             "&&",
-            "kill %1 2>/dev/null; for i in $(seq 1 20); do kill -0 %1 2>/dev/null || break; sleep 0.2; done",
+            WAIT_SOCKET,
+            "&&",
+            &stop_job("$DAEMON_PID", "-TERM"),
+            "&&",
+            "rm -f /tmp/ns",
             "&&",
             "iptables -t nat -A NATMAP -p tcp --dport 9999 -j DNAT --to-destination 10.0.0.1:80 -m comment --comment 'natmap:stale:9999'",
             "&&",
             "iptables -t nat -S NATMAP | grep -q 'natmap:stale' || (echo 'FAIL: stale rule not added' >&2 && exit 1)",
             "&&",
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
-            "iptables -t nat -S NATMAP 2>/dev/null | grep -q 'natmap:stale' && (echo 'FAIL: stale rule not flushed from nat/NATMAP' >&2 && exit 1) || echo 'PASS'",
+            "if iptables -t nat -S NATMAP | grep -q 'natmap:stale'; then echo 'FAIL: stale rule not flushed from nat/NATMAP' >&2; iptables -t nat -S NATMAP >&2; exit 1; fi",
+            "&&",
+            "echo 'PASS'",
         ]);
     }
 
@@ -302,20 +363,17 @@ mod natmap_docker {
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
             "DAEMON_PID=$!",
             "&&",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
-            // Add a natmap rule that should be cleaned on shutdown
             "iptables -t nat -A POSTROUTING -s 10.0.0.5 -d 10.0.0.5 -p tcp --dport 9090 -j MASQUERADE -m comment --comment 'natmap:shutdown:32772'",
             "&&",
             "iptables -t nat -S POSTROUTING | grep -q 'natmap:shutdown' || (echo 'FAIL: rule not added' >&2 && exit 1)",
             "&&",
-            // Send SIGINT to trigger graceful shutdown
-            "kill -INT $DAEMON_PID",
+            &stop_job("$DAEMON_PID", "-INT"),
             "&&",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            "if iptables -t nat -S POSTROUTING | grep -q 'natmap:shutdown'; then echo 'FAIL: rule not flushed on shutdown' >&2; iptables -t nat -S POSTROUTING >&2; exit 1; fi",
             "&&",
-            // Verify rule was flushed during shutdown
-            "iptables -t nat -S POSTROUTING | grep -q 'natmap:shutdown' && (echo 'FAIL: rule not flushed on shutdown' >&2 && exit 1) || echo 'PASS'",
+            "echo 'PASS'",
         ]);
     }
 
@@ -326,17 +384,17 @@ mod natmap_docker {
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
             "DAEMON_PID=$!",
             "&&",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
             "iptables -t nat -A OUTPUT -d 127.0.0.1 -p tcp --dport 3000 -j DNAT --to-destination 10.0.0.10:3000 -m comment --comment 'natmap:shutdown:32773'",
             "&&",
             "iptables -t nat -S OUTPUT | grep -q 'natmap:shutdown' || (echo 'FAIL: rule not added' >&2 && exit 1)",
             "&&",
-            "kill -INT $DAEMON_PID",
+            &stop_job("$DAEMON_PID", "-INT"),
             "&&",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            "if iptables -t nat -S OUTPUT | grep -q 'natmap:shutdown'; then echo 'FAIL: rule not flushed on shutdown' >&2; iptables -t nat -S OUTPUT >&2; exit 1; fi",
             "&&",
-            "iptables -t nat -S OUTPUT | grep -q 'natmap:shutdown' && (echo 'FAIL: rule not flushed on shutdown' >&2 && exit 1) || echo 'PASS'",
+            "echo 'PASS'",
         ]);
     }
 
@@ -344,12 +402,14 @@ mod natmap_docker {
     #[test]
     fn flush_when_no_natmap_rules_present() {
         let out = run_in_docker(&[
-            // Ensure POSTROUTING has no natmap rules, then start daemon.
-            // The daemon should start successfully even with nothing to flush.
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
-            "iptables -t nat -S POSTROUTING | grep -q 'natmap:' && (echo 'UNEXPECTED: pre-existing natmap rule' >&2 && exit 1) || echo PASS",
+            "iptables -t nat -S POSTROUTING | grep -q '^-P POSTROUTING' || { echo 'FAIL: POSTROUTING unreadable, so the absence check below proves nothing' >&2; exit 1; }",
+            "&&",
+            "if iptables -t nat -S POSTROUTING | grep -q 'natmap:'; then echo 'UNEXPECTED: pre-existing natmap rule' >&2; iptables -t nat -S POSTROUTING >&2; exit 1; fi",
+            "&&",
+            "echo 'PASS'",
         ]);
         assert!(
             out.contains("PASS"),
@@ -370,11 +430,15 @@ mod natmap_docker {
             "iptables -t nat -S OUTPUT | grep -q 'natmap:both' || (echo 'FAIL: OUTPUT rule missing' >&2 && exit 1)",
             "&&",
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
-            "iptables -t nat -S POSTROUTING | grep -q 'natmap:both' && (echo 'FAIL: POSTROUTING rule not flushed' >&2 && exit 1) || echo 'POSTROUTING OK'",
+            "if iptables -t nat -S POSTROUTING | grep -q 'natmap:both'; then echo 'FAIL: POSTROUTING rule not flushed' >&2; iptables -t nat -S POSTROUTING >&2; exit 1; fi",
             "&&",
-            "iptables -t nat -S OUTPUT | grep -q 'natmap:both' && (echo 'FAIL: OUTPUT rule not flushed' >&2 && exit 1) || echo 'OUTPUT OK'",
+            "echo 'POSTROUTING OK'",
+            "&&",
+            "if iptables -t nat -S OUTPUT | grep -q 'natmap:both'; then echo 'FAIL: OUTPUT rule not flushed' >&2; iptables -t nat -S OUTPUT >&2; exit 1; fi",
+            "&&",
+            "echo 'OUTPUT OK'",
         ]);
     }
 
@@ -383,12 +447,10 @@ mod natmap_docker {
     fn flush_preserves_natmap_jump_rules() {
         let out = run_in_docker(&[
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
-            // Verify jump from PREROUTING to NATMAP still exists after flush_all_natmap
             "iptables -t nat -S PREROUTING | grep -q -- '-j NATMAP' || (echo 'FAIL: PREROUTING -> NATMAP jump missing' >&2 && exit 1)",
             "&&",
-            // Verify jump from DOCKER-USER to NATMAP still exists
             "iptables -t filter -S DOCKER-USER | grep -q -- '-j NATMAP' || (echo 'FAIL: DOCKER-USER -> NATMAP jump missing' >&2 && exit 1)",
             "&&",
             "echo PASS",
@@ -403,15 +465,13 @@ mod natmap_docker {
     #[test]
     fn flush_does_not_match_natmap_substring_in_comment() {
         run_in_docker(&[
-            // A comment that contains "natmap:" somewhere in the middle, not as a prefix
             "iptables -t nat -A POSTROUTING -s 10.0.0.1 -d 10.0.0.1 -p tcp --dport 8080 -j MASQUERADE -m comment --comment 'my-natmap:custom-rule'",
             "&&",
             "iptables -t nat -S POSTROUTING | grep -q 'my-natmap:custom-rule' || (echo 'FAIL: rule not added' >&2 && exit 1)",
             "&&",
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
-            // This rule should survive because it doesn't start with "natmap:"
             "iptables -t nat -S POSTROUTING | grep -q 'my-natmap:custom-rule' || (echo 'FAIL: non-prefixed rule incorrectly flushed' >&2 && exit 1)",
             "&&",
             "echo PASS",
@@ -425,15 +485,17 @@ mod natmap_docker {
     fn clear_removes_dnat() {
         run_in_docker(&[
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
             "lab-ops natmap --socket /tmp/ns dnat --ext-ip 1.2.3.4 --int-ip 10.0.0.1 --ports 8080",
             "&&",
-            "iptables -t nat -S NATMAP | grep -q 'DNAT' || (echo 'FAIL: DNAT rule not installed' >&2 && exit 1)",
+            "iptables -t nat -S PREROUTING | grep -q 'natmap:dnat:1.2.3.4:8080' || (echo 'FAIL: DNAT rule not installed' >&2 && exit 1)",
             "&&",
             "lab-ops natmap --socket /tmp/ns clear",
             "&&",
-            "iptables -t nat -S NATMAP | grep -q 'DNAT' && (echo 'FAIL: DNAT rule not cleared' >&2 && exit 1) || echo 'PASS'",
+            "if iptables -t nat -S PREROUTING | grep -q 'natmap:dnat:1.2.3.4:8080'; then echo 'FAIL: DNAT rule not cleared' >&2; iptables -t nat -S PREROUTING >&2; exit 1; fi",
+            "&&",
+            "echo 'PASS'",
         ]);
     }
 
@@ -442,7 +504,7 @@ mod natmap_docker {
     fn clear_removes_snat() {
         run_in_docker(&[
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
             "lab-ops natmap --socket /tmp/ns snat --ext-ip 1.2.3.4 --int-ip 10.0.0.1 --ext-if eth0",
             "&&",
@@ -450,7 +512,9 @@ mod natmap_docker {
             "&&",
             "lab-ops natmap --socket /tmp/ns clear",
             "&&",
-            "iptables -t nat -S POSTROUTING | grep -q 'natmap:' && (echo 'FAIL: SNAT rule not cleared' >&2 && exit 1) || echo 'PASS'",
+            "if iptables -t nat -S POSTROUTING | grep -q 'natmap:'; then echo 'FAIL: SNAT rule not cleared' >&2; iptables -t nat -S POSTROUTING >&2; exit 1; fi",
+            "&&",
+            "echo 'PASS'",
         ]);
     }
 
@@ -459,15 +523,17 @@ mod natmap_docker {
     fn clear_removes_hairpin() {
         run_in_docker(&[
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
             "lab-ops natmap --socket /tmp/ns hairpin --ext-ip 1.2.3.4 --int-ip 10.0.0.1 --ports 8080",
             "&&",
-            "iptables -t nat -S NATMAP | grep -q 'DNAT' || (echo 'FAIL: Hairpin rule not installed' >&2 && exit 1)",
+            "iptables -t nat -S PREROUTING | grep -q 'natmap:hairpin:1.2.3.4:10.0.0.1:8080' || (echo 'FAIL: Hairpin rule not installed' >&2 && exit 1)",
             "&&",
             "lab-ops natmap --socket /tmp/ns clear",
             "&&",
-            "iptables -t nat -S NATMAP | grep -q 'DNAT' && (echo 'FAIL: Hairpin rule not cleared' >&2 && exit 1) || echo 'PASS'",
+            "if iptables -t nat -S PREROUTING | grep -q 'natmap:hairpin:1.2.3.4:10.0.0.1:8080'; then echo 'FAIL: Hairpin rule not cleared' >&2; iptables -t nat -S PREROUTING >&2; exit 1; fi",
+            "&&",
+            "echo 'PASS'",
         ]);
     }
 
@@ -476,7 +542,7 @@ mod natmap_docker {
     fn clear_removes_all_rules() {
         run_in_docker(&[
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
             "lab-ops natmap --socket /tmp/ns dnat --ext-ip 1.2.3.4 --int-ip 10.0.0.1 --ports 8080",
             "&&",
@@ -484,9 +550,13 @@ mod natmap_docker {
             "&&",
             "lab-ops natmap --socket /tmp/ns hairpin --ext-ip 1.2.3.4 --int-ip 10.0.0.1 --ports 9090",
             "&&",
+            "iptables -t nat -S PREROUTING | grep -q 'natmap:dnat:' || { echo 'FAIL: DNAT rule not installed, so the clear check below proves nothing' >&2; exit 1; }",
+            "&&",
             "lab-ops natmap --socket /tmp/ns clear",
             "&&",
-            "iptables -t nat -S | grep -q 'natmap:' && (echo 'FAIL: natmap rules remain after clear' >&2 && exit 1) || echo 'PASS'",
+            "if iptables -t nat -S | grep -q 'natmap:'; then echo 'FAIL: natmap rules remain after clear' >&2; iptables -t nat -S >&2; exit 1; fi",
+            "&&",
+            "echo 'PASS'",
         ]);
     }
 
@@ -495,23 +565,26 @@ mod natmap_docker {
     fn clear_resets_state() {
         run_in_docker(&[
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            "DAEMON_PID=$!",
+            "&&",
+            WAIT_SOCKET,
             "&&",
             "lab-ops natmap --socket /tmp/ns dnat --ext-ip 1.2.3.4 --int-ip 10.0.0.1 --ports 8080",
             "&&",
-            "iptables -t nat -S NATMAP | grep -q '1.2.3.4' || (echo 'FAIL: rule not installed' >&2 && exit 1)",
+            "iptables -t nat -S PREROUTING | grep -q 'natmap:dnat:1.2.3.4:8080' || (echo 'FAIL: rule not installed' >&2 && exit 1)",
             "&&",
             "lab-ops natmap --socket /tmp/ns clear",
             "&&",
-            // Kill daemon
-            "kill %1 2>/dev/null; for i in $(seq 1 20); do kill -0 %1 2>/dev/null || break; sleep 0.2; done",
+            &stop_job("$DAEMON_PID", "-TERM"),
             "&&",
-            // Restart daemon — it loads state from disk; cleared state should be empty
+            "rm -f /tmp/ns",
+            "&&",
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
-            // Verify no natmap rules were re-created from stale state
-            "iptables -t nat -S | grep -q 'natmap:' && (echo 'FAIL: rules re-created from stale state after clear' >&2 && exit 1) || echo 'PASS'",
+            "if iptables -t nat -S | grep -q 'natmap:'; then echo 'FAIL: rules re-created from stale state after clear' >&2; iptables -t nat -S >&2; exit 1; fi",
+            "&&",
+            "echo 'PASS'",
         ]);
     }
 
@@ -522,7 +595,7 @@ mod natmap_docker {
     fn natmap_dnat_non_local_ip_freebind() {
         let out = run_in_docker(&[
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
             "lab-ops natmap --socket /tmp/ns dnat --ext-ip 198.51.100.99 --int-ip 10.0.0.1 --ports 8080",
             "&&",
@@ -539,7 +612,7 @@ mod natmap_docker {
     fn natmap_dnat_multiple_ips_same_port() {
         let out = run_in_docker(&[
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
             "lab-ops natmap --socket /tmp/ns dnat --ext-ip 198.51.100.1 --int-ip 10.0.0.1 --ports 8080",
             "&&",
@@ -562,7 +635,7 @@ mod natmap_docker {
     fn natmap_dnat_conflict_same_ip_same_port() {
         let out = run_in_docker(&[
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
             "lab-ops natmap --socket /tmp/ns dnat --ext-ip 198.51.100.1 --int-ip 10.0.0.1 --ports 8080",
             "&&",
@@ -579,7 +652,7 @@ mod natmap_docker {
     fn natmap_dnat_release_port_on_delete() {
         let out = run_in_docker(&[
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
             "lab-ops natmap --socket /tmp/ns dnat --ext-ip 198.51.100.1 --int-ip 10.0.0.1 --ports 8080",
             "&&",
@@ -600,7 +673,7 @@ mod natmap_docker {
     fn natmap_dnat_multiple_ports() {
         let out = run_in_docker(&[
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
             "lab-ops natmap --socket /tmp/ns dnat --ext-ip 198.51.100.1 --int-ip 10.0.0.1 --ports 8080,8081",
             "&&",
@@ -621,7 +694,7 @@ mod natmap_docker {
     fn natmap_dnat_udp() {
         let out = run_in_docker(&[
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
             "lab-ops natmap --socket /tmp/ns dnat --ext-ip 198.51.100.1 --int-ip 10.0.0.1 --ports 53 --proto udp",
             "&&",
@@ -635,7 +708,7 @@ mod natmap_docker {
     fn natmap_docker_local_service() {
         let out = run_in_docker(&[
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
             "lab-ops natmap --socket /tmp/ns docker add 8080:127.0.0.1:80 --name my-local-service",
             "&&",
@@ -665,17 +738,26 @@ mod natmap_docker {
     fn docker_mapping_loopback_host_installs_loopback_masquerade() {
         let out = run_in_docker(&[
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
-            // Match the handoff scenario: 127.0.0.1 host, 172.18.0.2 container on Docker bridge.
             "lab-ops natmap --socket /tmp/ns docker add 127.0.0.1:32771:172.18.0.2:9000 --name portainer-ce",
             "&&",
-            // The new loopback→container MASQUERADE must be present in POSTROUTING.
-            "iptables -t nat -S POSTROUTING | grep -- '-s 127.0.0.0/8 -d 172.18.0.2' && echo 'PASS' || (echo 'FAIL: loopback MASQUERADE missing' >&2 && iptables -t nat -S POSTROUTING >&2 && exit 1)",
+            "iptables-save | grep 'natmap:portainer-ce:32771' | grep -- '-s 127.0.0.0/8' || true",
         ]);
-        assert!(
-            out.contains("PASS"),
-            "loopback→container MASQUERADE rule missing after loopback-host mapping:\n{out}"
+
+        let actual: Vec<&str> = out
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+
+        let expected = vec![
+            r#"-A POSTROUTING -s 127.0.0.0/8 -d 172.18.0.2/32 -p tcp -m tcp --dport 9000 -m comment --comment "natmap:portainer-ce:32771" -j MASQUERADE"#,
+        ];
+
+        assert_eq!(
+            actual, expected,
+            "loopback→container MASQUERADE rule does not match:\n{out}"
         );
     }
 
@@ -688,14 +770,15 @@ mod natmap_docker {
     fn docker_mapping_non_loopback_host_skips_loopback_masquerade() {
         let out = run_in_docker(&[
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
             "lab-ops natmap --socket /tmp/ns docker add 100.64.0.5:32771:172.18.0.2:9000 --name portainer-remote",
             "&&",
-            // A natmap-commented POSTROUTING rule with -s 127.0.0.0/8 must NOT exist:
-            // the per-container hairpin MASQUERADE (-s 172.18.0.2 -d 172.18.0.2) is still
-            // expected, but its source is the container IP, never 127.0.0.0/8.
-            "iptables -t nat -S POSTROUTING | grep -- '-s 127.0.0.0/8' | grep -q 'natmap:' && (echo 'FAIL: unexpected loopback MASQUERADE for non-loopback host' >&2 && iptables -t nat -S POSTROUTING >&2 && exit 1) || echo 'PASS'",
+            "iptables -t nat -S POSTROUTING | grep -q 'natmap:portainer-remote:32771' || { echo 'FAIL: no natmap POSTROUTING rule, so the loopback check below proves nothing' >&2; exit 1; }",
+            "&&",
+            "if iptables -t nat -S POSTROUTING | grep 'natmap:portainer-remote:32771' | grep -q -- '-s 127.0.0.0/8'; then echo 'FAIL: unexpected loopback MASQUERADE for non-loopback host' >&2; iptables -t nat -S POSTROUTING >&2; exit 1; fi",
+            "&&",
+            "echo 'PASS'",
         ]);
         assert!(
             out.contains("PASS"),
@@ -710,19 +793,55 @@ mod natmap_docker {
     fn docker_mapping_remove_cleans_up_loopback_masquerade() {
         let out = run_in_docker(&[
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
             "lab-ops natmap --socket /tmp/ns docker add 127.0.0.1:32771:172.18.0.2:9000 --name portainer-ce",
             "&&",
-            "iptables -t nat -S POSTROUTING | grep -q -- '-s 127.0.0.0/8 -d 172.18.0.2' || (echo 'FAIL: loopback MASQUERADE not installed' >&2 && exit 1)",
+            "iptables -t nat -S POSTROUTING | grep -- 'natmap:portainer-ce:32771' | grep -q -- '-s 127.0.0.0/8 -d 172.18.0.2/32' || { echo 'FAIL: loopback MASQUERADE not installed' >&2; iptables -t nat -S POSTROUTING >&2; exit 1; }",
             "&&",
-            "lab-ops natmap --socket /tmp/ns docker remove --name portainer-ce --port 32771",
+            "lab-ops natmap --socket /tmp/ns docker rm --id 1",
             "&&",
-            "iptables -t nat -S POSTROUTING | grep -q -- '-s 127.0.0.0/8 -d 172.18.0.2' && (echo 'FAIL: loopback MASQUERADE not removed' >&2 && iptables -t nat -S POSTROUTING >&2 && exit 1) || echo 'PASS'",
+            "iptables -t nat -S POSTROUTING | grep -q '^-P POSTROUTING' || { echo 'FAIL: POSTROUTING unreadable, so the loopback removal check below proves nothing' >&2; exit 1; }",
+            "&&",
+            "if iptables -t nat -S POSTROUTING | grep 'natmap:portainer-ce:32771' | grep -q -- '-s 127.0.0.0/8 -d 172.18.0.2/32'; then echo 'FAIL: loopback MASQUERADE not removed' >&2; iptables -t nat -S POSTROUTING >&2; exit 1; fi",
+            "&&",
+            "echo 'PASS'",
         ]);
         assert!(
             out.contains("PASS"),
             "loopback MASQUERADE was not removed with the mapping:\n{out}"
+        );
+    }
+
+    #[test]
+    fn docker_mapping_installs_full_rule_set() {
+        let out = run_in_docker(&[
+            "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
+            WAIT_SOCKET,
+            "&&",
+            "lab-ops natmap --socket /tmp/ns docker add 100.64.0.5:32771:172.18.0.2:9000 --name portainer-remote",
+            "&&",
+            "iptables-save | grep -- 'natmap:' | sort",
+        ]);
+
+        let mut actual: Vec<&str> = out
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        actual.sort_unstable();
+
+        let mut expected = vec![
+            r#"-A NATMAP -d 100.64.0.5/32 -p tcp -m tcp --dport 32771 -m comment --comment "natmap:portainer-remote:32771" -j DNAT --to-destination 172.18.0.2:9000"#,
+            r#"-A NATMAP -d 172.18.0.2/32 -p tcp -m tcp --dport 9000 -m comment --comment "natmap:portainer-remote:32771" -j ACCEPT"#,
+            r#"-A OUTPUT -d 100.64.0.5/32 -p tcp -m tcp --dport 32771 -m comment --comment "natmap:portainer-remote:32771" -j DNAT --to-destination 172.18.0.2:9000"#,
+            r#"-A POSTROUTING -s 172.18.0.2/32 -d 172.18.0.2/32 -p tcp -m tcp --dport 9000 -m comment --comment "natmap:portainer-remote:32771" -j MASQUERADE"#,
+        ];
+        expected.sort_unstable();
+
+        assert_eq!(
+            actual, expected,
+            "natmap rule set for one mapping does not match:\n{out}"
         );
     }
 
@@ -732,23 +851,17 @@ mod natmap_docker {
     #[test]
     fn policy_route_clones_local_routes() {
         run_in_docker(&[
-            // Add a dummy route to main table (simulates a Docker bridge / LAN subnet)
             "ip route add 10.99.99.0/24 dev lo scope link",
             "&&",
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
-            // Install policy route
             "lab-ops natmap --socket /tmp/ns policy-route --src-ip 10.0.0.99 --via 10.99.99.1 --table 100",
             "&&",
-            // Default route must exist (existing behavior)
             "ip route show table 100 | grep -q 'default via 10.99.99.1' || (echo 'FAIL: default route missing in table 100' >&2 && ip route show table 100 >&2 && exit 1)",
             "&&",
-            // Local-subnet route must be cloned into table 100 (new behavior — prevents
-            // the bug where all traffic from src_ip went through the proxy gateway)
             "ip route show table 100 | grep -q '10.99.99.0/24' || (echo 'FAIL: local route 10.99.99.0/24 not cloned into table 100' >&2 && ip route show table 100 >&2 && exit 1)",
             "&&",
-            // ip rule must exist
             "ip rule show | grep -q 'from 10.0.0.99 lookup 100' || (echo 'FAIL: ip rule not found' >&2 && exit 1)",
             "&&",
             "echo 'PASS'",
@@ -760,24 +873,25 @@ mod natmap_docker {
     fn policy_route_install_remove() {
         run_in_docker(&[
             "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root &",
-            "for i in $(seq 1 20); do [ -S /tmp/ns ] && break; sleep 0.2; done",
+            WAIT_SOCKET,
             "&&",
-            // Install policy route
+            "ip route add 10.99.99.0/24 dev lo scope link",
+            "&&",
             "lab-ops natmap --socket /tmp/ns policy-route --src-ip 10.0.0.99 --via 10.99.99.1 --table 100",
             "&&",
             "ip rule show | grep -q 'from 10.0.0.99 lookup 100' || (echo 'FAIL: ip rule not found' >&2 && ip rule show >&2 && exit 1)",
             "&&",
             "ip route show table 100 | grep -q 'default via 10.99.99.1' || (echo 'FAIL: ip route not found' >&2 && ip route show table 100 >&2 && exit 1)",
             "&&",
-            // Idempotent: second install should not duplicate
             "lab-ops natmap --socket /tmp/ns policy-route --src-ip 10.0.0.99 --via 10.99.99.1 --table 100",
             "&&",
             "[ \"$(ip rule show | grep -c 'from 10.0.0.99 lookup 100' || true)\" = 1 ] || (echo 'FAIL: duplicate ip rule' >&2 && exit 1)",
             "&&",
-            // Remove
             "lab-ops natmap --socket /tmp/ns policy-route --src-ip 10.0.0.99 --via 10.99.99.1 --table 100 --delete",
             "&&",
-            "ip rule show | grep -q 'from 10.0.0.99 lookup 100' && (echo 'FAIL: ip rule not removed' >&2 && exit 1) || echo 'PASS'",
+            "if ip rule show | grep -q 'from 10.0.0.99 lookup 100'; then echo 'FAIL: ip rule not removed' >&2; ip rule show >&2; exit 1; fi",
+            "&&",
+            "echo 'PASS'",
         ]);
     }
 }

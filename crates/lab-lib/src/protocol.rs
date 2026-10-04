@@ -1,7 +1,6 @@
 //! Transport protocol enum (TCP / UDP).
 //!
-//! Canonical representation shared across the workspace. Previously defined
-//! in natmap's `models.rs`; extracted here so auto-discover can use it without
+//! Lives in lab-lib rather than natmap so auto-discover can use it without
 //! depending on natmap.
 //!
 //! ```
@@ -40,18 +39,15 @@ impl std::str::FromStr for TransportProtocol {
     }
 }
 
-impl TransportProtocol {
-    /// Returns the lowercase protocol name.
-    pub fn to_lowercase(&self) -> &'static str {
-        match self {
-            Self::Tcp => "tcp",
-            Self::Udp => "udp",
-        }
-    }
-}
-
 impl Display for TransportProtocol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.to_lowercase())
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::Tcp => "tcp",
+                Self::Udp => "udp",
+            }
+        )
     }
 }

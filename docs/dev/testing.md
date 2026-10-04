@@ -29,7 +29,7 @@ Located in `#[cfg(test)] mod tests { }` blocks within source files.
 | `crates/lab-lib/src/port.rs` | 11 | Port allocation, persistence, free-port checks |
 | `crates/natmap/src/api.rs` | 22 | HTTP handlers, `parse_socket_addrs` boundary/edge cases |
 | `crates/natmap/src/daemon.rs` | 2 | Tracing span fields on daemon ops |
-| `crates/auto-discover/src/config.rs` | 2 | preserve_src_ip config propagation (defaults, overrides) |
+| `crates/auto-discover/src/config.rs` | 11 | preserve_src_ip config propagation (defaults, overrides) |
 | `crates/auto-discover/src/consul.rs` | 5 | Consul service registration, metadata, URL encoding |
 | `crates/auto-discover/src/daemon.rs` | 2 | Tracing span fields on container events |
 | `crates/auto-discover/src/forwarding.rs` | 27 | `group_forwarding_services`, `parse_dnat_rule`, 5 proptest invariants, edge cases |
@@ -46,11 +46,10 @@ scan cannot take one, and the band is offset per process so two concurrent runs
 of the same test binary do not land on each other. Never hardcode a port in a
 test that reaches `allocate`.
 
-The per-file counts above and the totals drift; they are a guide, not a gate.
-`cargo test -p <crate>` is the source of truth.
+Per-file counts in this file are historical; the **totals** below are the measured source of truth, each with the exact command that produced it. `cargo test -p <crate>` is authoritative.
 
 
-**Total: 88 inline unit tests**
+**Total: 296 inline unit tests**, measured from the four lib test binaries after a forced rebuild (`cargo test -p lab-ops -p lab-ops_natmap -p lab-ops_auto-discover -p lab-ops_lab-lib --lib --all-features`): 57 + 145 + 80 + 14. (Measured 2026-10-04, loadavg 14.25.)
 
 ### Doc Tests
 
@@ -58,10 +57,11 @@ Located in `/// ```rust` documentation blocks.
 
 | Crate | Tests | Covers |
 |---|---|---|
+| `lab-ops` | 2 | (root crate doc examples) |
 | `lab-ops_lab-lib` | 1 | TransportProtocol parse/display round-trip |
 | `lab-ops_natmap` | 4 | `output_dnat_destination`, `DockerPortMapRequest`, `DockerPortMap::new`, `parse_docker_mapping` |
 
-**Total: 5 doc tests**
+**Total: 7 doc tests**, measured with `cargo test --workspace --all-features --doc`: 2 + 4 + 0 + 1.
 
 ### Property-Based Tests
 
@@ -80,20 +80,20 @@ Located in `tests/` or `crates/*/tests/` directories.
 
 | File | Tests | Covers |
 |---|---|---|
-| `tests/cf2ansible.rs` | 6 | cf2ansible end-to-end (zone file → YAML output) |
-| `crates/natmap/tests/cli.rs` | 27 | Port mapping string parsing via `parse_docker_mapping`, 8 proptest roundtrips, edge cases |
-| `crates/natmap/tests/model.rs` | 12 | Model serialization, rule comment, `output_dnat_destination` |
+| `tests/cf2ansible.rs` | 12 | cf2ansible end-to-end (zone file → YAML output) |
+| `crates/natmap/tests/cli.rs` | 21 | Port mapping string parsing via `parse_docker_mapping`, 8 proptest roundtrips, edge cases |
+| `crates/natmap/tests/model.rs` | 23 | Model serialization, rule comment, `output_dnat_destination` |
 
-**Total: 45 integration tests**
+**Total: 56 integration tests**: 12 (`tests/cf2ansible`) + 21 (`crates/natmap/tests/cli.rs`) + 23 (`crates/natmap/tests/model.rs`).
 
 ### Docker Integration Tests
 
-Located in `tests/natmap_docker.rs` (34 tests) and `tests/auto_discover/` (60 tests across 7 modules), behind `#[cfg(feature = "docker-tests")]`.
+Located in `tests/natmap_docker.rs` (35 tests) and `tests/auto_discover/` (44 tests across 7 modules), behind `#[cfg(feature = "docker-tests")]`.
 
-**natmap Docker tests** (`tests/natmap_docker.rs`, 34 tests):
+**natmap Docker tests** (`tests/natmap_docker.rs`, 35 tests):
 Spins up a privileged Ubuntu container with iptables, runs the natmap daemon, and verifies iptables NAT rule creation/removal, startup flush, graceful shutdown, policy routing, and port allocation via CLI commands over the Unix socket.
 
-| Category | Count |
+| Category | Count (historical) |
 |---|---|
 | NAT rule operations (DNAT, SNAT, hairpin, forward) | 5 |
 | Rule cleanup (clear, container flush) | 6 |
@@ -103,20 +103,22 @@ Spins up a privileged Ubuntu container with iptables, runs the natmap daemon, an
 | Policy routing | 2 |
 | Other | 9 |
 
-**auto-discover Docker tests** (`tests/auto_discover/`, 60 tests across 7 modules):
+**auto-discover Docker tests** (`tests/auto_discover/`, 44 tests across 7 modules):
 Spins up a privileged Docker container running Consul, natmap, and auto-discover daemons. Verifies Consul registration, port binding, forwarding metadata, crash recovery, config change handling, registration metadata, forwarding sync (DNAT rules), concurrency, and large configs.
 
 | Module | Tests | Covers |
 |---|---|---|
 | `forwarding.rs` | 9 | DNAT sync, duplicate/stale rules, multi-port, hairpin, preserve_src_ip hairpin |
 
-| `port_binding.rs` | 7 | Static/ephemeral ports, bind_ip, bind_interface, local forwarding |
+| `port_binding.rs` | 5 | Static/ephemeral ports, bind_ip, bind_interface, local forwarding |
 | `registration.rs` | 12 | Consul registrations, container events, domain slug, extra fields, concurrent starts |
-| `recovery.rs` | 11 | Config changes, crash recovery, YAML validation, pre/postprocess, config sync |
+| `recovery.rs` | 7 | Config changes, crash recovery, YAML validation, pre/postprocess, config sync |
 | `local_services.rs` | 4 | Local service type, forwarding remote, reachability, combined rproxy+forwarding |
 | `preserve_src_ip.rs` | 6 | Global/per-service preserve_src_ip, policy route, idempotency, cleanup |
 
-**Total: 94 Docker tests**
+| `startup_race.rs` | 1 | Startup race before natmap socket is ready |
+
+**Total: 79 Docker tests**: 35 (`tests/natmap_docker`) + 44 (`tests/auto_discover/`). Reproduce with `cargo test -p lab-ops --test natmap_docker --all-features` and `cargo test -p lab-ops --test auto_discover --all-features`.
 
 The Docker image is built once via `Once` from `ubuntu:24.04` with `iptables` installed.
 
@@ -165,20 +167,20 @@ either way.
 
 ### Docker Test Requirements
 
-Docker tests must run single-threaded:
+Each Docker test spins up a privileged container, so run them single-threaded:
 
 ```bash
-cargo test --features docker-tests -- --test-threads=1
+cargo test --workspace --all-features -- --test-threads=1
 ```
 
-Each test creates a fresh Docker container. Parallel execution causes race conditions with image builds.
+`--all-features` is required: see the rustflags note above.
 
 ## Common Pitfalls
 
-1. **Docker tests hang**: Always use `--test-threads=1`.
-2. **Daemon connection refused**: Docker tests must start the daemon inside the container with `&` and `sleep 2` before CLI commands.
+1. **Docker tests hang**: pass `--test-threads=1` yourself. Nothing in the tree sets it: `.cargo/config.toml` sets only `rustflags`, so the Docker suites run at cargo's default parallelism, where they are currently flaky (#54).
+2. **Daemon connection refused**: start the daemon inside the container with `&`, then poll for the socket (`WAIT_SOCKET` in `tests/natmap_docker.rs`, the `wait_for_*` helpers in `tests/auto_discover/mod.rs`). Never a bare `sleep`.
 3. **Port binding fails in Docker**: Use `--privileged`. Port allocation requires `CAP_NET_BIND_SERVICE` or root.
-4. **State file conflicts**: Each test uses a unique `--state-dir` path.
+4. **State file conflicts**: Not possible as written. `run()` uses `docker run --rm` and mounts no host `/tmp`, so every `/tmp` path inside a test script is already fresh per test. Adding per-test paths is unnecessary.
 
 ## Adding New Tests
 

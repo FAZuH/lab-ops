@@ -1,3 +1,5 @@
+//! `ip rule` / `ip route` policy routing for source-IP preservation.
+
 use std::process::Command;
 
 use color_eyre::Result;
@@ -5,6 +7,8 @@ use color_eyre::eyre::WrapErr;
 
 use crate::models::PolicyRouteConfig;
 
+/// Installs and removes the `ip rule` / `ip route` pair behind a
+/// [`PolicyRouteConfig`].
 pub struct PolicyRouteManager;
 
 // ── Pure helpers (testable without ip commands) ──
@@ -46,11 +50,11 @@ fn filter_cloneable_routes(output: &str) -> Vec<String> {
         .collect()
 }
 
-/// Builds `ip route add default via <via> table <table>` args.
-fn build_route_add_args(config: &PolicyRouteConfig) -> Vec<String> {
+/// Builds `ip route <verb> default via <via> table <table>` args.
+fn build_route_args(config: &PolicyRouteConfig, verb: &str) -> Vec<String> {
     vec![
         "route".into(),
-        "add".into(),
+        verb.into(),
         "default".into(),
         "via".into(),
         config.via.clone(),
@@ -59,38 +63,13 @@ fn build_route_add_args(config: &PolicyRouteConfig) -> Vec<String> {
     ]
 }
 
-/// Builds `ip rule add from <src_ip> table <table>` args.
-fn build_rule_add_args(config: &PolicyRouteConfig) -> Vec<String> {
+/// Builds `ip rule <verb> from <src_ip> table <table>` args.
+fn build_rule_args(config: &PolicyRouteConfig, verb: &str) -> Vec<String> {
     vec![
         "rule".into(),
-        "add".into(),
+        verb.into(),
         "from".into(),
         config.src_ip.clone(),
-        "table".into(),
-        config.table.to_string(),
-    ]
-}
-
-/// Builds `ip rule del from <src_ip> table <table>` args.
-fn build_rule_del_args(config: &PolicyRouteConfig) -> Vec<String> {
-    vec![
-        "rule".into(),
-        "del".into(),
-        "from".into(),
-        config.src_ip.clone(),
-        "table".into(),
-        config.table.to_string(),
-    ]
-}
-
-/// Builds `ip route del default via <via> table <table>` args.
-fn build_route_del_args(config: &PolicyRouteConfig) -> Vec<String> {
-    vec![
-        "route".into(),
-        "del".into(),
-        "default".into(),
-        "via".into(),
-        config.via.clone(),
         "table".into(),
         config.table.to_string(),
     ]
@@ -145,10 +124,13 @@ impl PolicyRouteManager {
         Ok(filter_cloneable_routes(&stdout))
     }
 
+    /// Adds the default route, the `ip rule`, and a clone of every locally
+    /// reachable main-table route into the policy table. Idempotent; a route that
+    /// cannot be cloned is warned about rather than failing the install.
     pub fn install(&self, config: &PolicyRouteConfig) -> Result<()> {
         if !self.check_route_exists(config)? {
             let status = Command::new("ip")
-                .args(build_route_add_args(config))
+                .args(build_route_args(config, "add"))
                 .status()
                 .wrap_err("Failed to execute ip route add")?;
             if !status.success() {
@@ -158,7 +140,7 @@ impl PolicyRouteManager {
 
         if !self.check_rule_exists(config)? {
             let status = Command::new("ip")
-                .args(build_rule_add_args(config))
+                .args(build_rule_args(config, "add"))
                 .status()
                 .wrap_err("Failed to execute ip rule add")?;
             if !status.success() {
@@ -182,16 +164,19 @@ impl PolicyRouteManager {
         Ok(())
     }
 
+    /// Deletes the `ip rule` and the default route. Best-effort: a rule the kernel
+    /// already dropped is not an error.
     pub fn remove(&self, config: &PolicyRouteConfig) -> Result<()> {
         let _ = Command::new("ip")
-            .args(build_rule_del_args(config))
+            .args(build_rule_args(config, "del"))
             .status();
         let _ = Command::new("ip")
-            .args(build_route_del_args(config))
+            .args(build_route_args(config, "del"))
             .status();
         Ok(())
     }
 
+    /// Removes every policy route in `policy_routes`.
     pub fn flush_all(&self, policy_routes: &[PolicyRouteConfig]) -> Result<()> {
         for config in policy_routes {
             self.remove(config)?;
@@ -211,8 +196,6 @@ mod tests {
             table: 100,
         }
     }
-
-    // ── rule_exists_in_output ──
 
     #[test]
     fn rule_exists_in_output_matches() {
@@ -242,8 +225,6 @@ mod tests {
         assert!(!rule_exists_in_output(output, &cfg));
     }
 
-    // ── route_exists_in_output ──
-
     #[test]
     fn route_exists_in_output_matches() {
         let cfg = test_config();
@@ -264,8 +245,6 @@ mod tests {
         let output = "default via 10.0.0.1 dev eth0\n";
         assert!(!route_exists_in_output(output, &cfg));
     }
-
-    // ── route_line_matches_table ──
 
     #[test]
     fn route_line_matches_table_exact_match() {
@@ -293,8 +272,6 @@ mod tests {
             "10.10.10.0/24 dev vmbr1 proto kernel scope link src 10.10.10.1"
         ));
     }
-
-    // ── filter_cloneable_routes ──
 
     #[test]
     fn filter_cloneable_routes_excludes_default() {
@@ -331,12 +308,10 @@ mod tests {
         assert_eq!(routes.len(), 1);
     }
 
-    // ── build_route_add_args ──
-
     #[test]
     fn route_add_args_format() {
         let cfg = test_config();
-        let args = build_route_add_args(&cfg);
+        let args = build_route_args(&cfg, "add");
         assert_eq!(
             args,
             vec![
@@ -351,36 +326,30 @@ mod tests {
         );
     }
 
-    // ── build_rule_add_args ──
-
     #[test]
     fn rule_add_args_format() {
         let cfg = test_config();
-        let args = build_rule_add_args(&cfg);
+        let args = build_rule_args(&cfg, "add");
         assert_eq!(
             args,
             vec!["rule", "add", "from", "10.0.0.1", "table", "100"]
         );
     }
 
-    // ── build_rule_del_args ──
-
     #[test]
     fn rule_del_args_format() {
         let cfg = test_config();
-        let args = build_rule_del_args(&cfg);
+        let args = build_rule_args(&cfg, "del");
         assert_eq!(
             args,
             vec!["rule", "del", "from", "10.0.0.1", "table", "100"]
         );
     }
 
-    // ── build_route_del_args ──
-
     #[test]
     fn route_del_args_format() {
         let cfg = test_config();
-        let args = build_route_del_args(&cfg);
+        let args = build_route_args(&cfg, "del");
         assert_eq!(
             args,
             vec![
@@ -394,8 +363,6 @@ mod tests {
             ]
         );
     }
-
-    // ── build_route_show_args ──
 
     #[test]
     fn route_show_args_format() {

@@ -183,10 +183,57 @@ pub fn can_proxy(rtype: &str) -> bool {
 mod tests {
     use super::*;
 
-    // ── parse_zone ──
+    #[test]
+    fn parse_zone_record_types() {
+        let cases: &[(&str, &str, &str)] = &[
+            ("example.com. 300 IN A 192.0.2.1", "A", "192.0.2.1"),
+            (
+                "example.com. 300 IN AAAA 2001:db8::1",
+                "AAAA",
+                "2001:db8::1",
+            ),
+            (
+                "www.example.com. 300 IN CNAME example.com.",
+                "CNAME",
+                "example.com.",
+            ),
+            (
+                "example.com. 300 IN MX 10 mail.example.com.",
+                "MX",
+                "10 mail.example.com.",
+            ),
+            (
+                r#"example.com. 300 IN TXT "v=spf1 include:_spf.example.com ~all""#,
+                "TXT",
+                r#""v=spf1 include:_spf.example.com ~all""#,
+            ),
+            (
+                "_sip._tcp.example.com. 300 IN SRV 10 60 5060 sip.example.com.",
+                "SRV",
+                "10 60 5060 sip.example.com.",
+            ),
+            (
+                "_443._tcp.example.com. 300 IN TLSA 3 1 1 0d74adc4dfb5e6b9",
+                "TLSA",
+                "3 1 1 0d74adc4dfb5e6b9",
+            ),
+            (
+                "example.com. 86400 IN NS ns1.example.com.",
+                "NS",
+                "ns1.example.com.",
+            ),
+        ];
+
+        for (zone, expected_rtype, expected_data) in cases {
+            let records = parse_zone(zone);
+            assert_eq!(records.len(), 1, "{zone}");
+            assert_eq!(records[0].rtype, *expected_rtype, "{zone}");
+            assert_eq!(records[0].data, *expected_data, "{zone}");
+        }
+    }
 
     #[test]
-    fn parse_zone_a_record() {
+    fn parse_zone_a_record_full_fields() {
         let zone = "example.com. 300 IN A 192.0.2.1";
         let records = parse_zone(zone);
         assert_eq!(records.len(), 1);
@@ -195,68 +242,6 @@ mod tests {
         assert_eq!(records[0].rtype, "A");
         assert_eq!(records[0].data, "192.0.2.1");
         assert_eq!(records[0].proxied, None);
-    }
-
-    #[test]
-    fn parse_zone_aaaa_record() {
-        let zone = "example.com. 300 IN AAAA 2001:db8::1";
-        let records = parse_zone(zone);
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].rtype, "AAAA");
-        assert_eq!(records[0].data, "2001:db8::1");
-    }
-
-    #[test]
-    fn parse_zone_cname_record() {
-        let zone = "www.example.com. 300 IN CNAME example.com.";
-        let records = parse_zone(zone);
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].rtype, "CNAME");
-        assert_eq!(records[0].data, "example.com.");
-    }
-
-    #[test]
-    fn parse_zone_mx_record() {
-        let zone = "example.com. 300 IN MX 10 mail.example.com.";
-        let records = parse_zone(zone);
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].rtype, "MX");
-        assert_eq!(records[0].data, "10 mail.example.com.");
-    }
-
-    #[test]
-    fn parse_zone_txt_record() {
-        let zone = r#"example.com. 300 IN TXT "v=spf1 include:_spf.example.com ~all""#;
-        let records = parse_zone(zone);
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].rtype, "TXT");
-        assert_eq!(records[0].data, r#""v=spf1 include:_spf.example.com ~all""#);
-    }
-
-    #[test]
-    fn parse_zone_srv_record() {
-        let zone = "_sip._tcp.example.com. 300 IN SRV 10 60 5060 sip.example.com.";
-        let records = parse_zone(zone);
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].rtype, "SRV");
-        assert_eq!(records[0].data, "10 60 5060 sip.example.com.");
-    }
-
-    #[test]
-    fn parse_zone_tlsa_record() {
-        let zone = "_443._tcp.example.com. 300 IN TLSA 3 1 1 0d74adc4dfb5e6b9";
-        let records = parse_zone(zone);
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].rtype, "TLSA");
-    }
-
-    #[test]
-    fn parse_zone_ns_record() {
-        let zone = "example.com. 86400 IN NS ns1.example.com.";
-        let records = parse_zone(zone);
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].rtype, "NS");
-        assert_eq!(records[0].data, "ns1.example.com.");
     }
 
     #[test]
@@ -334,7 +319,13 @@ www.example.com. 300 IN CNAME example.com.";
         assert!(parse_zone(zone).is_empty());
     }
 
-    // ── split_data_and_proxied ──
+    #[test]
+    fn parse_zone_ttl_above_u32_max_falls_back_to_one() {
+        let zone = "example.com. 4294967296 IN A 192.0.2.1";
+        let records = parse_zone(zone);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].ttl, 1);
+    }
 
     #[test]
     fn split_data_and_proxied_no_tag() {
@@ -370,8 +361,6 @@ www.example.com. 300 IN CNAME example.com.";
         assert_eq!(data, "192.0.2.1 ; cf_tags=cf-proxied:maybe");
         assert_eq!(proxied, None);
     }
-
-    // ── strip_zone ──
 
     #[test]
     fn strip_zone_apex_match() {
@@ -416,8 +405,6 @@ www.example.com. 300 IN CNAME example.com.";
         assert_eq!(strip_zone("", "example.com."), "");
     }
 
-    // ── parse_srv_name ──
-
     #[test]
     fn parse_srv_name_standard() {
         let (name, service, proto) = parse_srv_name("_sip._tcp.example.com.", "example.com.");
@@ -450,8 +437,6 @@ www.example.com. 300 IN CNAME example.com.";
         assert_eq!(proto, "tcp");
     }
 
-    // ── parse_tlsa_name ──
-
     #[test]
     fn parse_tlsa_name_standard() {
         let (name, port, proto) = parse_tlsa_name("_443._tcp.example.com.", "example.com.");
@@ -482,7 +467,13 @@ www.example.com. 300 IN CNAME example.com.";
         assert_eq!(proto, "tcp");
     }
 
-    // ── parse_txt_data ──
+    #[test]
+    fn parse_tlsa_name_non_numeric_port_falls_back_to_zero() {
+        let (name, port, proto) = parse_tlsa_name("_abc._tcp.example.com.", "example.com.");
+        assert_eq!(name, "@");
+        assert_eq!(port, 0);
+        assert_eq!(proto, "tcp");
+    }
 
     #[test]
     fn parse_txt_data_single_quote() {
@@ -512,45 +503,30 @@ www.example.com. 300 IN CNAME example.com.";
         assert_eq!(parse_txt_data(r#""안녕하세요""#), "안녕하세요");
     }
 
-    // ── can_proxy ──
-
     #[test]
-    fn can_proxy_a_record() {
-        assert!(can_proxy("A"));
+    fn parse_txt_data_unterminated_quote_drops_partial() {
+        assert_eq!(parse_txt_data(r#""abc"#), "");
     }
 
     #[test]
-    fn can_proxy_aaaa_record() {
-        assert!(can_proxy("AAAA"));
+    fn parse_txt_data_unterminated_quote_keeps_closed_segments() {
+        assert_eq!(
+            parse_txt_data(r#""v=spf1" "include:_spf.example.com"#),
+            "v=spf1"
+        );
     }
 
     #[test]
-    fn can_proxy_cname_record() {
-        assert!(can_proxy("CNAME"));
+    fn can_proxy_supported_types() {
+        for rtype in ["A", "AAAA", "CNAME"] {
+            assert!(can_proxy(rtype), "{rtype}");
+        }
     }
 
     #[test]
-    fn can_proxy_mx_returns_false() {
-        assert!(!can_proxy("MX"));
-    }
-
-    #[test]
-    fn can_proxy_txt_returns_false() {
-        assert!(!can_proxy("TXT"));
-    }
-
-    #[test]
-    fn can_proxy_ns_returns_false() {
-        assert!(!can_proxy("NS"));
-    }
-
-    #[test]
-    fn can_proxy_srv_returns_false() {
-        assert!(!can_proxy("SRV"));
-    }
-
-    #[test]
-    fn can_proxy_empty_string_returns_false() {
-        assert!(!can_proxy(""));
+    fn can_proxy_unsupported_types() {
+        for rtype in ["MX", "TXT", "NS", "SRV", ""] {
+            assert!(!can_proxy(rtype), "{rtype}");
+        }
     }
 }

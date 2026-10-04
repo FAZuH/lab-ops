@@ -1,3 +1,5 @@
+//! Top-level `Cli` struct and `Command` enum for the lab-ops binary.
+
 use std::path::PathBuf;
 
 use clap::Parser;

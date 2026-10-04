@@ -1,20 +1,11 @@
+//! Docker integration tests for auto-discover's Consul-driven forwarding sync.
+
 use super::*;
 
 #[test]
 fn forwarding_sync_applies_dnat_rules() {
-    let script = r#"
-set -e
-NATMAP_SOCKET=/tmp/natmap.sock
-CONSUL_HTTP_ADDR=http://127.0.0.1:8500
-
-consul agent -dev -http-port=8500 >/tmp/consul.log 2>&1 &
-sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: consul died"; cat /tmp/consul.log; exit 1; }
-
-rm -f /tmp/natmap_state.json
-lab-ops natmap daemon --socket $NATMAP_SOCKET --state /tmp/natmap_state.json --socket-group root >/tmp/natmap.log 2>&1 &
-sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: natmap died"; cat /tmp/natmap.log; exit 1; }
-
-curl -sf -X PUT "$CONSUL_HTTP_ADDR/v1/agent/service/register" \
+    let infra = infra_setup(false);
+    let body = r#"curl -sf -X PUT "$CONSUL_HTTP_ADDR/v1/agent/service/register" \
     -d '{ "ID": "fwd-test-svc", "Name": "fwd-svc", "Address": "10.0.0.99", "Port": 36000, "Meta": { "forwarding": "true", "ext_ip": "203.0.113.50", "ext_ports": "36000" } }'
 
 lab-ops auto-discover forwarding-sync $CONSUL_HTTP_ADDR >/tmp/fwd-sync.log 2>&1 || true
@@ -24,26 +15,15 @@ if ! iptables-save -t nat | grep -q "203.0.113.50.*10.0.0.99"; then echo "FAIL: 
 echo "PASS: forwarding-sync created DNAT rules"
 kill %1 %2 2>/dev/null || true
 sleep 1
-"#.to_string();
-    let out = run(&script);
-    assert_pass(&out, "Phase 7 — forwarding sync DNAT");
+"#;
+    let script = format!("set -e\n{infra}{body}");
+    run(&script);
 }
 
 #[test]
 fn forwarding_sync_no_duplicate_rules() {
-    let script = r#"
-set -e
-NATMAP_SOCKET=/tmp/natmap.sock
-CONSUL_HTTP_ADDR=http://127.0.0.1:8500
-
-consul agent -dev -http-port=8500 >/tmp/consul.log 2>&1 &
-sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: consul died"; cat /tmp/consul.log; exit 1; }
-
-rm -f /tmp/natmap_state.json
-lab-ops natmap daemon --socket $NATMAP_SOCKET --state /tmp/natmap_state.json --socket-group root >/tmp/natmap.log 2>&1 &
-sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: natmap died"; cat /tmp/natmap.log; exit 1; }
-
-curl -sf -X PUT "$CONSUL_HTTP_ADDR/v1/agent/service/register" \
+    let infra = infra_setup(false);
+    let body = r#"curl -sf -X PUT "$CONSUL_HTTP_ADDR/v1/agent/service/register" \
     -d '{ "ID": "fwd-dup-svc", "Name": "fwd-dup", "Address": "10.0.0.99", "Port": 36003, "Meta": { "forwarding": "true", "ext_ip": "203.0.113.51", "ext_ports": "36003" } }'
 
 # Run forwarding-sync 3 times — should produce only 1 DNAT rule
@@ -57,26 +37,15 @@ if [ "$COUNT" -ne 1 ]; then echo "FAIL: expected 1 DNAT rule, got $COUNT" >&2; e
 echo "PASS: no duplicate DNAT rules after multiple syncs"
 kill %1 %2 2>/dev/null || true
 sleep 1
-"#.to_string();
-    let out = run(&script);
-    assert_pass(&out, "forwarding_sync_no_duplicate_rules");
+"#;
+    let script = format!("set -e\n{infra}{body}");
+    run(&script);
 }
 
 #[test]
 fn forwarding_sync_removes_stale_rules() {
-    let script = r#"
-set -e
-NATMAP_SOCKET=/tmp/natmap.sock
-CONSUL_HTTP_ADDR=http://127.0.0.1:8500
-
-consul agent -dev -http-port=8500 >/tmp/consul.log 2>&1 &
-sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: consul died"; cat /tmp/consul.log; exit 1; }
-
-rm -f /tmp/natmap_state.json
-lab-ops natmap daemon --socket $NATMAP_SOCKET --state /tmp/natmap_state.json --socket-group root >/tmp/natmap.log 2>&1 &
-sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: natmap died"; cat /tmp/natmap.log; exit 1; }
-
-curl -sf -X PUT "$CONSUL_HTTP_ADDR/v1/agent/service/register" \
+    let infra = infra_setup(false);
+    let body = r#"curl -sf -X PUT "$CONSUL_HTTP_ADDR/v1/agent/service/register" \
     -d '{ "ID": "fwd-stale-svc", "Name": "fwd-stale", "Address": "10.0.0.99", "Port": 36002, "Meta": { "forwarding": "true", "ext_ip": "203.0.113.50", "ext_ports": "36002" } }'
 
 lab-ops auto-discover forwarding-sync $CONSUL_HTTP_ADDR >/tmp/fwd1.log 2>&1
@@ -91,50 +60,28 @@ if [ "$COUNT" -ne 0 ]; then echo "FAIL: expected 0 stale DNAT rules, got $COUNT"
 echo "PASS: stale DNAT rules removed"
 kill %1 %2 2>/dev/null || true
 sleep 1
-"#.to_string();
-    let out = run(&script);
-    assert_pass(&out, "Phase 7 — stale rule cleanup");
+"#;
+    let script = format!("set -e\n{infra}{body}");
+    run(&script);
 }
 
 #[test]
 fn no_forwarding_services_sync_noop() {
-    let script = r#"
-set -e
-NATMAP_SOCKET=/tmp/natmap.sock
-CONSUL_HTTP_ADDR=http://127.0.0.1:8500
-
-consul agent -dev -http-port=8500 >/tmp/consul.log 2>&1 &
-sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: consul died"; cat /tmp/consul.log; exit 1; }
-
-rm -f /tmp/natmap_state.json
-lab-ops natmap daemon --socket $NATMAP_SOCKET --state /tmp/natmap_state.json --socket-group root >/tmp/natmap.log 2>&1 &
-sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: natmap died"; cat /tmp/natmap.log; exit 1; }
-
-lab-ops auto-discover forwarding-sync $CONSUL_HTTP_ADDR >/tmp/fwd.log 2>&1
+    let infra = infra_setup(false);
+    let body = r#"lab-ops auto-discover forwarding-sync $CONSUL_HTTP_ADDR >/tmp/fwd.log 2>&1
 
 echo "PASS: forwarding-sync noop with no services"
 kill %1 %2 2>/dev/null || true
 sleep 1
-"#.to_string();
-    let out = run(&script);
-    assert_pass(&out, "Phase 7 — noop forwarding sync");
+"#;
+    let script = format!("set -e\n{infra}{body}");
+    run(&script);
 }
 
 #[test]
 fn forwarding_group_multiple_ports() {
-    let script = r#"
-set -e
-NATMAP_SOCKET=/tmp/natmap.sock
-CONSUL_HTTP_ADDR=http://127.0.0.1:8500
-
-consul agent -dev -http-port=8500 >/tmp/consul.log 2>&1 &
-sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: consul died"; cat /tmp/consul.log; exit 1; }
-
-rm -f /tmp/natmap_state.json
-lab-ops natmap daemon --socket $NATMAP_SOCKET --state /tmp/natmap_state.json --socket-group root >/tmp/natmap.log 2>&1 &
-sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: natmap died"; cat /tmp/natmap.log; exit 1; }
-
-curl -sf -X PUT "$CONSUL_HTTP_ADDR/v1/agent/service/register" \
+    let infra = infra_setup(false);
+    let body = r#"curl -sf -X PUT "$CONSUL_HTTP_ADDR/v1/agent/service/register" \
     -d '{ "ID": "fwd-multi", "Name": "fwd-multi", "Address": "10.0.0.99", "Port": 36005, "Meta": { "forwarding": "true", "ext_ip": "203.0.113.60", "ext_ports": "36005,36006,36007" } }'
 
 lab-ops auto-discover forwarding-sync $CONSUL_HTTP_ADDR >/tmp/fwd.log 2>&1 || true
@@ -144,14 +91,15 @@ if ! iptables-save -t nat | grep -q "203.0.113.60"; then echo "FAIL: no DNAT rul
 echo "PASS: forwarding sync with multiple ports created DNAT rules"
 kill %1 %2 2>/dev/null || true
 sleep 1
-"#.to_string();
-    let out = run(&script);
-    assert_pass(&out, "Phase 7 — multiple ports forwarding");
+"#;
+    let script = format!("set -e\n{infra}{body}");
+    run(&script);
 }
 
 #[test]
 fn forwarding_static_port() {
     let cname = "it-fwd";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-d:
@@ -168,7 +116,7 @@ services:
     let script = format!(
         r#"{setup}
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-d" nginx:alpine
-sleep 4
+{registered}
 
 SVC=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq 'to_entries[] | select(.value.Service == "it-svc-d") | .value')
 PORT=$(echo "$SVC" | jq -r '.Port')
@@ -187,17 +135,18 @@ echo "PASS: static port 36000 with forwarding meta"
 {teardown}
 "#,
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
+        registered = wait_for_consul_service("it-svc-d", 30),
         teardown = teardown(&[cname]),
         cname = cname,
     );
 
-    let out = run(&script);
-    assert_pass(&out, "Test D — forwarding static port");
+    run(&script);
 }
 
 #[test]
 fn forwarding_hairpin_meta() {
     let cname = "it-hairpin";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-e:
@@ -215,7 +164,7 @@ services:
     let script = format!(
         r#"{setup}
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-e" nginx:alpine
-sleep 4
+{registered}
 
 SVC=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq 'to_entries[] | select(.value.Service == "it-svc-e") | .value')
 PORT=$(echo "$SVC" | jq -r '.Port')
@@ -228,29 +177,18 @@ echo "PASS: static port 36001 with hairpin meta"
 {teardown}
 "#,
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
+        registered = wait_for_consul_service("it-svc-e", 30),
         teardown = teardown(&[cname]),
         cname = cname,
     );
 
-    let out = run(&script);
-    assert_pass(&out, "Test E — forwarding hairpin");
+    run(&script);
 }
 
 #[test]
 fn forwarding_sync_preserve_src_ip_creates_lan_hairpin() {
-    let script = r#"
-set -e
-NATMAP_SOCKET=/tmp/natmap.sock
-CONSUL_HTTP_ADDR=http://127.0.0.1:8500
-
-consul agent -dev -http-port=8500 >/tmp/consul.log 2>&1 &
-sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: consul died"; cat /tmp/consul.log; exit 1; }
-
-rm -f /tmp/natmap_state.json
-lab-ops natmap daemon --socket $NATMAP_SOCKET --state /tmp/natmap_state.json --socket-group root >/tmp/natmap.log 2>&1 &
-sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: natmap died"; cat /tmp/natmap.log; exit 1; }
-
-curl -sf -X PUT "$CONSUL_HTTP_ADDR/v1/agent/service/register" \
+    let infra = infra_setup(false);
+    let body = r#"curl -sf -X PUT "$CONSUL_HTTP_ADDR/v1/agent/service/register" \
     -d '{ "ID": "fwd-hp-ps-svc", "Name": "fwd-hp-ps", "Address": "10.0.0.100", "Port": 36010, "Meta": { "forwarding": "true", "ext_ip": "203.0.113.52", "ext_ports": "36010", "hairpin": "true", "preserve_src_ip": "true" } }'
 
 lab-ops auto-discover forwarding-sync $CONSUL_HTTP_ADDR >/tmp/fwd.log 2>&1 || true
@@ -275,26 +213,15 @@ fi
 echo "PASS: preserve_src_ip creates LAN-limited hairpin MASQUERADE"
 kill %1 %2 2>/dev/null || true
 sleep 1
-"#.to_string();
-    let out = run(&script);
-    assert_pass(&out, "forwarding_sync_preserve_src_ip_creates_lan_hairpin");
+"#;
+    let script = format!("set -e\n{infra}{body}");
+    run(&script);
 }
 
 #[test]
 fn forwarding_sync_hairpin_creates_masquerade() {
-    let script = r#"
-set -e
-NATMAP_SOCKET=/tmp/natmap.sock
-CONSUL_HTTP_ADDR=http://127.0.0.1:8500
-
-consul agent -dev -http-port=8500 >/tmp/consul.log 2>&1 &
-sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: consul died"; cat /tmp/consul.log; exit 1; }
-
-rm -f /tmp/natmap_state.json
-lab-ops natmap daemon --socket $NATMAP_SOCKET --state /tmp/natmap_state.json --socket-group root >/tmp/natmap.log 2>&1 &
-sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: natmap died"; cat /tmp/natmap.log; exit 1; }
-
-curl -sf -X PUT "$CONSUL_HTTP_ADDR/v1/agent/service/register" \
+    let infra = infra_setup(false);
+    let body = r#"curl -sf -X PUT "$CONSUL_HTTP_ADDR/v1/agent/service/register" \
     -d '{ "ID": "fwd-hp-svc", "Name": "fwd-hp", "Address": "10.0.0.101", "Port": 36011, "Meta": { "forwarding": "true", "ext_ip": "203.0.113.53", "ext_ports": "36011", "hairpin": "true" } }'
 
 lab-ops auto-discover forwarding-sync $CONSUL_HTTP_ADDR >/tmp/fwd.log 2>&1 || true
@@ -312,7 +239,7 @@ fi
 echo "PASS: hairpin creates POSTROUTING MASQUERADE"
 kill %1 %2 2>/dev/null || true
 sleep 1
-"#.to_string();
-    let out = run(&script);
-    assert_pass(&out, "forwarding_sync_hairpin_creates_masquerade");
+"#;
+    let script = format!("set -e\n{infra}{body}");
+    run(&script);
 }

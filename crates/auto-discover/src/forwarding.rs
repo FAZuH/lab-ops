@@ -81,7 +81,6 @@ fn parse_group_proto(proto: &str) -> Result<TransportProtocol> {
 /// table on the proxy host. Returns the network address in CIDR notation
 /// (e.g. `"10.10.10.0/24"`).
 fn get_lan_cidr(ip: &str) -> Result<String> {
-    // Find the interface for this IP
     let route_out = Command::new("ip")
         .args(["-o", "route", "get", ip])
         .output()
@@ -99,7 +98,6 @@ fn get_lan_cidr(ip: &str) -> Result<String> {
         })?
         .to_string();
 
-    // Find the kernel subnet route on that interface (e.g. "10.10.10.0/24 dev vmbr1 ...")
     let link_out = Command::new("ip")
         .args([
             "-o", "route", "show", "dev", &dev, "proto", "kernel", "scope", "link",
@@ -503,8 +501,6 @@ mod tests {
     use tracing_test::traced_test;
 
     use super::*;
-
-    // --- parse_group_proto ---
 
     #[test]
     fn parse_group_proto_accepts_tcp() {
@@ -1009,8 +1005,6 @@ mod tests {
         }
     }
 
-    // --- stale_forwarding_rules tests ---
-
     #[test]
     fn stale_forwarding_rules_marks_multiport_dnat_when_not_desired() {
         let reported = vec![make_live_dnat("203.0.113.50", "10.0.0.99", &[80, 443])];
@@ -1056,8 +1050,6 @@ mod tests {
         assert!(stale_forwarding_rules(&reported, &desired).is_empty());
     }
 
-    // --- reconcile_forwarding_rules tests ---
-
     #[tokio::test]
     async fn reconcile_forwarding_rules_deletes_stale_with_real_attributes() {
         let natmap = FakeNatmap::new(vec![make_live_dnat(
@@ -1069,7 +1061,6 @@ mod tests {
         reconcile_forwarding_rules(&natmap, &groups).await.unwrap();
 
         let deletes = natmap.dnat_deletes.lock().unwrap();
-        // Delete-first for the desired group + one stale delete.
         assert_eq!(deletes.len(), 2);
         let stale = deletes.iter().find(|c| c.ext_ip == "203.0.113.50").unwrap();
         assert_eq!(stale.int_ip, "10.0.0.99");
@@ -1083,7 +1074,6 @@ mod tests {
         let groups = vec![make_group("198.51.100.7", "10.0.0.99", &[8080], false)];
         reconcile_forwarding_rules(&natmap, &groups).await.unwrap();
 
-        // Only the group's own delete-first delete; no stale delete.
         let deletes = natmap.dnat_deletes.lock().unwrap();
         assert_eq!(deletes.len(), 1);
         assert_eq!(deletes[0].ext_ip, "198.51.100.7");
@@ -1111,7 +1101,6 @@ mod tests {
         reconcile_forwarding_rules(&natmap, &groups).await.unwrap();
 
         assert!(logs_contain("failed to delete stale forwarding rule"));
-        // The sync must still apply the desired group despite the failed delete.
         assert_eq!(natmap.dnat_creates.lock().unwrap().len(), 1);
     }
 

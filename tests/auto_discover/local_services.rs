@@ -1,3 +1,5 @@
+//! Docker integration tests for `type: local` service discovery.
+
 use super::*;
 
 #[test]
@@ -30,8 +32,7 @@ sleep 1
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
         wait = wait_for_consul_service("it-local-app", 15),
     );
-    let out = run(&script);
-    assert_pass(&out, "local_service");
+    run(&script);
 }
 
 #[test]
@@ -75,13 +76,13 @@ sleep 1
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
         wait = wait_for_consul_service("it-local-fwd", 15),
     );
-    let out = run(&script);
-    assert_pass(&out, "local_forwarding_remote");
+    run(&script);
 }
 
 #[test]
 fn docker_reachability() {
     let cname = "it-reach";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-reach:
@@ -97,7 +98,7 @@ services:
     let script = format!(
         r#"{setup}
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-reach" nginx:alpine
-sleep 4
+{registered}
 
 PORT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-reach") | .value.Port')
 if [ -z "$PORT" ] || [ "$PORT" = "null" ]; then echo "FAIL: not registered with Consul" >&2; cat /tmp/discovery.log; exit 1; fi
@@ -122,16 +123,17 @@ echo "PASS: reachable, DNAT rules verified, container serving"
 {teardown}
 "#,
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
+        registered = wait_for_consul_service("it-svc-reach", 30),
         teardown = teardown(&[cname]),
         cname = cname,
     );
-    let out = run(&script);
-    assert_pass(&out, "docker_reachability");
+    run(&script);
 }
 
 #[test]
 fn docker_rproxy_and_forwarding() {
     let cname = "it-combo";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-combo:
@@ -153,7 +155,7 @@ services:
     let script = format!(
         r#"{setup}
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-combo" nginx:alpine
-sleep 4
+{registered}
 
 # Expect 2 Consul entries: 1 forwardremote + 1 rproxylocal (no merging)
 COUNT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq '[to_entries[] | select(.value.Service == "it-svc-combo")] | length')
@@ -187,10 +189,10 @@ echo "PASS: forwardremote + rproxylocal separate entries"
 {teardown}
 "#,
         setup = new_format_setup_with_defaults_ext(services_yaml, "", "", "--no-forwarding"),
+        registered = wait_for_service_count("it-svc-combo", 2, 30),
         teardown = teardown(&[cname]),
         cname = cname,
     );
 
-    let out = run(&script);
-    assert_pass(&out, "docker_rproxy_and_forwarding");
+    run(&script);
 }

@@ -10,7 +10,6 @@ use bollard::plugin::EndpointSettings;
 use bollard::plugin::PortBinding;
 use bollard::query_parameters::ListContainersOptionsBuilder;
 use color_eyre::eyre::Result;
-use comfy_table::Attribute;
 use comfy_table::Color;
 use comfy_table::Table;
 
@@ -30,25 +29,10 @@ pub async fn run(use_color: bool) -> Result<()> {
     let mut table = Table::new();
     let mut rows = Vec::new();
 
-    let headers: Vec<comfy_table::Cell> = if use_color {
-        vec![
-            comfy_table::Cell::new("Name")
-                .fg(Color::Cyan)
-                .add_attribute(Attribute::Bold),
-            comfy_table::Cell::new("Status")
-                .fg(Color::Cyan)
-                .add_attribute(Attribute::Bold),
-            comfy_table::Cell::new("IP")
-                .fg(Color::Cyan)
-                .add_attribute(Attribute::Bold),
-            comfy_table::Cell::new("Binds")
-                .fg(Color::Cyan)
-                .add_attribute(Attribute::Bold),
-        ]
-    } else {
-        vec!["Name".into(), "Status".into(), "IP".into(), "Binds".into()]
-    };
-    table.set_header(headers);
+    table.set_header(lab_ops_natmap::command::header(
+        &["Name", "Status", "IP", "Binds"],
+        use_color,
+    ));
 
     let docker = Docker::connect_with_local_defaults()?;
     let opt = Some(ListContainersOptionsBuilder::new().all(true).build());

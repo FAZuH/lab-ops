@@ -1,3 +1,5 @@
+//! CLI parsing and command dispatch for the auto-discover binary.
+
 use std::path::PathBuf;
 
 use bollard::query_parameters::EventsOptions;
@@ -26,6 +28,7 @@ pub struct Cli {
     pub command: Command,
 }
 
+/// The auto-discover subcommands.
 #[derive(Subcommand)]
 pub enum Command {
     /// Run all enabled daemon components (discovery, forwarding)
@@ -33,9 +36,6 @@ pub enum Command {
         /// Path to discovery.yaml
         #[arg(default_value = "/etc/auto-discover/discovery.yaml")]
         config: PathBuf,
-        /// State directory for port assignments
-        #[arg(long, default_value = "/var/lib/auto-discover")]
-        state_dir: PathBuf,
         /// Consul HTTP address
         #[arg(long, default_value = "http://127.0.0.1:8500")]
         consul_addr: String,
@@ -51,9 +51,6 @@ pub enum Command {
         /// Path to discovery.yaml
         #[arg(default_value = "/etc/auto-discover/discovery.yaml")]
         config: PathBuf,
-        /// State directory for port assignments
-        #[arg(long, default_value = "/var/lib/auto-discover")]
-        state_dir: PathBuf,
     },
     /// Validate the discovery configuration
     Check {
@@ -74,12 +71,11 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Daemon {
             config,
-            state_dir,
             consul_addr,
             no_discovery,
             no_forwarding,
-        } => run_unified_daemon(config, state_dir, consul_addr, no_discovery, no_forwarding).await,
-        Command::Sync { config, state_dir } => run_sync(config, state_dir).await,
+        } => run_unified_daemon(config, consul_addr, no_discovery, no_forwarding).await,
+        Command::Sync { config } => run_sync(config).await,
         Command::Check { config } => check_config(config),
         Command::ForwardingSync { consul_addr } => run_forwarding_sync(&consul_addr).await,
     }
@@ -92,7 +88,6 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
 /// disabled via the `no_*` flags.
 pub async fn run_unified_daemon(
     config_path: PathBuf,
-    state_dir: PathBuf,
     consul_addr: String,
     no_discovery: bool,
     no_forwarding: bool,
@@ -104,20 +99,17 @@ pub async fn run_unified_daemon(
     info!("Starting auto-discover daemon");
 
     if !no_discovery {
-        let config = config_path.clone();
-        let state = state_dir.clone();
         tokio::spawn(async move {
             info!("Discovery component started");
-            run_daemon(config, state).await;
+            run_daemon(config_path).await;
             info!("Discovery component exited");
         });
     }
 
     if !no_forwarding {
-        let addr = consul_addr.clone();
         tokio::spawn(async move {
             info!("Forwarding component started");
-            run_forwarding_daemon(addr).await;
+            run_forwarding_daemon(consul_addr).await;
             info!("Forwarding component exited");
         });
     }
@@ -127,11 +119,10 @@ pub async fn run_unified_daemon(
     Ok(())
 }
 
-async fn run_daemon(config_path: PathBuf, state_dir: PathBuf) {
+async fn run_daemon(config_path: PathBuf) {
     info!("Config: {}", config_path.display());
-    info!("State dir: {}", state_dir.display());
 
-    let daemon = DiscoveryDaemon::new(config_path.clone(), state_dir);
+    let daemon = DiscoveryDaemon::new(config_path.clone());
 
     let mut retries = 0u32;
     loop {
@@ -236,9 +227,9 @@ async fn run_daemon(config_path: PathBuf, state_dir: PathBuf) {
 }
 
 /// Run a single discovery + forwarding sync pass, then exit.
-pub async fn run_sync(config_path: PathBuf, state_dir: PathBuf) -> Result<()> {
+pub async fn run_sync(config_path: PathBuf) -> Result<()> {
     info!("Running sync...");
-    let daemon = DiscoveryDaemon::new(config_path, state_dir);
+    let daemon = DiscoveryDaemon::new(config_path);
     match daemon.sync().await {
         Ok(()) => info!("Sync completed successfully"),
         Err(e) => bail!("sync failed: {e}"),

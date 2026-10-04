@@ -19,9 +19,7 @@ use tracing::info;
 
 use crate::protocol::TransportProtocol;
 
-// ---------------------------------------------------------------------------
-// Low-level socket utilities
-// ---------------------------------------------------------------------------
+// --- Low-level socket utilities ---
 
 /// Creates and configures a `Socket` for `addr` with `SO_REUSEADDR`
 /// and the appropriate `IP_FREEBIND` option.
@@ -49,9 +47,7 @@ pub fn create_freebind_socket(addr: &SocketAddr, socket_type: Type) -> std::io::
     Ok(socket)
 }
 
-// ---------------------------------------------------------------------------
-// ReservedSocket — protocol-aware port reservation holder
-// ---------------------------------------------------------------------------
+// --- ReservedSocket ---
 
 /// A bound socket held as a port reservation.
 ///
@@ -63,10 +59,6 @@ enum ReservedSocket {
     Udp(UdpSocket),
 }
 
-// ---------------------------------------------------------------------------
-// PortAllocator — runtime TCP/UDP pre-bind reservation
-// ---------------------------------------------------------------------------
-
 /// A concurrency-safe port reservation system backed by protocol-aware
 /// socket pre-bind.
 ///
@@ -77,13 +69,8 @@ pub struct PortAllocator {
     sockets: RwLock<HashMap<SocketAddr, ReservedSocket>>,
 }
 
-impl Default for PortAllocator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl PortAllocator {
+    /// Creates an allocator holding no reservations.
     pub fn new() -> Self {
         Self {
             sockets: RwLock::new(HashMap::new()),
@@ -98,11 +85,9 @@ impl PortAllocator {
     ///
     /// Returns an error if the port is already bound by another process.
     pub async fn allocate(&self, addr: SocketAddr, proto: TransportProtocol) -> Result<()> {
-        // `deallocate` releases by dropping the socket, and the port is not
-        // always bindable again on the very next attempt — the fd outlives the
-        // map entry by a moment. Releasing a stale mapping and immediately
-        // re-allocating the same port is a real daemon path (a recreated
-        // container keeps its host port), so retry briefly rather than fail.
+        // A released port is not always immediately bindable: the fd outlives
+        // the map entry by a moment. A recreated container keeps its host port,
+        // so retry briefly rather than fail the whole allocation.
         const ATTEMPTS: u32 = 25;
         const BACKOFF: std::time::Duration = std::time::Duration::from_millis(2);
         let mut last = None;
@@ -196,27 +181,51 @@ impl PortAllocator {
 
 #[cfg(test)]
 mod tests {
+    use std::net::IpAddr;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicU16;
+    use std::sync::atomic::Ordering;
 
     use super::*;
 
+    /// Hands out `n` distinct host ports for a test to bind.
+    ///
+    /// A reservation is a real bind, so a hardcoded port collides with whatever
+    /// else holds it — a concurrent run of this binary, a service on the box, or
+    /// another test binary's band. Counted up from a per-process band, so each
+    /// test's ports are distinct by construction and two concurrent runs of this
+    /// binary land in different bands.
+    ///
+    /// The band starts at 12000, below the daemon's own `allocate_free_port`
+    /// scan (32768..=61000) and below `lab-ops_natmap`'s test band (21000), so
+    /// neither can take a port handed out here.
+    fn test_ports(n: usize) -> Vec<u16> {
+        static NEXT: AtomicU16 = AtomicU16::new(0);
+        let base = 12000 + (std::process::id() as u16 % 400) * 8;
+        (0..n)
+            .map(|_| base + NEXT.fetch_add(1, Ordering::Relaxed))
+            .collect()
+    }
+
+    fn loopback(port: u16) -> SocketAddr {
+        SocketAddr::new(IpAddr::from([127, 0, 0, 1]), port)
+    }
+
     #[tokio::test]
     async fn released_port_is_immediately_reallocatable() {
-        // Load check, not a reproduction. The rebind this covers failed
-        // intermittently only in the full parallel `lab-ops_natmap --lib`
-        // suite (5 failures in 40 runs) and never in this binary, so it cannot
-        // be turned into a test that fails without the retry in `allocate`.
-        // What this does guard: 2560 rebinds under concurrency, plus — in
-        // `allocate_fails_for_port_held_outside_the_allocator` — that the
-        // retry does not paper over a genuine conflict.
+        // Load check, not a reproduction: the rebind it covers failed only in
+        // the full parallel `lab-ops_natmap --lib` suite, never in this binary.
+        // It guards 2560 concurrent rebinds, and — with the test below — that
+        // the retry does not paper over a genuine conflict.
+        let ports = test_ports(64 * 40);
         let allocator = Arc::new(PortAllocator::new());
         let mut tasks = Vec::new();
-        for t in 0..64u16 {
+        for chunk in ports.chunks(40) {
             let allocator = allocator.clone();
+            let chunk = chunk.to_vec();
             tasks.push(tokio::spawn(async move {
-                for i in 0..40u16 {
-                    let addr: SocketAddr =
-                        format!("127.0.0.1:{}", 21000 + t * 40 + i).parse().unwrap();
+                for port in chunk {
+                    let addr = loopback(port);
                     allocator
                         .allocate(addr, TransportProtocol::Tcp)
                         .await
@@ -238,7 +247,7 @@ mod tests {
     async fn allocate_fails_for_port_held_outside_the_allocator() {
         // The retry must not turn a genuine conflict into a success.
         let allocator = PortAllocator::new();
-        let addr: SocketAddr = "127.0.0.1:21999".parse().unwrap();
+        let addr = loopback(test_ports(1)[0]);
         let held = std::net::TcpListener::bind(addr).unwrap();
         assert!(
             allocator
@@ -252,7 +261,7 @@ mod tests {
     #[tokio::test]
     async fn is_allocated_returns_true_for_reserved_port() {
         let allocator = PortAllocator::new();
-        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let addr = loopback(test_ports(1)[0]);
         allocator
             .allocate(addr, TransportProtocol::Tcp)
             .await
@@ -263,7 +272,7 @@ mod tests {
     #[tokio::test]
     async fn is_allocated_returns_false_after_release() {
         let allocator = PortAllocator::new();
-        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let addr = loopback(test_ports(1)[0]);
         allocator
             .allocate(addr, TransportProtocol::Tcp)
             .await
@@ -275,14 +284,14 @@ mod tests {
     #[tokio::test]
     async fn is_allocated_returns_false_for_unreserved_port() {
         let allocator = PortAllocator::new();
-        let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        let addr = loopback(test_ports(1)[0]);
         assert!(!allocator.is_allocated(addr).await);
     }
 
     #[tokio::test]
     async fn allocate_udp_binds_dgram() {
         let allocator = PortAllocator::new();
-        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let addr = loopback(test_ports(1)[0]);
         allocator
             .allocate(addr, TransportProtocol::Udp)
             .await

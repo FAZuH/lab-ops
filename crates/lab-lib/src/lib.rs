@@ -3,19 +3,17 @@
 //! Provides the canonical [`TransportProtocol`] enum, Docker client helpers,
 //! and shared constants used by both `natmap` and `auto-discover`.
 
+/// Shared constants: the natmap socket path and the `lab-ops` binary path.
 pub mod consts;
+/// Docker client helpers, container inspection, and the shared container shapes.
 pub mod docker;
+/// Port reservation ([`PortAllocator`]) and freebind socket creation.
 pub mod port;
+/// The canonical [`TransportProtocol`] enum shared by every crate.
 pub mod protocol;
 
+/// The natmap socket path, re-exported so callers need only this crate root.
 pub use consts::NATMAP_SOCKET;
-pub use docker::ContainerInfo;
-pub use docker::ContainerNetwork;
-pub use docker::DockerClient;
-pub use docker::PortMapping;
-pub use docker::connect;
-pub use docker::parse_container_inspect;
-pub use docker::parse_port_mappings;
-pub use docker::trim_container_name;
-pub use port::PortAllocator;
+/// The canonical [`TransportProtocol`], re-exported so callers need only this
+/// crate root.
 pub use protocol::TransportProtocol;
