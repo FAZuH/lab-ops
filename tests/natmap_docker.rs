@@ -6,9 +6,12 @@ mod natmap_docker {
     use std::path::Path;
     use std::path::PathBuf;
     use std::process::Command;
+    use std::sync::Mutex;
     use std::sync::Once;
 
     static INIT: Once = Once::new();
+    // Docker suites share the host daemon state; intra-suite parallel bodies flake, so serialize.
+    static DOCKER_LOCK: Mutex<()> = Mutex::new(());
 
     fn setup_docker_image() -> &'static str {
         let image_name = "lab-ops-natmap-test:latest";
@@ -58,6 +61,7 @@ mod natmap_docker {
     }
 
     fn run_in_docker(args: &[&str]) -> String {
+        let _g = DOCKER_LOCK.lock().unwrap();
         let image = setup_docker_image();
         let binary_path = env!("CARGO_BIN_EXE_lab-ops");
         let mut cmd = Command::new("docker");

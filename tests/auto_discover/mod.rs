@@ -14,9 +14,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Mutex;
 use std::sync::Once;
 
 static INIT: Once = Once::new();
+// Docker suites share the host daemon state; intra-suite parallel bodies flake, so serialize.
+static DOCKER_LOCK: Mutex<()> = Mutex::new(());
 
 /// A test that hits `exit 1` never reaches the `teardown()` fragment appended to
 /// its script, so its `it-*` container survives on the host and the next run dies
@@ -107,6 +110,7 @@ fn nix_wrapper(label: &str) -> Option<PathBuf> {
 /// the exit code already carries the verdict; the marker catches the script
 /// that exits zero without having verified anything.
 pub(crate) fn run(script: &str) {
+    let _g = DOCKER_LOCK.lock().unwrap();
     let image = setup_image();
     let binary_path = env!("CARGO_BIN_EXE_lab-ops");
     let mut cmd = Command::new("docker");
