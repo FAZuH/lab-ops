@@ -20,7 +20,6 @@ pub fn install_systemd(binary: &str, group: &str) -> Result<()> {
     add_user_to_grp(group);
     write_service(binary, group)?;
 
-    // Reload systemd
     println!("Reloading systemd...");
     Command::new("systemctl").arg("daemon-reload").status()?;
 
@@ -55,7 +54,6 @@ fn install_binary(binary: &str) -> Result<()> {
     Ok(())
 }
 
-/// Create group if not exists
 fn create_group(group: &str) -> Result<()> {
     let group_exists = Command::new("getent")
         .args(["group", group])
@@ -77,7 +75,6 @@ fn create_group(group: &str) -> Result<()> {
     Ok(())
 }
 
-/// Add current user to group
 fn add_user_to_grp(group: &str) {
     if let Ok(user) = std::env::var("USER")
         && !user.is_empty()
@@ -111,7 +108,6 @@ fn write_service(binary: &str, group: &str) -> Result<()> {
     Ok(())
 }
 
-/// Enable and start
 fn enable_service() -> Result<()> {
     println!("Enabling natmap service...");
     let status = Command::new("systemctl")

@@ -1,8 +1,11 @@
+//! Dynamic shell-completion sources for the natmap CLI.
+
 use std::ffi::OsStr;
 use std::process::Command;
 
 use clap_complete::engine::CompletionCandidate;
 
+/// Completes a container ID or name from the running Docker containers.
 pub fn complete_container_id(current: &OsStr) -> Vec<CompletionCandidate> {
     let Ok(output) = Command::new("docker")
         .args(["ps", "--format", "{{.Names}}\t{{.ID}}"])

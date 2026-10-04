@@ -1,30 +1,26 @@
+//! Docker integration tests for daemon recovery from an invalid config.
+
 use super::*;
 
 #[test]
 fn invalid_yaml_config_daemon_warns_not_crash() {
-    let script = r#"
-set -e
-CONSUL_HTTP_ADDR=http://127.0.0.1:8500
+    let script = format!(
+        r#"{infra}
+echo "invalid: yaml: {{broken" > /tmp/bad-config.yaml
 
-consul agent -dev -http-port=8500 >/tmp/consul.log 2>&1 &
-sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: consul died"; cat /tmp/consul.log; exit 1; }
-
-echo "invalid: yaml: {broken" > /tmp/bad-config.yaml
-
-mkdir -p /tmp/state
-lab-ops auto-discover sync /tmp/bad-config.yaml --state-dir /tmp/state 2>/tmp/sync-err.log && { echo "FAIL: sync should have failed"; exit 1; } || true
+lab-ops auto-discover sync /tmp/bad-config.yaml 2>/tmp/sync-err.log && {{ echo "FAIL: sync should have failed"; exit 1; }} || true
 
 echo "PASS: sync correctly rejected invalid YAML"
-kill %1 2>/dev/null || true
-sleep 1
-"#.to_string();
-    let out = run(&script);
-    assert_pass(&out, "Phase 3 — invalid YAML rejected");
+"#,
+        infra = infra_setup(false),
+    );
+    run(&script);
 }
 
 #[test]
 fn restart_auto_discover_picks_up_missed_containers() {
     let cname = "it-restart-ad";
+    let _guard = ContainerGuard::new(&[cname]);
     let services_yaml = r#"
 services:
   it-svc-restart:
@@ -37,63 +33,34 @@ services:
       domains:
       - it-svc-restart.test.local"#;
     let script = format!(
-        r#"
-set -e
-export NATMAP_SOCKET=/tmp/natmap.sock
-export CONSUL_HTTP_ADDR=http://127.0.0.1:8500
-
-consul agent -dev -http-port=8500 -pid-file=/tmp/consul.pid >/tmp/consul.log 2>&1 &
-sleep 2
-if ! kill -0 $! 2>/dev/null; then echo "FAIL: consul died" >&2; cat /tmp/consul.log; exit 1; fi
-
-ip link add dummy0 type dummy 2>/dev/null || true
-ip addr add 10.99.99.1/24 dev dummy0 2>/dev/null || true
-ip link set dummy0 up
-
-rm -f /tmp/natmap_state.json
-lab-ops natmap daemon --socket /tmp/natmap.sock --state /tmp/natmap_state.json --socket-group root >/tmp/natmap.log 2>&1 &
-sleep 2
-if ! kill -0 $! 2>/dev/null; then echo "FAIL: natmap daemon died" >&2; cat /tmp/natmap.log; exit 1; fi
-
-cat > /tmp/discovery.yaml <<'YAMLEOF'
-node:
-  name: int-test-node
-{services_yaml}
-YAMLEOF
-
+        r#"{setup}
 docker run -d --name {cname} -l "com.docker.compose.project=it-svc-restart" nginx:alpine
-sleep 4
+{before}
 
-SVC_BEFORE=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-restart") | .value.Port // empty')
-if [ -n "$SVC_BEFORE" ]; then echo "FAIL: service registered before daemon start" >&2; exit 1; fi
-
-lab-ops auto-discover daemon /tmp/discovery.yaml \
-    --state-dir /tmp/state \
-    --no-forwarding \
-    --consul-addr http://127.0.0.1:8500 \
-    >/tmp/discovery.log 2>&1 &
-sleep 5
-
-SVC_AFTER=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-restart") | .value.Port // empty')
-if [ -z "$SVC_AFTER" ] || [ "$SVC_AFTER" = "null" ]; then
-    echo "FAIL: service not registered after daemon start" >&2
-    cat /tmp/discovery.log
-    exit 1
-fi
-
-echo "PASS: daemon start picked up existing container"
+{daemon}
+{after}
+echo "PASS: container started while the daemon was down is picked up on restart"
 docker rm -f {cname} 2>/dev/null || true
-kill %1 %2 %3 2>/dev/null || true
-sleep 1
 "#,
+        setup = base_setup(services_yaml, true),
+        // Nothing may register before the daemon exists, so poll that the
+        // container is up and Consul is answering, then assert the absence.
+        before = poll_until(
+            "docker inspect -f '{{.State.Running}}' it-restart-ad 2>/dev/null | grep true",
+            "RUNNING",
+            20,
+            "container never reached the running state",
+        ) + &assert_absent("it-svc-restart", "registered before the daemon started"),
+        daemon = start_daemon("--no-forwarding"),
+        after = wait_for_consul_service("it-svc-restart", 30),
+        cname = cname,
     );
-    let out = run(&script);
-    assert_pass(&out, "Phase 2 — restart auto-discover");
+    run(&script);
 }
 
 #[test]
 fn restart_natmap_new_container_registered_after_recovery() {
-    let cname = "it-restart-nm";
+    let _guard = ContainerGuard::new(&["it-nmrestart-a", "it-nmrestart-b", "it-nmrestart-c"]);
     let services_yaml = r#"
 services:
   it-svc-nmrestart:
@@ -106,96 +73,49 @@ services:
       domains:
       - it-svc-nmrestart.test.local"#;
     let script = format!(
-        r#"
-set -e
-export NATMAP_SOCKET=/tmp/natmap.sock
-export CONSUL_HTTP_ADDR=http://127.0.0.1:8500
-
-consul agent -dev -http-port=8500 -pid-file=/tmp/consul.pid >/tmp/consul.log 2>&1 &
-sleep 2
-if ! kill -0 $! 2>/dev/null; then echo "FAIL: consul died" >&2; cat /tmp/consul.log; exit 1; fi
-
-ip link add dummy0 type dummy 2>/dev/null || true
-ip addr add 10.99.99.1/24 dev dummy0 2>/dev/null || true
-ip link set dummy0 up
-
-rm -f /tmp/natmap_state.json
-lab-ops natmap daemon --socket /tmp/natmap.sock --state /tmp/natmap_state.json --socket-group root >/tmp/natmap.log 2>&1 &
-NATMAP_PID=$!
-sleep 2
-if ! kill -0 $NATMAP_PID 2>/dev/null; then echo "FAIL: natmap daemon died" >&2; cat /tmp/natmap.log; exit 1; fi
-
-cat > /tmp/discovery.yaml <<'YAMLEOF'
-node:
-  name: int-test-node
-{services_yaml}
-YAMLEOF
-
-lab-ops auto-discover daemon /tmp/discovery.yaml \
-    --state-dir /tmp/state \
-    --no-forwarding \
-    --consul-addr http://127.0.0.1:8500 \
-    >/tmp/discovery.log 2>&1 &
-sleep 2
-if ! kill -0 $! 2>/dev/null; then echo "FAIL: auto-discover daemon died" >&2; cat /tmp/discovery.log; exit 1; fi
-
+        r#"{setup}
+{daemon}
 docker run -d --name it-nmrestart-a -l "com.docker.compose.project=it-svc-nmrestart" nginx:alpine
-sleep 4
-A=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-nmrestart") | .value.Port // empty')
-if [ -z "$A" ] || [ "$A" = "null" ]; then echo "FAIL: first container not registered" >&2; exit 1; fi
-echo "First container OK: port=$A"
+{first}
 
-kill $NATMAP_PID 2>/dev/null || true
-sleep 2
-
+{natmap_down}
 docker run -d --name it-nmrestart-b -l "com.docker.compose.project=it-svc-nmrestart" nginx:alpine
-sleep 4
-B=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq '[to_entries[] | select(.value.Service == "it-svc-nmrestart")] | length')
-if [ "$B" -gt 1 ]; then echo "FAIL: second container registered while natmap was down" >&2; exit 1; fi
-echo "Second container correctly not registered (natmap was down)"
+{down}
 
 rm -f /tmp/natmap_state.json
 lab-ops natmap daemon --socket /tmp/natmap.sock --state /tmp/natmap_state.json --socket-group root >/tmp/natmap2.log 2>&1 &
-sleep 3
+NATMAP_PID=$!
+for i in $(seq 1 40); do [ -S /tmp/natmap.sock ] && break; sleep 0.2; done
+if ! [ -S /tmp/natmap.sock ]; then echo "FAIL: natmap did not come back" >&2; cat /tmp/natmap2.log; exit 1; fi
 
 docker rm -f it-nmrestart-b 2>/dev/null || true
-sleep 1
-
-docker run -d --name {cname} -l "com.docker.compose.project=it-svc-nmrestart" nginx:alpine
-sleep 5
-C=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-nmrestart") | .value.Port // empty' | wc -l)
-if [ "$C" -lt 1 ]; then echo "FAIL: no services registered after natmap recovery" >&2; exit 1; fi
+docker run -d --name it-nmrestart-c -l "com.docker.compose.project=it-svc-nmrestart" nginx:alpine
+{recovered}
 
 echo "PASS: new container registered after natmap recovery"
-docker rm -f {cname} it-nmrestart-a 2>/dev/null || true
-kill %1 %2 %3 %4 2>/dev/null || true
-sleep 1
+docker rm -f it-nmrestart-a it-nmrestart-c 2>/dev/null || true
 "#,
+        setup = base_setup(services_yaml, true),
+        daemon = start_daemon("--no-forwarding"),
+        first = wait_for_consul_service("it-svc-nmrestart", 30),
+        // Container A is still registered, so the bound is one: B must not add
+        // a second entry while natmap is down.
+        natmap_down = stop_natmap(),
+        down = poll_until(
+            "docker inspect -f '{{.State.Running}}' it-nmrestart-b 2>/dev/null | grep true",
+            "RUNNING",
+            20,
+            "second container never reached the running state",
+        ) + &assert_count_at_most("it-svc-nmrestart", 1, "while natmap was down"),
+        recovered = wait_for_consul_service("it-svc-nmrestart", 30),
     );
-    let out = run(&script);
-    assert_pass(&out, "Phase 2 — restart natmap");
+    run(&script);
 }
 
 #[test]
 fn add_service_to_config_picked_up_on_sync() {
-    let script = r#"
-set -e
-NATMAP_SOCKET=/tmp/natmap.sock
-CONSUL_HTTP_ADDR=http://127.0.0.1:8500
-
-consul agent -dev -http-port=8500 >/tmp/consul.log 2>&1 &
-sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: consul died"; cat /tmp/consul.log; exit 1; }
-
-rm -f /tmp/natmap_state.json
-lab-ops natmap daemon --socket $NATMAP_SOCKET --state /tmp/natmap_state.json --socket-group root >/tmp/natmap.log 2>&1 &
-sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: natmap died"; cat /tmp/natmap.log; exit 1; }
-
-
-
-cat > /tmp/discovery.yaml <<'YAMLEOF'
-node:
-  name: int-test-node
-
+    let _guard = ContainerGuard::new(&["it-cfg-a", "it-cfg-b"]);
+    let first_yaml = r#"
 services:
   it-svc-cfg-a:
     type: docker
@@ -205,25 +125,8 @@ services:
     - port: 80
       template: HTTP_PROXY
       domains:
-      - it-svc-cfg-a.test.local
-YAMLEOF
-
-lab-ops auto-discover daemon /tmp/discovery.yaml --state-dir /tmp/state --no-forwarding --consul-addr $CONSUL_HTTP_ADDR >/tmp/discovery.log 2>&1 &
-sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: daemon died"; cat /tmp/discovery.log; exit 1; }
-
-docker run -d --name it-cfg-a -l "com.docker.compose.project=it-svc-cfg-a" nginx:alpine
-sleep 4
-A=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-cfg-a") | .value.Port // empty')
-if [ -z "$A" ]; then echo "FAIL: service A not registered" >&2; exit 1; fi
-
-kill %3 2>/dev/null || true
-lab-ops natmap --socket $NATMAP_SOCKET clear >/dev/null 2>&1 || true
-sleep 1
-
-cat > /tmp/discovery.yaml <<'YAMLEOF'
-node:
-  name: int-test-node
-
+      - it-svc-cfg-a.test.local"#;
+    let second_yaml = r#"
 services:
   it-svc-cfg-a:
     type: docker
@@ -242,114 +145,72 @@ services:
     - port: 80
       template: HTTP_PROXY
       domains:
-      - it-svc-cfg-b.test.local
-YAMLEOF
+      - it-svc-cfg-b.test.local"#;
+    let script = format!(
+        r#"{setup}
+docker run -d --name it-cfg-a -l "com.docker.compose.project=it-svc-cfg-a" nginx:alpine
+{first}
 
-lab-ops auto-discover sync /tmp/discovery.yaml --state-dir /tmp/state >/tmp/sync.log 2>&1
-
+{rewrite}
 docker run -d --name it-cfg-b -l "com.docker.compose.project=it-svc-cfg-b" nginx:alpine
-sleep 5
-
-COUNT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq '[to_entries[] | select(.value.Service == "it-svc-cfg-a" or .value.Service == "it-svc-cfg-b")] | length')
-if [ "$COUNT" -lt 2 ]; then echo "FAIL: expected 2 services, got $COUNT" >&2; cat /tmp/sync.log; exit 1; fi
+{second}
 
 echo "PASS: new service registered after config change"
 docker rm -f it-cfg-a it-cfg-b 2>/dev/null || true
-kill %1 %2 %3 %4 2>/dev/null || true
-sleep 1
-"#.to_string();
-    let out = run(&script);
-    assert_pass(&out, "Phase 3 — add service to config");
+"#,
+        setup = new_format_setup(first_yaml, ""),
+        first = wait_for_consul_service("it-svc-cfg-a", 30),
+        rewrite = write_discovery_config(&format!("node:\n  name: int-test-node\n{second_yaml}")),
+        second = wait_for_consul_service("it-svc-cfg-b", 30),
+    );
+    run(&script);
 }
 
+/// `remove_service_from_config_stale_deregistered` and
+/// `remove_all_services_clean_slate` were the same test under two names: both
+/// emptied `services:`, ran `sync`, and asserted nothing stale remained. Merged
+/// here as the config-emptied case.
 #[test]
-fn remove_service_from_config_stale_deregistered() {
-    let script = r#"
-set -e
-NATMAP_SOCKET=/tmp/natmap.sock
-CONSUL_HTTP_ADDR=http://127.0.0.1:8500
-
-consul agent -dev -http-port=8500 >/tmp/consul.log 2>&1 &
-sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: consul died"; cat /tmp/consul.log; exit 1; }
-
-rm -f /tmp/natmap_state.json
-lab-ops natmap daemon --socket $NATMAP_SOCKET --state /tmp/natmap_state.json --socket-group root >/tmp/natmap.log 2>&1 &
-sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: natmap died"; cat /tmp/natmap.log; exit 1; }
-
-
-
-cat > /tmp/discovery.yaml <<'YAMLEOF'
-node:
-  name: int-test-node
-
+fn remove_all_services_clean_slate() {
+    let _guard = ContainerGuard::new(&["it-cfg-all"]);
+    let services_yaml = r#"
 services:
-  it-svc-cfg-rm:
+  it-cfg-all-svc:
     type: docker
     match:
-      project: it-svc-cfg-rm
+      project: it-cfg-all-svc
     rproxylocal:
     - port: 80
       template: HTTP_PROXY
       domains:
-      - it-svc-cfg-rm.test.local
-YAMLEOF
+      - it-cfg-all.test.local"#;
+    let script = format!(
+        r#"{setup}
+docker run -d --name it-cfg-all -l "com.docker.compose.project=it-cfg-all-svc" nginx:alpine
+{first}
 
-lab-ops auto-discover daemon /tmp/discovery.yaml --state-dir /tmp/state --no-forwarding --consul-addr $CONSUL_HTTP_ADDR >/tmp/discovery.log 2>&1 &
-sleep 2; kill -0 $! 2>/dev/null || { echo "FAIL: daemon died"; cat /tmp/discovery.log; exit 1; }
+{stop}
+{empty}
+{sync}
+{gone}
 
-docker run -d --name it-cfg-rm -l "com.docker.compose.project=it-svc-cfg-rm" nginx:alpine
-sleep 4
-A=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-cfg-rm") | .value.Port // empty')
-if [ -z "$A" ]; then echo "FAIL: service not registered initially" >&2; exit 1; fi
-
-kill %3 2>/dev/null || true
-lab-ops natmap --socket $NATMAP_SOCKET clear >/dev/null 2>&1 || true
-docker rm -f it-cfg-rm 2>/dev/null || true
-sleep 2
-
-cat > /tmp/discovery.yaml <<'YAMLEOF'
-services: {}
-YAMLEOF
-
-lab-ops auto-discover sync /tmp/discovery.yaml --state-dir /tmp/state >/tmp/sync.log 2>&1 || true
-
-REMAINING=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Meta.server_name == "int-test-node") | .key // empty')
-if [ -n "$REMAINING" ]; then echo "FAIL: stale service still registered: $REMAINING" >&2; exit 1; fi
-
-echo "PASS: service deregistered after empty config"
-kill %1 %2 %3 2>/dev/null || true
-sleep 1
-"#.to_string();
-    let out = run(&script);
-    assert_pass(&out, "Phase 3 — remove service from config");
+echo "PASS: all services deregistered after emptying the config"
+docker rm -f it-cfg-all 2>/dev/null || true
+"#,
+        setup = new_format_setup(services_yaml, ""),
+        first = wait_for_consul_service("it-cfg-all-svc", 30),
+        stop = stop_daemon(),
+        empty = write_discovery_config("node:\n  name: int-test-node\nservices: {}"),
+        sync = sync_once(),
+        gone = assert_node_registrations_gone(),
+    );
+    run(&script);
 }
 
 #[test]
 fn change_bind_ip_service_reregisters() {
-    let cname = "it-cfg-ip";
-    let script = format!(
-        r#"
-set -e
-NATMAP_SOCKET=/tmp/natmap.sock
-CONSUL_HTTP_ADDR=http://127.0.0.1:8500
-
-consul agent -dev -http-port=8500 >/tmp/consul.log 2>&1 &
-sleep 2; kill -0 $! 2>/dev/null || {{ echo "FAIL: consul died"; cat /tmp/consul.log; exit 1; }}
-
-ip link add dummy0 type dummy 2>/dev/null || true
-ip addr add 10.99.99.1/24 dev dummy0 2>/dev/null || true
-ip link set dummy0 up
-
-rm -f /tmp/natmap_state.json
-lab-ops natmap daemon --socket $NATMAP_SOCKET --state /tmp/natmap_state.json --socket-group root >/tmp/natmap.log 2>&1 &
-sleep 2; kill -0 $! 2>/dev/null || {{ echo "FAIL: natmap died"; cat /tmp/natmap.log; exit 1; }}
-
-
-
-cat > /tmp/discovery.yaml <<'YAMLEOF'
-node:
-  name: int-test-node
-
+    let _guard = ContainerGuard::new(&["it-cfg-ip"]);
+    let first_yaml = r#"
 services:
   it-cfg-ip-svc:
     type: docker
@@ -360,25 +221,8 @@ services:
     - port: 80
       template: HTTP_PROXY
       domains:
-      - it-cfg-ip.test.local
-YAMLEOF
-
-lab-ops auto-discover daemon /tmp/discovery.yaml --state-dir /tmp/state --no-forwarding --consul-addr $CONSUL_HTTP_ADDR >/tmp/discovery.log 2>&1 &
-sleep 2; kill -0 $! 2>/dev/null || {{ echo "FAIL: daemon died"; cat /tmp/discovery.log; exit 1; }}
-
-docker run -d --name {cname} -l "com.docker.compose.project=it-cfg-ip-svc" nginx:alpine
-sleep 4
-ADDR1=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-cfg-ip-svc") | .value.Address')
-if [ "$ADDR1" != "127.0.0.1" ]; then echo "FAIL: expected Address=127.0.0.1, got $ADDR1" >&2; exit 1; fi
-
-kill %3 2>/dev/null || true
-lab-ops natmap --socket $NATMAP_SOCKET clear >/dev/null 2>&1 || true
-sleep 1
-
-cat > /tmp/discovery.yaml <<'YAMLEOF'
-node:
-  name: int-test-node
-
+      - it-cfg-ip.test.local"#;
+    let second_yaml = r#"
 services:
   it-cfg-ip-svc:
     type: docker
@@ -389,87 +233,42 @@ services:
     - port: 80
       template: HTTP_PROXY
       domains:
-      - it-cfg-ip.test.local
-YAMLEOF
-
-lab-ops auto-discover sync /tmp/discovery.yaml --state-dir /tmp/state >/tmp/sync.log 2>&1
-
-ADDR2=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-cfg-ip-svc") | .value.Address')
-if [ "$ADDR2" != "10.99.99.1" ]; then echo "FAIL: expected Address=10.99.99.1 after change, got $ADDR2" >&2; exit 1; fi
-
-echo "PASS: bind_ip updated from 127.0.0.1 to $ADDR2"
-docker rm -f {cname} 2>/dev/null || true
-kill %1 %2 %3 %4 2>/dev/null || true
-sleep 1
-"#,
-    );
-    let out = run(&script);
-    assert_pass(&out, "Phase 3 — change bind_ip");
-}
-
-#[test]
-fn remove_all_services_clean_slate() {
-    let cname = "it-cfg-all";
+      - it-cfg-ip.test.local"#;
     let script = format!(
-        r#"
-set -e
-NATMAP_SOCKET=/tmp/natmap.sock
-CONSUL_HTTP_ADDR=http://127.0.0.1:8500
+        r#"{setup}
+docker run -d --name it-cfg-ip -l "com.docker.compose.project=it-cfg-ip-svc" nginx:alpine
+{first}
 
-consul agent -dev -http-port=8500 >/tmp/consul.log 2>&1 &
-sleep 2; kill -0 $! 2>/dev/null || {{ echo "FAIL: consul died"; cat /tmp/consul.log; exit 1; }}
+{stop}
+{rewrite}
+{sync}
+{second}
 
-rm -f /tmp/natmap_state.json
-lab-ops natmap daemon --socket $NATMAP_SOCKET --state /tmp/natmap_state.json --socket-group root >/tmp/natmap.log 2>&1 &
-sleep 2; kill -0 $! 2>/dev/null || {{ echo "FAIL: natmap died"; cat /tmp/natmap.log; exit 1; }}
-
-
-
-cat > /tmp/discovery.yaml <<'YAMLEOF'
-node:
-  name: int-test-node
-
-services:
-  it-cfg-all-svc:
-    type: docker
-    match:
-      project: it-cfg-all-svc
-    rproxylocal:
-    - port: 80
-      template: HTTP_PROXY
-      domains:
-      - it-cfg-all.test.local
-YAMLEOF
-
-lab-ops auto-discover daemon /tmp/discovery.yaml --state-dir /tmp/state --no-forwarding --consul-addr $CONSUL_HTTP_ADDR >/tmp/discovery.log 2>&1 &
-sleep 2; kill -0 $! 2>/dev/null || {{ echo "FAIL: daemon died"; cat /tmp/discovery.log; exit 1; }}
-
-docker run -d --name {cname} -l "com.docker.compose.project=it-cfg-all-svc" nginx:alpine
-sleep 4
-A=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-cfg-all-svc") | .value.Port // empty')
-if [ -z "$A" ]; then echo "FAIL: service not registered" >&2; exit 1; fi
-
-kill %3 2>/dev/null || true
-lab-ops natmap --socket $NATMAP_SOCKET clear >/dev/null 2>&1 || true
-docker rm -f {cname} 2>/dev/null || true
-sleep 2
-
-cat > /tmp/discovery.yaml <<'YAMLEOF'
-services: {{}}
-YAMLEOF
-
-lab-ops auto-discover sync /tmp/discovery.yaml --state-dir /tmp/state >/tmp/sync.log 2>&1 || true
-
-REMAINING=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Meta.server_name == "int-test-node") | .key // empty')
-if [ -n "$REMAINING" ]; then echo "FAIL: stale registrations remain: $REMAINING" >&2; exit 1; fi
-
-echo "PASS: all services deregistered"
-kill %1 %2 %3 2>/dev/null || true
-sleep 1
+echo "PASS: bind_ip updated to $ADDR2"
+docker rm -f it-cfg-ip 2>/dev/null || true
+"#,
+        setup = new_format_setup(first_yaml, ""),
+        stop = stop_daemon(),
+        rewrite = write_discovery_config(&format!("node:\n  name: int-test-node\n{second_yaml}")),
+        sync = sync_once(),
+        first = poll_until(
+            "curl -sf $CONSUL_HTTP_ADDR/v1/agent/services 2>/dev/null | jq -r 'to_entries[] | select(.value.Service == \"it-cfg-ip-svc\") | .value.Address' 2>/dev/null",
+            "ADDR1",
+            30,
+            "it-cfg-ip-svc never registered",
+        ) + r#"
+if [ "$ADDR1" != "127.0.0.1" ]; then echo "FAIL: expected Address=127.0.0.1, got $ADDR1" >&2; exit 1; fi
+"#,
+        second = poll_until(
+            "curl -sf $CONSUL_HTTP_ADDR/v1/agent/services 2>/dev/null | jq -r 'to_entries[] | select(.value.Service == \"it-cfg-ip-svc\") | .value.Address' 2>/dev/null",
+            "ADDR2",
+            30,
+            "it-cfg-ip-svc never re-registered after the bind_ip change",
+        ) + r#"
+if [ "$ADDR2" != "10.99.99.1" ]; then echo "FAIL: expected Address=10.99.99.1 after change, got $ADDR2" >&2; exit 1; fi
 "#,
     );
-    let out = run(&script);
-    assert_pass(&out, "Phase 3 — remove all services");
+    run(&script);
 }
 
 #[test]
@@ -483,23 +282,26 @@ fn large_config_many_services() {
         ));
         cnames.push(project);
     }
+    let _guard = ContainerGuard::new(&cnames);
     let services_yaml = format!("\nservices:\n{yaml_services}");
-    let _script = format!(
+    let script = format!(
         r#"{setup}
 for cn in {cnames_list}; do
     docker run -d --name "$cn" -l "com.docker.compose.project=$cn" nginx:alpine
 done
-sleep 8
-
-COUNT=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq '[to_entries[] | select(.value.Service | startswith("it-large-"))] | length')
-if [ "$COUNT" -lt 5 ]; then echo "FAIL: expected 5 services, got $COUNT" >&2; exit 1; fi
+{all}
 
 echo "PASS: all 5 services registered"
 docker rm -f {cnames_list} 2>/dev/null || true
-kill %3 %2 %1 2>/dev/null || true
-sleep 1
 "#,
         setup = new_format_setup(&services_yaml, ""),
+        all = poll_until(
+            "curl -sf $CONSUL_HTTP_ADDR/v1/agent/services 2>/dev/null | jq '[to_entries[] | select(.value.Service | startswith(\"it-large-\"))] | if length >= 5 then length else empty end' 2>/dev/null",
+            "COUNT",
+            40,
+            "fewer than 5 services registered",
+        ),
         cnames_list = cnames.join(" "),
     );
+    run(&script);
 }

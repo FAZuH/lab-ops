@@ -93,6 +93,23 @@ pub trait Iptables: Send + Sync {
 
 // ── Pure argument builders (testable without iptables) ──
 
+/// Appends the port-match args for a static rule.
+///
+/// A comma-separated `ports` list is a multi-port set, which iptables only
+/// matches through `-m multiport --dports`; a single port uses `--dport`.
+fn push_port_args(args: &mut Vec<String>, ports: &str) {
+    if ports.contains(',') {
+        args.extend([
+            "-m".into(),
+            "multiport".into(),
+            "--dports".into(),
+            ports.into(),
+        ]);
+    } else {
+        args.extend(["--dport".into(), ports.into()]);
+    }
+}
+
 /// Builds iptables args for a docker mapping DNAT rule (nat/NATMAP).
 fn build_dnat_rule_args(map: &DockerPortMap) -> Vec<String> {
     let req = &map.request;
@@ -245,17 +262,8 @@ fn build_static_dnat_prerouting_args(config: &DnatConfig) -> Vec<String> {
     args.push("-d".into());
     args.push(config.ext_ip.clone());
     args.push("-p".into());
-    args.push(config.proto.to_lowercase().into());
-    if config.ports.contains(',') {
-        args.extend([
-            "-m".into(),
-            "multiport".into(),
-            "--dports".into(),
-            config.ports.clone(),
-        ]);
-    } else {
-        args.extend(["--dport".into(), config.ports.clone()]);
-    }
+    args.push(config.proto.to_string());
+    push_port_args(&mut args, &config.ports);
     let dest = if config.ports.contains(',') {
         config.int_ip.clone()
     } else {
@@ -271,19 +279,10 @@ fn build_static_dnat_forward_args(config: &DnatConfig) -> Vec<String> {
     let comment = config.rule_comment();
     let mut args: Vec<String> = vec!["-A".into(), "FORWARD".into()];
     args.push("-p".into());
-    args.push(config.proto.to_lowercase().into());
+    args.push(config.proto.to_string());
     args.push("-d".into());
     args.push(config.int_ip.clone());
-    if config.ports.contains(',') {
-        args.extend([
-            "-m".into(),
-            "multiport".into(),
-            "--dports".into(),
-            config.ports.clone(),
-        ]);
-    } else {
-        args.extend(["--dport".into(), config.ports.clone()]);
-    }
+    push_port_args(&mut args, &config.ports);
     args.extend(["-j".into(), "ACCEPT".into()]);
     args.extend(["-m".into(), "comment".into(), "--comment".into(), comment]);
     args
@@ -330,17 +329,8 @@ fn build_hairpin_prerouting_args(config: &HairpinConfig) -> Option<Vec<String>> 
         config.ext_ip.clone(),
     ];
     args.push("-p".into());
-    args.push(config.proto.to_lowercase().into());
-    if config.ports.contains(',') {
-        args.extend([
-            "-m".into(),
-            "multiport".into(),
-            "--dports".into(),
-            config.ports.clone(),
-        ]);
-    } else {
-        args.extend(["--dport".into(), config.ports.clone()]);
-    }
+    args.push(config.proto.to_string());
+    push_port_args(&mut args, &config.ports);
     args.extend([
         "-j".into(),
         "DNAT".into(),
@@ -366,30 +356,14 @@ fn build_hairpin_postrouting_args(config: &HairpinConfig) -> Vec<String> {
         config.int_ip.clone(),
     ];
     args.push("-p".into());
-    args.push(config.proto.to_lowercase().into());
-    if config.ports.contains(',') {
-        args.extend([
-            "-m".into(),
-            "multiport".into(),
-            "--dports".into(),
-            config.ports.clone(),
-        ]);
-    } else {
-        args.extend(["--dport".into(), config.ports.clone()]);
-    }
+    args.push(config.proto.to_string());
+    push_port_args(&mut args, &config.ports);
     args.extend(["-j".into(), "MASQUERADE".into()]);
     args.extend(["-m".into(), "comment".into(), "--comment".into(), comment]);
     args
 }
 
-impl Default for IptablesManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl IptablesManager {
-    /// Creates a new [`IptablesManager`].
     pub fn new() -> Self {
         Self
     }
@@ -402,30 +376,26 @@ impl IptablesManager {
         tracing::info!("setting up iptables chains and jumps");
 
         for &cmd in &["iptables", "ip6tables"] {
-            // Verify DOCKER-USER exists (it should, Docker makes it). Create if missing.
+            // Docker normally creates DOCKER-USER, but the daemon can win the race.
             if !self.chain_exists(cmd, "filter", "DOCKER-USER") {
-                // create new DOCKER-USER chain
                 self.run_success(cmd, ["-t", "filter", "-N", "DOCKER-USER"])?;
-                // insert a jump rule on first position of FORWARD chain to DOCKER-USER
+                // -I, not -A: the jump must precede Docker's own FORWARD rules.
                 self.run_success(cmd, ["-t", "filter", "-I", "FORWARD", "-j", "DOCKER-USER"])?;
             }
 
-            // Create NATMAP subchain in nat table (DNAT rules live here)
+            // DNAT rules land in nat/NATMAP, FORWARD ACCEPT in filter/NATMAP.
             if !self.chain_exists(cmd, "nat", NATMAP) {
                 self.run_success(cmd, ["-t", "nat", "-N", NATMAP])?;
             }
 
-            // Create NATMAP subchain in filter table (FORWARD ACCEPT rules live here)
             if !self.chain_exists(cmd, "filter", NATMAP) {
                 self.run_success(cmd, ["-t", "filter", "-N", NATMAP])?;
             }
 
-            // Jump from DOCKER-USER to NATMAP in filter table (if not exists)
             if !self.rule_exists(cmd, &["-t", "filter", "-C", "DOCKER-USER", "-j", NATMAP]) {
                 self.run(cmd, ["-t", "filter", "-I", "DOCKER-USER", "-j", NATMAP])?;
             }
 
-            // Jump from PREROUTING to NATMAP in nat table (if not exists)
             if !self.rule_exists(cmd, &["-t", "nat", "-C", "PREROUTING", "-j", NATMAP]) {
                 self.run_success(cmd, ["-t", "nat", "-I", "PREROUTING", "-j", NATMAP])?;
             }
@@ -563,28 +533,24 @@ impl IptablesManager {
     fn remove_by_comment(&self, comment: &str, is_ipv6: bool) -> Result<()> {
         let cmd = self.cmd_for(is_ipv6);
 
-        // Delete from NATMAP in nat table
         self.delete_all_matching(cmd, "nat", NATMAP, comment)?;
-        // Delete from NATMAP in filter table
         self.delete_all_matching(cmd, "filter", NATMAP, comment)?;
-        // Delete from POSTROUTING in nat table
         self.delete_all_matching(cmd, "nat", "POSTROUTING", comment)?;
-        // Delete from OUTPUT in nat table (localhost DNAT)
+        // OUTPUT carries the localhost DNAT rule.
         self.delete_all_matching(cmd, "nat", "OUTPUT", comment)?;
 
         Ok(())
     }
 
     /// Flushes and deletes a specific chain in a given table.
+    ///
+    /// Best-effort: both calls ignore their result so a missing chain or a
+    /// chain still referenced elsewhere does not abort the surrounding flush.
     fn flush_chain(&self, cmd: &str, table: &str, chain: &str) -> Result<()> {
-        // flush chain
         let _ = self.run(cmd, ["-t", table, "-F", chain]);
-        // delete chain
         let _ = self.run(cmd, ["-t", table, "-X", chain]);
         Ok(())
     }
-
-    // --- Helper functions ---
 
     /// Returns `"ip6tables"` or `"iptables"` based on address family.
     fn cmd_for(&self, is_ipv6: bool) -> &'static str {
@@ -614,7 +580,8 @@ impl IptablesManager {
         }
     }
 
-    /// Runs a command.
+    /// Runs a command, logging the invocation at trace and returning its output
+    /// whatever the exit status.
     fn run(
         &self,
         program: impl AsRef<OsStr>,
@@ -638,8 +605,10 @@ impl IptablesManager {
     }
 
     /// Checks whether a specific iptables rule already exists.
+    ///
+    /// Uses `run`, not `run_success`: `-C` exits non-zero when the rule is
+    /// absent, which is the answer, not a failure.
     fn rule_exists(&self, cmd: &str, args: &[&str]) -> bool {
-        // cmd_success logs on fail
         self.run(cmd, args)
             .map(|o| o.status.success())
             .unwrap_or(false)
@@ -653,7 +622,6 @@ impl IptablesManager {
         chain: &str,
         comment: &str,
     ) -> Result<()> {
-        // Rules and delete by line numbers.
         loop {
             let rules = self.get_rules(cmd, table, chain)?;
             let mut deleted = false;
@@ -661,11 +629,10 @@ impl IptablesManager {
                 if rule.contains(&format!("--comment \"{comment}\""))
                     || rule.contains(&format!("--comment {comment}"))
                 {
-                    // Delete by line number from bottom up (or just one by one)
                     let num = (line_num + 1).to_string();
                     self.run_success(cmd, ["-t", table, "-D", chain, &num])?;
                     deleted = true;
-                    break; // Start over since line numbers changed
+                    break; // Restart: deleting shifts every later line number.
                 }
             }
             if !deleted {
@@ -677,11 +644,9 @@ impl IptablesManager {
 
     /// Returns the list of active rules in a chain (lines starting with `-A` or `-I`).
     fn get_rules(&self, cmd: &str, table: &str, chain: &str) -> Result<Vec<String>> {
-        // -S -- short for --list-rules
+        // -S also prints chain declarations, which have no line number to delete.
         let out = self.run(cmd, ["-t", table, "-S", chain])?;
 
-        // Get only -A (append) and -I (insert)
-        // Ignore others, such as chain declarations
         let rules = String::from_utf8_lossy(&out.stdout)
             .lines()
             .filter(|l| l.starts_with("-A ") || l.starts_with("-I "))
@@ -762,365 +727,378 @@ mod tests {
     use crate::models::DockerPortMapRequest;
     use crate::models::TransportProtocol;
 
-    fn test_dockermap(
+    fn make_dockermap(
         host_ip: &str,
         host_port: u16,
         ctn_ip: &str,
         ctn_port: u16,
         proto: TransportProtocol,
-        id: u64,
     ) -> DockerPortMap {
         let req = DockerPortMapRequest {
             host_addr: SocketAddr::new(IpAddr::from_str(host_ip).unwrap(), host_port),
             container_addr: SocketAddr::new(IpAddr::from_str(ctn_ip).unwrap(), ctn_port),
             proto,
         };
-        DockerPortMap::new(id, req, "c1".into(), "svc".into())
+        DockerPortMap::new(1, req, "c1".into(), "svc".into())
     }
 
-    // ── build_dnat_rule_args ──
+    fn make_dnat(
+        ext_ip: &str,
+        int_ip: &str,
+        ports: &str,
+        proto: TransportProtocol,
+        ext_if: Option<&str>,
+    ) -> DnatConfig {
+        DnatConfig {
+            ext_ip: ext_ip.into(),
+            int_ip: int_ip.into(),
+            ports: ports.into(),
+            proto,
+            ext_if: ext_if.map(Into::into),
+            preserve_src_ip: false,
+        }
+    }
 
-    #[test]
-    fn dnat_args_unspecified_ip_omits_d_flag() {
-        let m = test_dockermap("0.0.0.0", 8080, "10.0.0.2", 80, TransportProtocol::Tcp, 1);
-        let args = build_dnat_rule_args(&m);
-        assert!(args.contains(&"-t".into()));
-        assert!(args.contains(&"DNAT".into()));
-        assert!(args.contains(&"8080".into()));
-        assert!(args.contains(&"10.0.0.2:80".into()));
-        // Should NOT have -d for unspecified IP
-        let d_idx = args.iter().position(|a| a == "-d");
-        assert_eq!(d_idx, None, "-d should not appear for unspecified host IP");
+    fn make_hairpin(
+        ext_ip: &str,
+        int_ip: &str,
+        ports: &str,
+        proto: TransportProtocol,
+        lan_cidr: Option<&str>,
+    ) -> HairpinConfig {
+        HairpinConfig {
+            ext_ip: ext_ip.into(),
+            int_ip: int_ip.into(),
+            ports: ports.into(),
+            proto,
+            lan_cidr: lan_cidr.map(Into::into),
+        }
+    }
+
+    // The loop lives here, not in a test body, so the cases stay a plain table.
+    // Each case gives the argv as one literal command line, split on whitespace;
+    // no argv token in this module contains a space, so the split is exact.
+    fn assert_argv<T>(build: fn(&T) -> Vec<String>, cases: &[(&str, T, &str)]) {
+        for (name, input, expected) in cases {
+            let expected: Vec<String> = expected.split_whitespace().map(Into::into).collect();
+            assert_eq!(build(input), expected, "case: {name}");
+        }
+    }
+
+    // Same, for builders that return `None` when the rule is not needed.
+    fn assert_argv_opt<T>(build: fn(&T) -> Option<Vec<String>>, cases: &[(&str, T, Option<&str>)]) {
+        for (name, input, expected) in cases {
+            let expected = expected.map(|argv| argv.split_whitespace().map(Into::into).collect());
+            assert_eq!(build(input), expected, "case: {name}");
+        }
     }
 
     #[test]
-    fn dnat_args_specified_ip_includes_d() {
-        let m = test_dockermap(
-            "192.168.1.100",
-            443,
-            "10.0.0.2",
-            443,
-            TransportProtocol::Tcp,
-            2,
-        );
-        let args = build_dnat_rule_args(&m);
-        assert!(args.contains(&"-d".into()));
-        assert!(args.contains(&"192.168.1.100".into()));
-    }
-
-    #[test]
-    fn dnat_args_ipv6_host() {
-        let m = test_dockermap("2001:db8::1", 53, "::1", 53, TransportProtocol::Udp, 3);
-        let args = build_dnat_rule_args(&m);
-        assert!(args.contains(&"-d".into()));
-        assert!(args.contains(&"2001:db8::1".into()));
-        assert!(args.contains(&"udp".into()));
-        assert!(args.contains(&"[::1]:53".into()));
-    }
-
-    #[test]
-    fn dnat_args_includes_comment() {
-        let m = test_dockermap(
-            "10.0.0.1",
-            3000,
-            "10.0.0.2",
-            3000,
-            TransportProtocol::Tcp,
-            4,
-        );
-        let args = build_dnat_rule_args(&m);
-        assert!(args.contains(&"--comment".into()));
-        assert!(args.contains(&m.rule_comment));
-    }
-
-    // ── build_forward_accept_args ──
-
-    #[test]
-    fn forward_accept_args_includes_ctn_ip_and_port() {
-        let m = test_dockermap("0.0.0.0", 80, "172.17.0.3", 8080, TransportProtocol::Tcp, 5);
-        let args = build_forward_accept_args(&m);
-        assert!(args.contains(&"172.17.0.3".into()));
-        assert!(args.contains(&"8080".into()));
-        assert!(args.contains(&"ACCEPT".into()));
-        assert!(args.contains(&"NATMAP".into()));
-    }
-
-    // ── build_masquerade_args ──
-
-    #[test]
-    fn masquerade_args_matches_ctn_ip() {
-        let m = test_dockermap(
-            "0.0.0.0",
-            80,
-            "172.17.0.4",
-            25565,
-            TransportProtocol::Udp,
-            6,
-        );
-        let args = build_masquerade_args(&m);
-        assert!(args.contains(&"MASQUERADE".into()));
-        // Both -s and -d should match container IP
-        let s_idx = args.iter().position(|a| a == "-s").unwrap();
-        let d_idx = args.iter().position(|a| a == "-d").unwrap();
-        assert_eq!(
-            args[s_idx + 1],
-            args[d_idx + 1],
-            "-s and -d should have same IP"
+    fn build_dnat_rule_args_exact_argv() {
+        assert_argv(
+            build_dnat_rule_args,
+            &[
+                (
+                    "unspecified host ip omits -d",
+                    make_dockermap("0.0.0.0", 8080, "10.0.0.2", 80, TransportProtocol::Tcp),
+                    "-t nat -A NATMAP -p tcp --dport 8080 -j DNAT --to-destination 10.0.0.2:80 -m comment --comment natmap:c1:8080",
+                ),
+                (
+                    "specified host ip matches -d",
+                    make_dockermap(
+                        "192.168.1.100",
+                        443,
+                        "10.0.0.2",
+                        443,
+                        TransportProtocol::Tcp,
+                    ),
+                    "-t nat -A NATMAP -p tcp -d 192.168.1.100 --dport 443 -j DNAT --to-destination 10.0.0.2:443 -m comment --comment natmap:c1:443",
+                ),
+                (
+                    "ipv6 host and container",
+                    make_dockermap("2001:db8::1", 53, "::1", 53, TransportProtocol::Udp),
+                    "-t nat -A NATMAP -p udp -d 2001:db8::1 --dport 53 -j DNAT --to-destination [::1]:53 -m comment --comment natmap:c1:53",
+                ),
+                (
+                    "comment carries the host port",
+                    make_dockermap("10.0.0.1", 3000, "10.0.0.2", 3000, TransportProtocol::Tcp),
+                    "-t nat -A NATMAP -p tcp -d 10.0.0.1 --dport 3000 -j DNAT --to-destination 10.0.0.2:3000 -m comment --comment natmap:c1:3000",
+                ),
+            ],
         );
     }
 
-    // ── build_output_dnat_args ──
-
     #[test]
-    fn output_dnat_args_uses_output_dst() {
-        let m = test_dockermap("0.0.0.0", 9090, "10.0.0.5", 9090, TransportProtocol::Tcp, 7);
-        let args = build_output_dnat_args(&m, "127.0.0.1");
-        assert!(args.contains(&"127.0.0.1".into()));
-        assert!(args.contains(&"OUTPUT".into()));
-    }
-
-    // ── build_loopback_masq_args ──
-
-    #[test]
-    fn loopback_masq_args_returned_when_host_unspecified_and_ctn_non_loopback() {
-        let m = test_dockermap("0.0.0.0", 80, "10.0.0.2", 80, TransportProtocol::Tcp, 8);
-        assert!(build_loopback_masq_args(&m).is_some());
+    fn build_forward_accept_args_exact_argv() {
+        assert_argv(
+            build_forward_accept_args,
+            &[(
+                "matches the container address, not the host one",
+                make_dockermap("0.0.0.0", 80, "172.17.0.3", 8080, TransportProtocol::Tcp),
+                "-t filter -A NATMAP -d 172.17.0.3 -p tcp --dport 8080 -j ACCEPT -m comment --comment natmap:c1:80",
+            )],
+        );
     }
 
     #[test]
-    fn loopback_masq_args_returned_when_host_loopback() {
-        let m = test_dockermap("127.0.0.1", 80, "10.0.0.2", 80, TransportProtocol::Tcp, 9);
-        assert!(build_loopback_masq_args(&m).is_some());
+    fn build_masquerade_args_exact_argv() {
+        assert_argv(
+            build_masquerade_args,
+            &[(
+                "source and destination both match the container",
+                make_dockermap("0.0.0.0", 80, "172.17.0.4", 25565, TransportProtocol::Udp),
+                "-t nat -A POSTROUTING -s 172.17.0.4 -d 172.17.0.4 -p udp --dport 25565 -j MASQUERADE -m comment --comment natmap:c1:80",
+            )],
+        );
     }
 
     #[test]
-    fn loopback_masq_args_none_when_ctn_is_loopback() {
-        let m = test_dockermap("0.0.0.0", 80, "127.0.0.1", 80, TransportProtocol::Tcp, 10);
-        assert!(build_loopback_masq_args(&m).is_none());
+    fn build_output_dnat_args_exact_argv() {
+        assert_argv(
+            |map| build_output_dnat_args(map, "127.0.0.1"),
+            &[(
+                "matches the output destination and the host port",
+                make_dockermap("0.0.0.0", 9090, "10.0.0.5", 9443, TransportProtocol::Tcp),
+                "-t nat -A OUTPUT -d 127.0.0.1 -p tcp --dport 9090 -j DNAT --to-destination 10.0.0.5:9443 -m comment --comment natmap:c1:9090",
+            )],
+        );
     }
 
     #[test]
-    fn loopback_masq_args_none_when_host_specified() {
-        let m = test_dockermap("10.0.0.1", 80, "10.0.0.2", 80, TransportProtocol::Tcp, 11);
-        assert!(build_loopback_masq_args(&m).is_none());
+    fn build_loopback_masq_args_exact_argv() {
+        assert_argv_opt(
+            build_loopback_masq_args,
+            &[
+                (
+                    "unspecified host ip and non-loopback container",
+                    make_dockermap("0.0.0.0", 80, "10.0.0.2", 80, TransportProtocol::Tcp),
+                    Some(
+                        "-t nat -A POSTROUTING -s 127.0.0.0/8 -d 10.0.0.2 -p tcp --dport 80 -j MASQUERADE -m comment --comment natmap:c1:80",
+                    ),
+                ),
+                (
+                    "loopback host ip",
+                    make_dockermap("127.0.0.1", 80, "10.0.0.2", 80, TransportProtocol::Tcp),
+                    Some(
+                        "-t nat -A POSTROUTING -s 127.0.0.0/8 -d 10.0.0.2 -p tcp --dport 80 -j MASQUERADE -m comment --comment natmap:c1:80",
+                    ),
+                ),
+                (
+                    "container is loopback",
+                    make_dockermap("0.0.0.0", 80, "127.0.0.1", 80, TransportProtocol::Tcp),
+                    None,
+                ),
+                (
+                    "host ip is specified",
+                    make_dockermap("10.0.0.1", 80, "10.0.0.2", 80, TransportProtocol::Tcp),
+                    None,
+                ),
+                (
+                    "ipv6 uses a /128 loopback source",
+                    make_dockermap("::", 80, "2001:db8::2", 80, TransportProtocol::Tcp),
+                    Some(
+                        "-t nat -A POSTROUTING -s ::1/128 -d 2001:db8::2 -p tcp --dport 80 -j MASQUERADE -m comment --comment natmap:c1:80",
+                    ),
+                ),
+            ],
+        );
     }
 
     #[test]
-    fn loopback_masq_args_ipv6_src() {
-        let m = test_dockermap("::", 80, "2001:db8::2", 80, TransportProtocol::Tcp, 12);
-        let args = build_loopback_masq_args(&m).unwrap();
-        assert!(args.contains(&"::1/128".into()));
-    }
-
-    // ── build_static_dnat_prerouting_args ──
-
-    #[test]
-    fn static_dnat_prerouting_single_port() {
-        let cfg = DnatConfig {
-            ext_ip: "203.0.113.50".into(),
-            int_ip: "10.0.0.99".into(),
-            ports: "80".into(),
-            proto: TransportProtocol::Tcp,
-            ext_if: None,
-            preserve_src_ip: false,
-        };
-        let args = build_static_dnat_prerouting_args(&cfg);
-        assert!(args.contains(&"--dport".into()));
-        assert!(args.contains(&"80".into()));
-        assert!(args.contains(&"10.0.0.99:80".into()));
-        assert!(!args.contains(&"multiport".into()));
-    }
-
-    #[test]
-    fn static_dnat_prerouting_multiport() {
-        let cfg = DnatConfig {
-            ext_ip: "203.0.113.50".into(),
-            int_ip: "10.0.0.99".into(),
-            ports: "80,443,8080".into(),
-            proto: TransportProtocol::Tcp,
-            ext_if: None,
-            preserve_src_ip: false,
-        };
-        let args = build_static_dnat_prerouting_args(&cfg);
-        assert!(args.contains(&"multiport".into()));
-        assert!(args.contains(&"80,443,8080".into()));
-        assert!(args.contains(&"10.0.0.99".into()));
-        assert!(!args.contains(&":".into())); // no port rewrite for multiport
-    }
-
-    #[test]
-    fn static_dnat_prerouting_with_ext_if() {
-        let cfg = DnatConfig {
-            ext_ip: "198.51.100.10".into(),
-            int_ip: "10.0.0.1".into(),
-            ports: "53".into(),
-            proto: TransportProtocol::Udp,
-            ext_if: Some("eth0".into()),
-            preserve_src_ip: false,
-        };
-        let args = build_static_dnat_prerouting_args(&cfg);
-        assert!(args.contains(&"-i".into()));
-        assert!(args.contains(&"eth0".into()));
+    fn build_static_dnat_prerouting_args_exact_argv() {
+        assert_argv(
+            build_static_dnat_prerouting_args,
+            &[
+                (
+                    "single port appends the port to the destination",
+                    make_dnat(
+                        "203.0.113.50",
+                        "10.0.0.99",
+                        "80",
+                        TransportProtocol::Tcp,
+                        None,
+                    ),
+                    "-t nat -A PREROUTING -d 203.0.113.50 -p tcp --dport 80 -j DNAT --to-destination 10.0.0.99:80 -m comment --comment natmap:dnat:203.0.113.50:80",
+                ),
+                (
+                    "multiport uses the multiport match and no port rewrite",
+                    make_dnat(
+                        "203.0.113.50",
+                        "10.0.0.99",
+                        "80,443,8080",
+                        TransportProtocol::Tcp,
+                        None,
+                    ),
+                    "-t nat -A PREROUTING -d 203.0.113.50 -p tcp -m multiport --dports 80,443,8080 -j DNAT --to-destination 10.0.0.99 -m comment --comment natmap:dnat:203.0.113.50:80,443,8080",
+                ),
+                (
+                    "external interface precedes the address match",
+                    make_dnat(
+                        "198.51.100.10",
+                        "10.0.0.1",
+                        "53",
+                        TransportProtocol::Udp,
+                        Some("eth0"),
+                    ),
+                    "-t nat -A PREROUTING -i eth0 -d 198.51.100.10 -p udp --dport 53 -j DNAT --to-destination 10.0.0.1:53 -m comment --comment natmap:dnat:198.51.100.10:53",
+                ),
+                (
+                    "udp on a high port",
+                    make_dnat(
+                        "203.0.113.50",
+                        "10.0.0.99",
+                        "19132",
+                        TransportProtocol::Udp,
+                        None,
+                    ),
+                    "-t nat -A PREROUTING -d 203.0.113.50 -p udp --dport 19132 -j DNAT --to-destination 10.0.0.99:19132 -m comment --comment natmap:dnat:203.0.113.50:19132",
+                ),
+            ],
+        );
     }
 
     #[test]
-    fn static_dnat_prerouting_udp_proto() {
-        let cfg = DnatConfig {
-            ext_ip: "203.0.113.50".into(),
-            int_ip: "10.0.0.99".into(),
-            ports: "19132".into(),
-            proto: TransportProtocol::Udp,
-            ext_if: None,
-            preserve_src_ip: false,
-        };
-        let args = build_static_dnat_prerouting_args(&cfg);
-        assert!(args.contains(&"udp".into()));
-    }
-
-    // ── build_static_dnat_forward_args ──
-
-    #[test]
-    fn static_dnat_forward_single_port() {
-        let cfg = DnatConfig {
-            ext_ip: "203.0.113.50".into(),
-            int_ip: "10.0.0.99".into(),
-            ports: "80".into(),
-            proto: TransportProtocol::Tcp,
-            ext_if: None,
-            preserve_src_ip: false,
-        };
-        let args = build_static_dnat_forward_args(&cfg);
-        assert!(args.contains(&"ACCEPT".into()));
-        assert!(args.contains(&"--dport".into()));
-        assert!(args.contains(&"80".into()));
-        assert!(!args.contains(&"multiport".into()));
-    }
-
-    #[test]
-    fn static_dnat_forward_multiport() {
-        let cfg = DnatConfig {
-            ext_ip: "203.0.113.50".into(),
-            int_ip: "10.0.0.99".into(),
-            ports: "3000,3001,3002".into(),
-            proto: TransportProtocol::Tcp,
-            ext_if: None,
-            preserve_src_ip: false,
-        };
-        let args = build_static_dnat_forward_args(&cfg);
-        assert!(args.contains(&"multiport".into()));
-        assert!(args.contains(&"3000,3001,3002".into()));
-    }
-
-    // ── build_snat_args ──
-
-    #[test]
-    fn snat_args_contains_expected_fields() {
-        let cfg = SnatConfig {
-            int_ip: "10.0.0.1".into(),
-            ext_ip: "203.0.113.50".into(),
-            ext_if: "eth0".into(),
-        };
-        let args = build_snat_args(&cfg);
-        assert!(args.contains(&"SNAT".into()));
-        assert!(args.contains(&"10.0.0.1".into()));
-        assert!(args.contains(&"203.0.113.50".into()));
-        assert!(args.contains(&"eth0".into()));
-    }
-
-    // ── build_hairpin_prerouting_args ──
-
-    #[test]
-    fn hairpin_prerouting_args_returned_when_no_lan_cidr() {
-        let cfg = HairpinConfig {
-            ext_ip: "203.0.113.50".into(),
-            int_ip: "10.0.0.99".into(),
-            ports: "80".into(),
-            proto: TransportProtocol::Tcp,
-            lan_cidr: None,
-        };
-        assert!(build_hairpin_prerouting_args(&cfg).is_some());
+    fn build_static_dnat_forward_args_exact_argv() {
+        assert_argv(
+            build_static_dnat_forward_args,
+            &[
+                (
+                    "single port",
+                    make_dnat(
+                        "203.0.113.50",
+                        "10.0.0.99",
+                        "80",
+                        TransportProtocol::Tcp,
+                        None,
+                    ),
+                    "-A FORWARD -p tcp -d 10.0.0.99 --dport 80 -j ACCEPT -m comment --comment natmap:dnat:203.0.113.50:80",
+                ),
+                (
+                    "multiport",
+                    make_dnat(
+                        "203.0.113.50",
+                        "10.0.0.99",
+                        "3000,3001,3002",
+                        TransportProtocol::Tcp,
+                        None,
+                    ),
+                    "-A FORWARD -p tcp -d 10.0.0.99 -m multiport --dports 3000,3001,3002 -j ACCEPT -m comment --comment natmap:dnat:203.0.113.50:3000,3001,3002",
+                ),
+            ],
+        );
     }
 
     #[test]
-    fn hairpin_prerouting_args_none_when_lan_cidr_set() {
-        let cfg = HairpinConfig {
-            ext_ip: "203.0.113.50".into(),
-            int_ip: "10.0.0.99".into(),
-            ports: "80".into(),
-            proto: TransportProtocol::Tcp,
-            lan_cidr: Some("10.0.0.0/24".into()),
-        };
-        assert!(build_hairpin_prerouting_args(&cfg).is_none());
+    fn build_snat_args_exact_argv() {
+        assert_argv(
+            build_snat_args,
+            &[(
+                "matches the internal source and masquerades to the external ip",
+                SnatConfig {
+                    int_ip: "10.0.0.1".into(),
+                    ext_ip: "203.0.113.50".into(),
+                    ext_if: "eth0".into(),
+                },
+                "-t nat -A POSTROUTING -s 10.0.0.1 -o eth0 -j SNAT --to-source 203.0.113.50 -m comment --comment natmap:snat:10.0.0.1:203.0.113.50",
+            )],
+        );
     }
 
     #[test]
-    fn hairpin_prerouting_args_multiport() {
-        let cfg = HairpinConfig {
-            ext_ip: "203.0.113.50".into(),
-            int_ip: "10.0.0.99".into(),
-            ports: "80,443".into(),
-            proto: TransportProtocol::Tcp,
-            lan_cidr: None,
-        };
-        let args = build_hairpin_prerouting_args(&cfg).unwrap();
-        assert!(args.contains(&"multiport".into()));
+    fn build_hairpin_prerouting_args_exact_argv() {
+        assert_argv_opt(
+            build_hairpin_prerouting_args,
+            &[
+                (
+                    "no lan cidr installs the full hairpin",
+                    make_hairpin(
+                        "203.0.113.50",
+                        "10.0.0.99",
+                        "80",
+                        TransportProtocol::Tcp,
+                        None,
+                    ),
+                    Some(
+                        "-t nat -A PREROUTING -s 10.0.0.99 -d 203.0.113.50 -p tcp --dport 80 -j DNAT --to-destination 10.0.0.99 -m comment --comment natmap:hairpin:203.0.113.50:10.0.0.99:80",
+                    ),
+                ),
+                (
+                    "lan cidr skips the prerouting rule",
+                    make_hairpin(
+                        "203.0.113.50",
+                        "10.0.0.99",
+                        "80",
+                        TransportProtocol::Tcp,
+                        Some("10.0.0.0/24"),
+                    ),
+                    None,
+                ),
+                (
+                    "multiport",
+                    make_hairpin(
+                        "203.0.113.50",
+                        "10.0.0.99",
+                        "80,443",
+                        TransportProtocol::Tcp,
+                        None,
+                    ),
+                    Some(
+                        "-t nat -A PREROUTING -s 10.0.0.99 -d 203.0.113.50 -p tcp -m multiport --dports 80,443 -j DNAT --to-destination 10.0.0.99 -m comment --comment natmap:hairpin:203.0.113.50:10.0.0.99:80,443",
+                    ),
+                ),
+            ],
+        );
     }
-
-    // ── build_hairpin_postrouting_args ──
 
     #[test]
-    fn hairpin_postrouting_args_default_src_without_cidr() {
-        let cfg = HairpinConfig {
-            ext_ip: "203.0.113.50".into(),
-            int_ip: "10.0.0.99".into(),
-            ports: "80".into(),
-            proto: TransportProtocol::Tcp,
-            lan_cidr: None,
-        };
-        let args = build_hairpin_postrouting_args(&cfg);
-        assert!(args.contains(&"0.0.0.0/0".into()));
-        assert!(args.contains(&"MASQUERADE".into()));
+    fn build_hairpin_postrouting_args_exact_argv() {
+        assert_argv(
+            build_hairpin_postrouting_args,
+            &[
+                (
+                    "no lan cidr matches every source",
+                    make_hairpin(
+                        "203.0.113.50",
+                        "10.0.0.99",
+                        "80",
+                        TransportProtocol::Tcp,
+                        None,
+                    ),
+                    "-t nat -A POSTROUTING -s 0.0.0.0/0 -d 10.0.0.99 -p tcp --dport 80 -j MASQUERADE -m comment --comment natmap:hairpin:203.0.113.50:10.0.0.99:80",
+                ),
+                (
+                    "lan cidr narrows the masquerade to the lan",
+                    make_hairpin(
+                        "203.0.113.50",
+                        "10.0.0.99",
+                        "80",
+                        TransportProtocol::Udp,
+                        Some("10.0.0.0/24"),
+                    ),
+                    "-t nat -A POSTROUTING -s 10.0.0.0/24 -d 10.0.0.99 -p udp --dport 80 -j MASQUERADE -m comment --comment natmap:hairpin:203.0.113.50:10.0.0.99:80",
+                ),
+                (
+                    "multiport",
+                    make_hairpin(
+                        "203.0.113.50",
+                        "10.0.0.99",
+                        "3000,3001",
+                        TransportProtocol::Tcp,
+                        None,
+                    ),
+                    "-t nat -A POSTROUTING -s 0.0.0.0/0 -d 10.0.0.99 -p tcp -m multiport --dports 3000,3001 -j MASQUERADE -m comment --comment natmap:hairpin:203.0.113.50:10.0.0.99:3000,3001",
+                ),
+            ],
+        );
     }
 
-    #[test]
-    fn hairpin_postrouting_args_uses_lan_cidr_when_set() {
-        let cfg = HairpinConfig {
-            ext_ip: "203.0.113.50".into(),
-            int_ip: "10.0.0.99".into(),
-            ports: "80".into(),
-            proto: TransportProtocol::Udp,
-            lan_cidr: Some("10.0.0.0/24".into()),
-        };
-        let args = build_hairpin_postrouting_args(&cfg);
-        assert!(args.contains(&"10.0.0.0/24".into()));
-        assert!(!args.contains(&"0.0.0.0/0".into()));
-    }
-
-    #[test]
-    fn hairpin_postrouting_args_multiport() {
-        let cfg = HairpinConfig {
-            ext_ip: "203.0.113.50".into(),
-            int_ip: "10.0.0.99".into(),
-            ports: "3000,3001".into(),
-            proto: TransportProtocol::Tcp,
-            lan_cidr: None,
-        };
-        let args = build_hairpin_postrouting_args(&cfg);
-        assert!(args.contains(&"multiport".into()));
-    }
-
-    // ── cmd_for ──
     // The manager struct just delegates; test the helper directly.
 
     #[test]
-    fn cmd_for_ipv4_returns_iptables() {
+    fn cmd_for_selects_binary_by_address_family() {
         let mgr = IptablesManager::new();
-        assert_eq!(mgr.cmd_for(false), "iptables");
-    }
 
-    #[test]
-    fn cmd_for_ipv6_returns_ip6tables() {
-        let mgr = IptablesManager::new();
+        assert_eq!(mgr.cmd_for(false), "iptables");
         assert_eq!(mgr.cmd_for(true), "ip6tables");
     }
 }

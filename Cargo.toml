@@ -65,6 +65,10 @@ lab-ops_lab-lib = { workspace = true }
 lab-ops_natmap = { workspace = true }
 lab-ops_auto-discover = { workspace = true }
 
+[dev-dependencies]
+serde = { workspace = true }
+serde_yaml = "0.9"
+
 [lints.clippy]
 uninlined_format_args = "warn"
 new_without_default = "allow"

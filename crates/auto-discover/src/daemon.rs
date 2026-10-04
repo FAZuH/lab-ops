@@ -1,3 +1,5 @@
+//! The auto-discover daemon: Docker event handling, Consul registration, and sync passes.
+
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -140,13 +142,13 @@ impl DockerOps for DockerClient {
     }
 }
 
+/// The auto-discover daemon: watches Docker, registers into Consul, and asks
+/// the natmap daemon for forwarding rules.
 pub struct DiscoveryDaemon {
     config_path: PathBuf,
     consul: Arc<dyn ConsulOps>,
     natmap: Arc<dyn NatmapOps>,
     docker: Option<Arc<dyn DockerOps>>,
-    #[allow(dead_code)]
-    state_dir: PathBuf,
 }
 
 // --- Sync service types ---
@@ -177,16 +179,18 @@ struct PortDecision {
 }
 
 impl DiscoveryDaemon {
-    pub fn new(config_path: PathBuf, state_dir: PathBuf) -> Self {
+    /// Creates a daemon that rereads its configuration on every sync pass, so an
+    /// edited file is picked up without a restart.
+    pub fn new(config_path: PathBuf) -> Self {
         DiscoveryDaemon {
             config_path,
             consul: Arc::new(ConsulClient::from_env()),
             natmap: Arc::new(NatmapClient::default_socket()),
             docker: None,
-            state_dir,
         }
     }
 
+    /// Runs one full discovery pass and, unless the pass totally failed, the stale sweep.
     pub async fn sync(&self) -> Result<()> {
         let config =
             DiscoveryConfig::load(&self.config_path).wrap_err("failed to load discovery config")?;
@@ -275,10 +279,8 @@ impl DiscoveryDaemon {
             }
         }
 
-        // The sweep guard is fail-closed by design: a non-total failure with
-        // zero registrations (e.g. some docker services absent plus one errored
-        // local service) blocks the sweep, deferring legitimately-stale cleanup
-        // to the next clean pass so a partial failure never wipes the catalog.
+        // Fail-closed: a partial failure with zero registrations blocks the sweep,
+        // so a broken pass never wipes the catalog.
         let sweep_stale = should_sweep_stale(current_service_ids.len(), sync_errors);
         if sweep_stale {
             let _ = self
@@ -313,8 +315,7 @@ impl DiscoveryDaemon {
         server_name: &str,
         generation_id: &str,
     ) -> Result<String> {
-        // Resolve the target's identity first. For containers this is the
-        // Consul IP; for local services it is the configured local address.
+        // A container's identity is its Consul IP; a local service's is its address.
         let (container_id, consul_ip, local_ip) = match target {
             ServiceTarget::Container { info } => {
                 let consul_ip = self.determine_consul_ip(resolved, info).await?;
@@ -332,8 +333,8 @@ impl DiscoveryDaemon {
 
         let decision = self.decide_ports(target, resolved);
 
-        // The port to register with: the daemon's reported port when a mapping
-        // was created, or the decision's host port for mapping-free services.
+        // Register the port the daemon reported, or the decided host port when no
+        // mapping was created.
         let host_port = if decision.needs_mapping {
             let natmap_bind_ip = get_natmap_bind_ip(resolved);
             self.ensure_docker_mapping(
@@ -418,14 +419,12 @@ impl DiscoveryDaemon {
             },
             ResolvedPortType::RProxyLocal { .. } | ResolvedPortType::RProxyRemote { .. } => {
                 match target {
-                    // RProxy local targets need no natmap mapping — the proxy
-                    // talks to the local service directly.
+                    // A local target needs no mapping: the proxy reaches it directly.
                     ServiceTarget::Local { .. } => PortDecision {
                         host_port: container_port,
                         container_port,
                         needs_mapping: false,
                     },
-                    // RProxy container targets get a dynamic natmap mapping.
                     ServiceTarget::Container { .. } => PortDecision {
                         host_port: 0,
                         container_port,
@@ -444,6 +443,7 @@ impl DiscoveryDaemon {
         event.action = %action,
         compose.project = %compose_project
     ))]
+    /// Registers the container's published ports and installs their natmap mappings.
     pub async fn handle_container_start(
         &self,
         container_id: &str,
@@ -465,8 +465,8 @@ impl DiscoveryDaemon {
             if res.service_type != ServiceType::Docker {
                 continue;
             }
-            // Container matching is unified with the sync path: project,
-            // container name and regex all come from the inspected container.
+            // Match on the inspected container so the event path and the sync
+            // path agree on project, name, and regex.
             if container_matches(&cinfo, &res) {
                 resolved_services.push(res);
             }
@@ -516,6 +516,7 @@ impl DiscoveryDaemon {
         container.id = %container_id,
         event.action = "die"
     ))]
+    /// Removes every mapping and Consul entry belonging to `container_id`.
     pub async fn handle_container_die(&self, container_id: &str) -> Result<()> {
         tracing::debug!("handling container die");
         let services = self
@@ -584,8 +585,7 @@ impl DiscoveryDaemon {
         };
         match self.natmap.add_mapping(container_id, req).await {
             Ok(mapping) => Ok(mapping.request.host_addr.port()),
-            // A dynamic request (`host_port: 0`) has no requested port to
-            // fall back to — the daemon's rejection is fatal.
+            // A dynamic request has no port to fall back to, so rejection is fatal.
             Err(e @ NatmapError::Conflict(_)) if host_port == 0 => {
                 Err(e).wrap_err("natmap rejected dynamic port allocation")
             }
@@ -738,8 +738,6 @@ mod tests {
 
     use super::*;
 
-    // ── should_sweep_stale ──
-
     #[test]
     fn sweep_runs_when_no_errors_and_nothing_registered() {
         assert!(should_sweep_stale(0, 0));
@@ -763,14 +761,28 @@ mod tests {
     #[tokio::test]
     #[traced_test]
     async fn handle_container_start_span_fields() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let daemon =
-            DiscoveryDaemon::new(PathBuf::from("/dev/null"), temp_dir.path().to_path_buf());
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("discovery.yaml"),
+            "node:\n  name: test-node\nservices: {}\n",
+        )
+        .unwrap();
+        let daemon = make_daemon(
+            &dir,
+            Arc::new(FakeNatmap::default()),
+            Arc::new(FakeConsul::default()),
+            Arc::new(FakeDocker::with_inspect(make_container_info(
+                "123456789012",
+                "web",
+                Some("my_project"),
+            ))),
+        );
 
-        let _ = daemon
+        let result = daemon
             .handle_container_start("123456789012", "my_project", "start")
             .await;
 
+        assert!(result.is_ok());
         assert!(logs_contain("container.id=123456789012"));
         assert!(logs_contain("event.action=start"));
     }
@@ -778,13 +790,18 @@ mod tests {
     #[tokio::test]
     #[traced_test]
     async fn handle_container_die_logs_deregister() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let daemon =
-            DiscoveryDaemon::new(PathBuf::from("/dev/null"), temp_dir.path().to_path_buf());
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = make_daemon(
+            &dir,
+            Arc::new(FakeNatmap::default()),
+            Arc::new(FakeConsul::default()),
+            Arc::new(FakeDocker::with_running(vec![])),
+        );
 
-        let _ = daemon.handle_container_die("123456789012").await;
+        let result = daemon.handle_container_die("123456789012").await;
 
-        // This will log a debug event or an error, but the span has the fields
+        assert!(result.is_ok());
+        // The event may be a debug or an error; either way the span must carry the id.
         assert!(logs_contain("container.id=123456789012"));
     }
 
@@ -833,9 +850,8 @@ mod tests {
                     .lock()
                     .unwrap()
                     .push((container_id, req.clone()));
-                // Echo the request back like the real daemon: explicit ports
-                // come back as requested, dynamic requests (`host_port: 0`)
-                // are answered with a deterministic allocated port.
+                // Echo the request as the real daemon does, answering a dynamic
+                // request with a deterministic port.
                 let host_port = if req.host_port == 0 {
                     FAKE_ALLOCATED_PORT
                 } else {
@@ -966,7 +982,6 @@ mod tests {
             consul,
             natmap,
             docker: Some(docker),
-            state_dir: dir.path().to_path_buf(),
         }
     }
 
@@ -980,8 +995,7 @@ mod tests {
             id: id.to_string(),
             name: name.to_string(),
             compose_project: project.map(str::to_string),
-            // Mirrors lab-lib's primary-IP selection: the first network
-            // (sorted by name) with an address.
+            // Mirrors lab-lib's primary-IP selection.
             ip: networks.iter().find_map(|n| n.ip),
             networks,
         }
@@ -1008,6 +1022,27 @@ mod tests {
         }
     }
 
+    /// Returns the tempdir, the two recording fakes, and a daemon wired to
+    /// them. The tempdir must stay alive for the test's duration because
+    /// `config_path` and `state_dir` point into it.
+    fn make_sync_daemon() -> (
+        tempfile::TempDir,
+        Arc<FakeNatmap>,
+        Arc<FakeConsul>,
+        DiscoveryDaemon,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let natmap = Arc::new(FakeNatmap::default());
+        let consul = Arc::new(FakeConsul::default());
+        let daemon = make_daemon(
+            &dir,
+            natmap.clone(),
+            consul.clone(),
+            Arc::new(FakeDocker::with_running(vec![])),
+        );
+        (dir, natmap, consul, daemon)
+    }
+
     fn make_forward_remote(
         ext_ports: Vec<u16>,
         preserve_src_ip: bool,
@@ -1018,7 +1053,6 @@ mod tests {
             ext_ip: "203.0.113.50".into(),
             ext_ports,
             hairpin: false,
-            proxy_on: None,
             preserve_src_ip,
             preserve_src_ip_gateway: gateway.map(str::to_string),
             preserve_src_ip_src: src.map(str::to_string),
@@ -1036,19 +1070,9 @@ mod tests {
         }
     }
 
-    // --- sync_service ---
-
     #[tokio::test]
     async fn sync_service_docker_target_maps_and_registers() {
-        let dir = tempfile::tempdir().unwrap();
-        let natmap = Arc::new(FakeNatmap::default());
-        let consul = Arc::new(FakeConsul::default());
-        let daemon = make_daemon(
-            &dir,
-            natmap.clone(),
-            consul.clone(),
-            Arc::new(FakeDocker::with_running(vec![])),
-        );
+        let (_dir, natmap, consul, daemon) = make_sync_daemon();
 
         let info = make_container_info("abc123def456", "web", Some("myproj"));
         let mut resolved = make_resolved(
@@ -1086,15 +1110,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_service_local_target_maps_with_prefix_and_local_ip() {
-        let dir = tempfile::tempdir().unwrap();
-        let natmap = Arc::new(FakeNatmap::default());
-        let consul = Arc::new(FakeConsul::default());
-        let daemon = make_daemon(
-            &dir,
-            natmap.clone(),
-            consul.clone(),
-            Arc::new(FakeDocker::with_running(vec![])),
-        );
+        let (_dir, natmap, consul, daemon) = make_sync_daemon();
 
         let resolved = make_resolved(
             "loc",
@@ -1129,15 +1145,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_service_docker_forward_remote_always_maps() {
-        let dir = tempfile::tempdir().unwrap();
-        let natmap = Arc::new(FakeNatmap::default());
-        let consul = Arc::new(FakeConsul::default());
-        let daemon = make_daemon(
-            &dir,
-            natmap.clone(),
-            consul.clone(),
-            Arc::new(FakeDocker::with_running(vec![])),
-        );
+        let (_dir, natmap, _consul, daemon) = make_sync_daemon();
 
         let info = make_container_info("abc123def456", "web", None);
         let mut resolved = make_resolved(
@@ -1166,15 +1174,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_service_local_forward_remote_maps_when_port_free() {
-        let dir = tempfile::tempdir().unwrap();
-        let natmap = Arc::new(FakeNatmap::default());
-        let consul = Arc::new(FakeConsul::default());
-        let daemon = make_daemon(
-            &dir,
-            natmap.clone(),
-            consul.clone(),
-            Arc::new(FakeDocker::with_running(vec![])),
-        );
+        let (_dir, natmap, _consul, daemon) = make_sync_daemon();
 
         let resolved = make_resolved(
             "loc",
@@ -1201,16 +1201,8 @@ mod tests {
 
     #[tokio::test]
     async fn sync_service_local_forward_remote_conflict_skips_mapping_but_registers() {
-        let dir = tempfile::tempdir().unwrap();
-        let natmap = Arc::new(FakeNatmap::default());
+        let (_dir, natmap, consul, daemon) = make_sync_daemon();
         natmap.conflict_add_mapping.store(true, Ordering::SeqCst);
-        let consul = Arc::new(FakeConsul::default());
-        let daemon = make_daemon(
-            &dir,
-            natmap.clone(),
-            consul.clone(),
-            Arc::new(FakeDocker::with_running(vec![])),
-        );
 
         let resolved = make_resolved(
             "loc",
@@ -1229,9 +1221,7 @@ mod tests {
             .unwrap();
 
         assert!(!id.is_empty());
-        // The daemon arbitrated the conflict: no mapping was installed.
         assert!(natmap.mappings().is_empty());
-        // Skip-but-register: the service still registers with the requested port.
         let regs = consul.registrations();
         assert_eq!(regs.len(), 1);
         assert_eq!(regs[0].port, 39003);
@@ -1239,15 +1229,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_service_local_rproxy_skips_natmap() {
-        let dir = tempfile::tempdir().unwrap();
-        let natmap = Arc::new(FakeNatmap::default());
-        let consul = Arc::new(FakeConsul::default());
-        let daemon = make_daemon(
-            &dir,
-            natmap.clone(),
-            consul.clone(),
-            Arc::new(FakeDocker::with_running(vec![])),
-        );
+        let (_dir, natmap, consul, daemon) = make_sync_daemon();
 
         let resolved = make_resolved(
             "web",
@@ -1255,7 +1237,6 @@ mod tests {
             ResolvedPortType::RProxyLocal {
                 template: "web.ctmpl".into(),
                 domains: vec!["web.example.com".into()],
-                proxy_on: None,
                 proxy_ip: None,
             },
         );
@@ -1280,15 +1261,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_service_docker_rproxy_allocates_and_maps() {
-        let dir = tempfile::tempdir().unwrap();
-        let natmap = Arc::new(FakeNatmap::default());
-        let consul = Arc::new(FakeConsul::default());
-        let daemon = make_daemon(
-            &dir,
-            natmap.clone(),
-            consul.clone(),
-            Arc::new(FakeDocker::with_running(vec![])),
-        );
+        let (_dir, natmap, consul, daemon) = make_sync_daemon();
 
         let info = make_container_info("abc123def456", "web", None);
         let mut resolved = make_resolved(
@@ -1297,7 +1270,6 @@ mod tests {
             ResolvedPortType::RProxyLocal {
                 template: "web.ctmpl".into(),
                 domains: vec!["web.example.com".into()],
-                proxy_on: None,
                 proxy_ip: None,
             },
         );
@@ -1314,11 +1286,9 @@ mod tests {
             .unwrap();
 
         assert!(!id.is_empty());
-        // The container target delegates allocation to the daemon.
         let mappings = natmap.mappings();
         assert_eq!(mappings.len(), 1);
         assert_eq!(mappings[0].1.host_port, 0);
-        // The registration uses the port the daemon allocated and reported.
         let regs = consul.registrations();
         assert_eq!(regs.len(), 1);
         assert_eq!(regs[0].port, FAKE_ALLOCATED_PORT);
@@ -1327,15 +1297,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_service_docker_forward_local_dynamic_requests_zero_host_port() {
-        let dir = tempfile::tempdir().unwrap();
-        let natmap = Arc::new(FakeNatmap::default());
-        let consul = Arc::new(FakeConsul::default());
-        let daemon = make_daemon(
-            &dir,
-            natmap.clone(),
-            consul.clone(),
-            Arc::new(FakeDocker::with_running(vec![])),
-        );
+        let (_dir, natmap, consul, daemon) = make_sync_daemon();
 
         let info = make_container_info("abc123def456", "web", None);
         let mut resolved = make_resolved(
@@ -1366,16 +1328,8 @@ mod tests {
 
     #[tokio::test]
     async fn sync_service_dynamic_mapping_not_found_is_fatal() {
-        let dir = tempfile::tempdir().unwrap();
-        let natmap = Arc::new(FakeNatmap::default());
+        let (_dir, natmap, consul, daemon) = make_sync_daemon();
         natmap.not_found_add_mapping.store(true, Ordering::SeqCst);
-        let consul = Arc::new(FakeConsul::default());
-        let daemon = make_daemon(
-            &dir,
-            natmap.clone(),
-            consul.clone(),
-            Arc::new(FakeDocker::with_running(vec![])),
-        );
 
         let info = make_container_info("abc123def456", "web", None);
         let mut resolved = make_resolved(
@@ -1385,8 +1339,8 @@ mod tests {
         );
         resolved.bind_ip = Some("10.0.0.5".into());
 
-        // A dynamic request has no requested port to fall back to — the
-        // daemon's 404 must fail the sync rather than register port 0.
+        // A dynamic request has no port to fall back to: the daemon's 404 must
+        // fail the sync rather than register port 0.
         let result = daemon
             .sync_service(
                 &make_container_target(&info),
@@ -1402,15 +1356,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_service_policy_route_uses_explicit_src_ip() {
-        let dir = tempfile::tempdir().unwrap();
-        let natmap = Arc::new(FakeNatmap::default());
-        let consul = Arc::new(FakeConsul::default());
-        let daemon = make_daemon(
-            &dir,
-            natmap.clone(),
-            consul.clone(),
-            Arc::new(FakeDocker::with_running(vec![])),
-        );
+        let (_dir, natmap, _consul, daemon) = make_sync_daemon();
 
         let info = make_container_info("abc123def456", "web", None);
         let mut resolved = make_resolved(
@@ -1441,15 +1387,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_service_policy_route_local_falls_back_to_local_ip() {
-        let dir = tempfile::tempdir().unwrap();
-        let natmap = Arc::new(FakeNatmap::default());
-        let consul = Arc::new(FakeConsul::default());
-        let daemon = make_daemon(
-            &dir,
-            natmap.clone(),
-            consul.clone(),
-            Arc::new(FakeDocker::with_running(vec![])),
-        );
+        let (_dir, natmap, _consul, daemon) = make_sync_daemon();
 
         let resolved = make_resolved(
             "loc",
@@ -1475,16 +1413,8 @@ mod tests {
 
     #[tokio::test]
     async fn sync_service_propagates_mapping_failure() {
-        let dir = tempfile::tempdir().unwrap();
-        let natmap = Arc::new(FakeNatmap::default());
+        let (_dir, natmap, consul, daemon) = make_sync_daemon();
         natmap.fail_add_mapping.store(true, Ordering::SeqCst);
-        let consul = Arc::new(FakeConsul::default());
-        let daemon = make_daemon(
-            &dir,
-            natmap.clone(),
-            consul.clone(),
-            Arc::new(FakeDocker::with_running(vec![])),
-        );
 
         let info = make_container_info("abc123def456", "web", None);
         let mut resolved = make_resolved(
@@ -1559,16 +1489,8 @@ services:
     #[tokio::test]
     #[traced_test]
     async fn sync_service_mapping_conflict_is_non_fatal() {
-        let dir = tempfile::tempdir().unwrap();
-        let natmap = Arc::new(FakeNatmap::default());
+        let (_dir, natmap, consul, daemon) = make_sync_daemon();
         natmap.conflict_add_mapping.store(true, Ordering::SeqCst);
-        let consul = Arc::new(FakeConsul::default());
-        let daemon = make_daemon(
-            &dir,
-            natmap.clone(),
-            consul.clone(),
-            Arc::new(FakeDocker::with_running(vec![])),
-        );
 
         let info = make_container_info("abc123def456", "web", None);
         let mut resolved = make_resolved(
@@ -1701,8 +1623,8 @@ services:
 
         let regs = consul.registrations();
         assert_eq!(regs.len(), 1);
-        // No bind_ip / bind_interface configured: the Consul IP falls back to
-        // the container's primary IP from the shared inspect shape.
+        // With no bind_ip / bind_interface, the Consul IP is the container's
+        // primary IP from the shared inspect shape.
         assert_eq!(regs[0].address, expected_ip);
     }
 
@@ -1799,8 +1721,8 @@ services:
         std::fs::write(dir.path().join("discovery.yaml"), config).unwrap();
         let natmap = Arc::new(FakeNatmap::default());
         let consul = Arc::new(FakeConsul::default());
-        // After matching unification the container's own project (from
-        // inspect) must match; the event's compose_project alone is not enough.
+        // The container's own project (from inspect) must match; the event's
+        // compose_project alone is not enough.
         let cinfo = make_container_info("abc123def456", "web", None);
         let daemon = make_daemon(
             &dir,
