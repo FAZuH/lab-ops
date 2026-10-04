@@ -8,12 +8,14 @@
 ### Changed
 
 - Changed host-port allocation so the natmap daemon assigns the ports.
+- Changed natmap to refuse to start when its state file is corrupt instead of reading it as empty.
 
 ### Fixed
 
 - Fixed error logs hiding the real cause behind a generic message
 - Fixed port reservation failing when a port is released and immediately re-allocated.
 - Fixed full sync failure removing services that were already registered.
+- Fixed stale multiport forwarding rules not being removed.
 
 ## 0.1.28 (2026-07-12)
 
