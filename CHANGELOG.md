@@ -1,4 +1,4 @@
-## [Unreleased]
+## 0.2.0 (2026-10-04)
 
 ### Added
 
@@ -65,4 +65,3 @@
 ### Bug Fixes
 
 * Fix cannot access Docker containers via natmap localhost port mappings. ([f1cb5f9](https://github.com/FAZuH/lab-ops/commit/f1cb5f963948c89ffcb88ff44e544a252d05948f))
-
