@@ -1,3 +1,9 @@
+## [Unreleased]
+
+### Fixed
+
+- Fixed DNAT rules pointing at stale container IPs after reboot.
+
 ## 0.2.0 (2026-10-04)
 
 ### Added
