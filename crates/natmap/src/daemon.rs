@@ -470,7 +470,8 @@ impl Daemon {
     /// Re-verifies and reinstalls a tracked mapping, dropping it on failure.
     ///
     /// Returns `Some(mapping)` when the mapping was kept, `None` when it was
-    /// dropped (port held elsewhere, allocation failure, or install failure).
+    /// dropped (re-inspect miss, port held elsewhere, allocation failure, or
+    /// install failure).
     async fn reconcile_tracked_mapping(
         &self,
         container_id: &str,
@@ -479,22 +480,26 @@ impl Daemon {
     ) -> Option<DockerPortMap> {
         let host_addr = m.request.host_addr;
 
-        // Keep the stored IP when the re-inspect above failed.
-        if let Some(&current_ctn_addr) = current_addrs.get(&host_addr) {
-            let proto = m.request.proto;
-            if reconcile_container_addr(
-                &mut m.request,
-                &DockerPortMapRequest {
-                    host_addr,
-                    container_addr: current_ctn_addr,
-                    proto,
-                },
-            ) {
-                tracing::info!(
-                    container.id = %container_id, host.port = %host_addr.port(),
-                    "container IP changed on reload"
-                );
-            }
+        // Drop on re-inspect miss: reinstalling the stored IP would point the
+        // rule at a pre-reboot address with no later event correcting it.
+        let Some(&current_ctn_addr) = current_addrs.get(&host_addr) else {
+            tracing::warn!(container.id = %container_id, host.addr = %host_addr,
+                "re-inspect missed container address on reload, dropping stale mapping");
+            return None;
+        };
+        let proto = m.request.proto;
+        if reconcile_container_addr(
+            &mut m.request,
+            &DockerPortMapRequest {
+                host_addr,
+                container_addr: current_ctn_addr,
+                proto,
+            },
+        ) {
+            tracing::info!(
+                container.id = %container_id, host.port = %host_addr.port(),
+                "container IP changed on reload"
+            );
         }
 
         if self.state.ports.is_allocated(host_addr).await {
@@ -1474,9 +1479,10 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let stored = make_tracked_mapping(8, port, "10.0.0.2:8080");
+        let current_addrs = HashMap::from([(make_addr(port), make_addr(8080))]);
 
         let kept = daemon
-            .reconcile_tracked_mapping("c1", stored, &HashMap::new())
+            .reconcile_tracked_mapping("c1", stored, &current_addrs)
             .await;
 
         assert!(kept.is_none());
@@ -1484,7 +1490,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn reconcile_tracked_mapping_keeps_stored_ip_when_inspect_missing() {
+    async fn reconcile_tracked_mapping_drops_when_reinspect_missing() {
         let fake = Arc::new(FakeIptables::default());
         let ports = Arc::new(PortAllocator::new());
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1496,15 +1502,11 @@ pub(crate) mod tests {
         let stored = make_tracked_mapping(9, test_port(), "10.0.0.2:8080");
 
         let kept = daemon
-            .reconcile_tracked_mapping("c1", stored.clone(), &HashMap::new())
-            .await
-            .unwrap();
+            .reconcile_tracked_mapping("c1", stored, &HashMap::new())
+            .await;
 
-        assert_eq!(
-            kept.request.container_addr,
-            "10.0.0.2:8080".parse().unwrap()
-        );
-        assert_eq!(fake.installed_mappings(), vec![kept]);
+        assert!(kept.is_none());
+        assert!(fake.installed_mappings().is_empty());
     }
 
     // --- Ensure static rule ---
