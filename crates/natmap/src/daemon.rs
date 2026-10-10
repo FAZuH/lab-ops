@@ -323,12 +323,14 @@ impl Daemon {
         let Some(actor) = event.actor else {
             return;
         };
-        let Some(container_id) = actor.id else {
-            return;
-        };
 
         use bollard::plugin::EventMessageTypeEnum::*;
         let Some(typ) = event.typ else {
+            return;
+        };
+
+        let Some(container_id) = Self::container_id_from_event(typ, &actor) else {
+            tracing::debug!(event.type = %typ, "dropping event: cannot resolve container id");
             return;
         };
 
@@ -347,6 +349,26 @@ impl Daemon {
         }
     }
 
+    /// Extracts the container id from a Docker event based on its type.
+    ///
+    /// - CONTAINER events: container id is in `actor.id`.
+    /// - NETWORK events: container id is in `actor.attributes["container"]`; `actor.id` is the network id.
+    /// Returns `None` if the id cannot be resolved for the event type (caller logs).
+    fn container_id_from_event(
+        typ: bollard::plugin::EventMessageTypeEnum,
+        actor: &bollard::models::EventActor,
+    ) -> Option<String> {
+        match typ {
+            bollard::plugin::EventMessageTypeEnum::CONTAINER => actor.id.clone(),
+            bollard::plugin::EventMessageTypeEnum::NETWORK => actor
+                .attributes
+                .as_ref()
+                .and_then(|attrs| attrs.get("container"))
+                .cloned(),
+            _ => None,
+        }
+    }
+
     /// Listens for Docker container events and automatically manages port mappings.
     ///
     /// On `start` / `network connect`: discovers published ports and installs rules.
@@ -361,9 +383,12 @@ impl Daemon {
             since: None,
             until: None,
             filters: Some(
-                [("type".to_string(), vec!["container".to_string()])]
-                    .into_iter()
-                    .collect(),
+                [(
+                    "type".to_string(),
+                    vec!["container".to_string(), "network".to_string()],
+                )]
+                .into_iter()
+                .collect(),
             ),
         };
         let mut stream = docker.events(Some(opts));
@@ -1139,6 +1164,122 @@ pub(crate) mod tests {
         daemon.handle_docker_event(event, &docker).await;
 
         assert!(logs_contain("container.id=\"1234567890\""));
+    }
+
+    /// Builds a NETWORK `EventMessage` the way the engine emits it: the
+    /// network id rides in `actor.id`, the container id in
+    /// `actor.attributes["container"]`.
+    fn make_network_event(action: &str, network_id: &str, container_id: &str) -> EventMessage {
+        EventMessage {
+            action: Some(action.to_string()),
+            actor: Some(EventActor {
+                id: Some(network_id.to_string()),
+                attributes: Some(HashMap::from([
+                    ("container".to_string(), container_id.to_string()),
+                    ("name".to_string(), "test-net".to_string()),
+                    ("type".to_string(), "bridge".to_string()),
+                ])),
+            }),
+            typ: Some(bollard::plugin::EventMessageTypeEnum::NETWORK),
+            ..Default::default()
+        }
+    }
+
+    /// Builds a `Docker` handle without a live daemon: NETWORK `disconnect`
+    /// never dials it, so a plain file stands in for the socket.
+    fn make_offline_docker(temp_dir: &tempfile::TempDir) -> Docker {
+        let sock = temp_dir.path().join("docker.sock");
+        std::fs::write(&sock, b"").unwrap();
+        Docker::connect_with_socket(sock.to_str().unwrap(), 1, bollard::API_DEFAULT_VERSION)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn handle_network_disconnect_uses_attribute_container_id() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+
+        let fake = Arc::new(FakeIptables::default());
+        let ports = Arc::new(PortAllocator::new());
+        let daemon = test_daemon_with(state_path, fake.clone(), ports.clone());
+        let docker = make_offline_docker(&temp_dir);
+
+        // Seed a mapping for the container so disconnect actually flushes something.
+        let port = test_port();
+        let mapping = make_mapping(1, port, 8080, "1234567890");
+        daemon
+            .state
+            .daemon_state
+            .write()
+            .await
+            .mapping
+            .insert("1234567890".into(), vec![mapping.clone()]);
+        ports
+            .allocate(mapping.request.host_addr, TransportProtocol::Tcp)
+            .await
+            .unwrap();
+
+        daemon
+            .handle_docker_event(
+                make_network_event("disconnect", "net-abc123", "1234567890"),
+                &docker,
+            )
+            .await;
+
+        // Verify the container id from attributes was recorded in span (extraction worked).
+        assert!(logs_contain("container.id=\"1234567890\""));
+        // Verify the mapping was actually removed (flush happened).
+        assert_eq!(fake.removed_mappings(), vec![mapping]);
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn handle_docker_event_drops_unresolvable_container_id() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+
+        let daemon = create_test_daemon(state_path);
+        let docker = make_offline_docker(&temp_dir);
+
+        // NETWORK event with no attributes["container"] - unresolvable.
+        let event = EventMessage {
+            action: Some("connect".to_string()),
+            actor: Some(EventActor {
+                id: Some("net-unknown".to_string()),
+                attributes: Some(HashMap::from([(
+                    "name".to_string(),
+                    "test-net".to_string(),
+                )])),
+            }),
+            typ: Some(bollard::plugin::EventMessageTypeEnum::NETWORK),
+            ..Default::default()
+        };
+
+        daemon.handle_docker_event(event, &docker).await;
+
+        // Event should be dropped - no container.id recorded in span.
+        assert!(!logs_contain("container.id="));
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn handle_network_connect_uses_attribute_container_id() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+
+        let daemon = create_test_daemon(state_path);
+        let docker = make_offline_docker(&temp_dir);
+
+        daemon
+            .handle_docker_event(
+                make_network_event("connect", "net-connect-456", "9876543210"),
+                &docker,
+            )
+            .await;
+
+        // Verify the container id from attributes was recorded in span (extraction worked).
+        assert!(logs_contain("container.id=\"9876543210\""));
     }
 
     #[tokio::test]
