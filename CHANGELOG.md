@@ -3,6 +3,7 @@
 ### Fixed
 
 - Fixed DNAT rules pointing at stale container IPs after reboot.
+- Fixed network events acting on the network id instead of the container id.
 
 ## 0.2.0 (2026-10-04)
 
