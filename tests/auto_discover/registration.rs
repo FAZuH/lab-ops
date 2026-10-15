@@ -332,6 +332,53 @@ echo "PASS: port $PORT_AFTER reused across container restart"
     run(&script);
 }
 
+/// Repeated one-shot syncs must be idempotent: the same service keeps its
+/// host port in Consul and its single DNAT rule, instead of accumulating a
+/// fresh ephemeral mapping on every pass (one production node saw 32768,
+/// 32775, 32782, 32789 on four successive syncs, every old rule still installed).
+#[test]
+fn repeated_sync_reuses_host_port() {
+    let cname = "it-sync-reuse";
+    let _guard = ContainerGuard::new(&[cname]);
+    let services_yaml = r#"
+services:
+  it-svc-syncreuse:
+    type: docker
+    match:
+      project: it-svc-syncreuse
+    rproxylocal:
+    - port: 80
+      template: HTTP_PROXY
+      domains:
+      - it-svc-syncreuse.test.local"#;
+    let script = format!(
+        r#"{setup}
+docker run -d --name {cname} -l "com.docker.compose.project=it-svc-syncreuse" nginx:alpine
+{first}
+PORT1=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-syncreuse") | .value.Port')
+if [ -z "$PORT1" ] || [ "$PORT1" = "null" ]; then echo "FAIL: first run not registered" >&2; exit 1; fi
+
+{sync}
+PORT2=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-syncreuse") | .value.Port')
+{sync}
+PORT3=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-syncreuse") | .value.Port')
+if [ "$PORT1" != "$PORT2" ] || [ "$PORT2" != "$PORT3" ]; then echo "FAIL: host port drifted across syncs: $PORT1 $PORT2 $PORT3" >&2; exit 1; fi
+
+RULES=$(iptables -t nat -S NATMAP | grep -c 'to-destination' || true)
+if [ "$RULES" -ne 1 ]; then echo "FAIL: expected 1 DNAT rule after 3 syncs, got $RULES" >&2; iptables -t nat -S NATMAP >&2; exit 1; fi
+
+echo "PASS: host port $PORT1 stable across repeated syncs"
+{teardown}
+"#,
+        setup = new_format_setup(services_yaml, ""),
+        first = wait_for_consul_service("it-svc-syncreuse", 30),
+        sync = "lab-ops auto-discover sync /tmp/discovery.yaml >/tmp/sync.log 2>&1 || (echo 'FAIL: sync failed' >&2; cat /tmp/sync.log >&2; exit 1)",
+        teardown = teardown(&[cname]),
+        cname = cname,
+    );
+    run(&script);
+}
+
 #[test]
 fn compose_project_mismatch_skipped() {
     let cname = "it-edge-mismatch";

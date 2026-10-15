@@ -79,6 +79,7 @@ pub async fn add_dnat(
     State(state): State<AppState>,
     Json(config): Json<DnatConfig>,
 ) -> Result<Json<DnatConfig>, (StatusCode, Json<ErrorResponse>)> {
+    let _mutation = state.mutation_lock.lock().await;
     {
         let lock = state.daemon_state.read().await;
         if lock.dnats.iter().any(|d| {
@@ -103,7 +104,7 @@ pub async fn add_dnat(
         return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
     }
     state.daemon_state.write().await.dnats.push(config.clone());
-    state.persist().await;
+    let _ = state.persist().await;
     Ok(Json(config))
 }
 
@@ -120,6 +121,7 @@ pub async fn remove_dnat(
     State(state): State<AppState>,
     Json(config): Json<DnatConfig>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let _mutation = state.mutation_lock.lock().await;
     let mut lock = state.daemon_state.write().await;
     let idx = lock.dnats.iter().position(|d| {
         d.ext_ip == config.ext_ip && d.int_ip == config.int_ip && d.ports == config.ports
@@ -129,7 +131,7 @@ pub async fn remove_dnat(
         let _ = state.iptables.remove_dnat(&config);
         unbind_ports(state.ports.clone(), &config.ext_ip, &config.ports).await;
         drop(lock);
-        state.persist().await;
+        let _ = state.persist().await;
         Ok(StatusCode::OK)
     } else {
         // Absent from state, but a previous instance may have left the rules and
@@ -146,12 +148,13 @@ pub async fn add_snat(
     State(state): State<AppState>,
     Json(config): Json<SnatConfig>,
 ) -> Result<Json<SnatConfig>, (StatusCode, Json<ErrorResponse>)> {
+    let _mutation = state.mutation_lock.lock().await;
     state
         .iptables
         .install_snat(&config)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     state.daemon_state.write().await.snats.push(config.clone());
-    state.persist().await;
+    let _ = state.persist().await;
     Ok(Json(config))
 }
 
@@ -161,6 +164,7 @@ pub async fn remove_snat(
     State(state): State<AppState>,
     Json(config): Json<SnatConfig>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let _mutation = state.mutation_lock.lock().await;
     let mut lock = state.daemon_state.write().await;
     let idx = lock.snats.iter().position(|s| {
         s.int_ip == config.int_ip && s.ext_ip == config.ext_ip && s.ext_if == config.ext_if
@@ -169,7 +173,7 @@ pub async fn remove_snat(
         let config = lock.snats.remove(i);
         let _ = state.iptables.remove_snat(&config);
         drop(lock);
-        state.persist().await;
+        let _ = state.persist().await;
         Ok(StatusCode::OK)
     } else {
         Err(err(StatusCode::NOT_FOUND, "SNAT rule not found"))
@@ -182,6 +186,7 @@ pub async fn add_hairpin(
     State(state): State<AppState>,
     Json(config): Json<HairpinConfig>,
 ) -> Result<Json<HairpinConfig>, (StatusCode, Json<ErrorResponse>)> {
+    let _mutation = state.mutation_lock.lock().await;
     bind_ports(
         state.ports.clone(),
         &config.ext_ip,
@@ -199,7 +204,7 @@ pub async fn add_hairpin(
         .await
         .hairpins
         .push(config.clone());
-    state.persist().await;
+    let _ = state.persist().await;
     Ok(Json(config))
 }
 
@@ -209,6 +214,7 @@ pub async fn remove_hairpin(
     State(state): State<AppState>,
     Json(config): Json<HairpinConfig>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let _mutation = state.mutation_lock.lock().await;
     let mut lock = state.daemon_state.write().await;
     let idx = lock.hairpins.iter().position(|h| {
         h.ext_ip == config.ext_ip && h.int_ip == config.int_ip && h.ports == config.ports
@@ -218,7 +224,7 @@ pub async fn remove_hairpin(
         let _ = state.iptables.remove_hairpin(&config);
         unbind_ports(state.ports.clone(), &config.ext_ip, &config.ports).await;
         drop(lock);
-        state.persist().await;
+        let _ = state.persist().await;
         Ok(StatusCode::OK)
     } else {
         // Absent from state, but a previous instance may have left the rules and
@@ -240,6 +246,7 @@ pub async fn add_policy_route(
     State(state): State<AppState>,
     Json(config): Json<PolicyRouteConfig>,
 ) -> Result<Json<PolicyRouteConfig>, (StatusCode, Json<ErrorResponse>)> {
+    let _mutation = state.mutation_lock.lock().await;
     if let Err(e) = state.policy_route.install(&config) {
         return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
     }
@@ -250,7 +257,7 @@ pub async fn add_policy_route(
         .await
         .policy_routes
         .push(config.clone());
-    state.persist().await;
+    let _ = state.persist().await;
     Ok(Json(config))
 }
 
@@ -263,6 +270,7 @@ pub async fn remove_policy_route(
     State(state): State<AppState>,
     Json(config): Json<PolicyRouteConfig>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let _mutation = state.mutation_lock.lock().await;
     let mut lock = state.daemon_state.write().await;
     let idx = lock
         .policy_routes
@@ -272,7 +280,7 @@ pub async fn remove_policy_route(
         let config = lock.policy_routes.remove(i);
         let _ = state.policy_route.remove(&config);
         drop(lock);
-        state.persist().await;
+        let _ = state.persist().await;
         Ok(StatusCode::OK)
     } else {
         let _ = state.policy_route.remove(&config);
@@ -289,6 +297,7 @@ pub async fn remap_port(
     Path(container_id): Path<String>,
     Json(req): Json<DockerRemapRequest>,
 ) -> Result<Json<Vec<DockerPortMap>>, (StatusCode, Json<ErrorResponse>)> {
+    let _mutation = state.mutation_lock.lock().await;
     let mut lock = state.daemon_state.write().await;
     let container_mappings = lock
         .mapping
@@ -336,7 +345,7 @@ pub async fn remap_port(
     }
 
     drop(lock);
-    state.persist().await;
+    let _ = state.persist().await;
     Ok(Json(new_mappings))
 }
 
@@ -354,6 +363,7 @@ pub async fn add_mapping(
     Path(container_id): Path<String>,
     Json(req): Json<DockerAddMapRequest>,
 ) -> Result<Json<DockerPortMap>, (StatusCode, Json<ErrorResponse>)> {
+    let _mutation = state.mutation_lock.lock().await;
     let (container_ip, container_name) = if let Some(target_ip_str) = &req.target_ip {
         let ip = IpAddr::from_str(target_ip_str)
             .map_err(|e| err(StatusCode::BAD_REQUEST, format!("Invalid target IP: {e}")))?;
@@ -361,7 +371,9 @@ pub async fn add_mapping(
     } else {
         let docker = state
             .docker
-            .as_ref()
+            .read()
+            .await
+            .clone()
             .ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "Docker not available"))?;
         let inspect = docker
             .inspect_container(&container_id, None)
@@ -394,6 +406,76 @@ pub async fn add_mapping(
     let host_ip = IpAddr::from_str(&req.host_ip)
         .map_err(|e| err(StatusCode::BAD_REQUEST, format!("Invalid host IP: {e}")))?;
     let container_addr = SocketAddr::new(container_ip, req.container_port);
+
+    // Re-registering an existing mapping is idempotent: the same container,
+    // container port, and protocol reuse the live host port instead of
+    // allocating a new one (which would duplicate the DNAT rule on every
+    // sync). A changed container address rewrites the rule in place.
+    {
+        let mut lock = state.daemon_state.write().await;
+        let mut updated_in_place = false;
+        if let Some(mappings) = lock.mapping.get_mut(&container_id)
+            && let Some(existing) = mappings.iter_mut().find(|m| {
+                m.request.host_addr.ip() == host_ip
+                    && m.request.container_addr.port() == req.container_port
+                    && m.request.proto == proto
+                    && (req.host_port == 0 || req.host_port == m.request.host_addr.port())
+            })
+        {
+            if existing.request.container_addr != container_addr {
+                let old = existing.clone();
+                existing.request.container_addr = container_addr;
+                let updated = existing.clone();
+                if let Err(e) = state.iptables.remove_mapping(&old) {
+                    // The old rule is still installed: installing a second rule
+                    // with the same comment would double it. Keep the stored
+                    // address matching the rule that is actually there.
+                    existing.request.container_addr = old.request.container_addr;
+                    return Err(err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("iptables error: {e}"),
+                    ));
+                }
+                if let Err(e) = state.iptables.install_dockermap(&updated) {
+                    if let Err(e2) = state.iptables.install_dockermap(&old) {
+                        tracing::error!(
+                            error = %format!("{e2:#}"),
+                            "failed to restore the previous rule after install failure"
+                        );
+                    }
+                    // Memory must keep agreeing with the restored rule, so the
+                    // failed update is not persisted anywhere.
+                    existing.request.container_addr = old.request.container_addr;
+                    return Err(err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("iptables error: {e}"),
+                    ));
+                }
+                tracing::info!(
+                    host.addr = %existing.request.host_addr,
+                    container.addr = %existing.request.container_addr,
+                    "container address changed, mapping updated in place"
+                );
+                updated_in_place = true;
+            }
+            let mapping = existing.clone();
+            let span = tracing::Span::current();
+            span.record(
+                "host.addr",
+                tracing::field::display(mapping.request.host_addr),
+            );
+            span.record(
+                "container.addr",
+                tracing::field::display(mapping.request.container_addr),
+            );
+            drop(lock);
+            if updated_in_place {
+                let _ = state.persist().await;
+            }
+            return Ok(Json(mapping));
+        }
+    }
+
     let host_addr = if req.host_port == 0 {
         allocate_free_port(&state.ports, host_ip, proto).await?
     } else {
@@ -433,7 +515,7 @@ pub async fn add_mapping(
         .entry(container_id)
         .or_default()
         .push(mapping.clone());
-    state.persist().await;
+    let _ = state.persist().await;
     Ok(Json(mapping))
 }
 
@@ -443,6 +525,7 @@ pub async fn remove_mapping(
     State(state): State<AppState>,
     Path((container_id, port_str)): Path<(String, String)>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let _mutation = state.mutation_lock.lock().await;
     let port = port_str.parse::<u16>().unwrap_or(0);
     let mut lock = state.daemon_state.write().await;
     let container_mappings = lock
@@ -457,7 +540,7 @@ pub async fn remove_mapping(
         let _ = state.iptables.remove_mapping(&m);
         state.ports.deallocate(m.request.host_addr).await;
         drop(lock);
-        state.persist().await;
+        let _ = state.persist().await;
         Ok(StatusCode::OK)
     } else {
         Err(err(StatusCode::NOT_FOUND, "Port mapping not found"))
@@ -470,6 +553,7 @@ pub async fn remove_mapping_by_id(
     State(state): State<AppState>,
     Path(id): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let _mutation = state.mutation_lock.lock().await;
     let mut lock = state.daemon_state.write().await;
     for mappings in lock.mapping.values_mut() {
         if let Some(pos) = mappings.iter().position(|m| m.id == id) {
@@ -477,7 +561,7 @@ pub async fn remove_mapping_by_id(
             let _ = state.iptables.remove_mapping(&m);
             state.ports.deallocate(m.request.host_addr).await;
             drop(lock);
-            state.persist().await;
+            let _ = state.persist().await;
             return Ok(StatusCode::OK);
         }
     }
@@ -492,6 +576,7 @@ pub async fn remove_mapping_by_id(
 pub async fn clear_all(
     State(state): State<AppState>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let _mutation = state.mutation_lock.lock().await;
     let mut lock = state.daemon_state.write().await;
 
     for mappings in lock.mapping.values() {
@@ -525,7 +610,7 @@ pub async fn clear_all(
     lock.policy_routes.clear();
 
     drop(lock);
-    state.persist().await;
+    let _ = state.persist().await;
     Ok(StatusCode::OK)
 }
 
@@ -1036,6 +1121,218 @@ mod tests {
         );
         assert_eq!(fake.installed_mappings(), vec![mapping.clone()]);
         assert!(state.ports.is_allocated(host_addr).await);
+    }
+
+    #[tokio::test]
+    async fn add_mapping_reregister_reuses_live_host_port() {
+        // Regression: every sync sent `host_port: 0` and
+        // got a fresh ephemeral port plus a second DNAT rule for the same
+        // container port, so duplicates accumulated until an operator cleaned
+        // them by hand.
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Arc::new(FakeIptables::default());
+        let state = test_app_state_with(&dir, fake.clone());
+        let req = DockerAddMapRequest {
+            host_ip: "127.0.0.1".into(),
+            host_port: 0,
+            container_port: 80,
+            target_ip: Some("10.0.0.2".into()),
+            proto: TransportProtocol::Tcp,
+        };
+
+        let first = add_mapping(State(state.clone()), Path("c1".into()), Json(req.clone()))
+            .await
+            .unwrap()
+            .0;
+        let second = add_mapping(State(state.clone()), Path("c1".into()), Json(req))
+            .await
+            .unwrap()
+            .0;
+
+        assert_eq!(
+            second.request.host_addr, first.request.host_addr,
+            "a re-registration must reuse the live host port"
+        );
+        assert_eq!(second.id, first.id, "the mapping keeps its id");
+        assert_eq!(
+            fake.installed_mappings(),
+            vec![first],
+            "a re-registration must not install a second rule"
+        );
+        assert_eq!(
+            state
+                .daemon_state
+                .read()
+                .await
+                .mapping
+                .get("c1")
+                .map(Vec::len),
+            Some(1),
+            "state must hold a single mapping for the container"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_mapping_reregister_updates_container_address_in_place() {
+        // A container restarted with a new IP must have its rule rewritten in
+        // place — same host port, same mapping id — instead of a duplicate
+        // rule pointing at the dead address.
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Arc::new(FakeIptables::default());
+        let state = test_app_state_with(&dir, fake.clone());
+        let make_req = |target: &str| DockerAddMapRequest {
+            host_ip: "127.0.0.1".into(),
+            host_port: 0,
+            container_port: 80,
+            target_ip: Some(target.to_string()),
+            proto: TransportProtocol::Tcp,
+        };
+
+        let first = add_mapping(
+            State(state.clone()),
+            Path("c1".into()),
+            Json(make_req("10.0.0.2")),
+        )
+        .await
+        .unwrap()
+        .0;
+        let second = add_mapping(
+            State(state.clone()),
+            Path("c1".into()),
+            Json(make_req("10.0.0.3")),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(
+            second.request.host_addr, first.request.host_addr,
+            "the live host port must be kept"
+        );
+        assert_eq!(
+            second.request.container_addr,
+            SocketAddr::new(IpAddr::from_str("10.0.0.3").unwrap(), 80)
+        );
+        assert_eq!(second.id, first.id);
+        assert_eq!(
+            fake.removed_mappings(),
+            vec![first.clone()],
+            "the stale rule must be removed"
+        );
+        assert_eq!(
+            fake.installed_mappings(),
+            vec![first, second.clone()],
+            "exactly one rule must be live after the update"
+        );
+        assert_eq!(
+            state
+                .daemon_state
+                .read()
+                .await
+                .mapping
+                .get("c1")
+                .map(Vec::len),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn add_mapping_reregister_update_failure_reverts_stored_address() {
+        // A failed in-place update must leave memory agreeing with the rules
+        // that are actually installed (the old ones), not half-mutated.
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Arc::new(FakeIptables::default());
+        let state = test_app_state_with(&dir, fake.clone());
+        let make_req = |target: &str| DockerAddMapRequest {
+            host_ip: "127.0.0.1".into(),
+            host_port: 0,
+            container_port: 80,
+            target_ip: Some(target.to_string()),
+            proto: TransportProtocol::Tcp,
+        };
+
+        let _first = add_mapping(
+            State(state.clone()),
+            Path("c1".into()),
+            Json(make_req("10.0.0.2")),
+        )
+        .await
+        .unwrap();
+        fake.set_fail_dockermap(true);
+
+        let result = add_mapping(
+            State(state.clone()),
+            Path("c1".into()),
+            Json(make_req("10.0.0.3")),
+        )
+        .await;
+
+        assert_eq!(
+            result.unwrap_err().0,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the failed update must surface an error"
+        );
+        let stored = state.daemon_state.read().await.mapping.get("c1").unwrap()[0].clone();
+        assert_eq!(
+            stored.request.container_addr,
+            SocketAddr::new(IpAddr::from_str("10.0.0.2").unwrap(), 80),
+            "a failed in-place update must revert to the stored address"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_mapping_reregister_remove_failure_reverts_stored_address() {
+        // The remove-failure branch: the stale rule is still installed, so the
+        // update must abort with the old address kept and without installing a
+        // second rule under the same comment.
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Arc::new(FakeIptables::default());
+        let state = test_app_state_with(&dir, fake.clone());
+        let make_req = |target: &str| DockerAddMapRequest {
+            host_ip: "127.0.0.1".into(),
+            host_port: 0,
+            container_port: 80,
+            target_ip: Some(target.to_string()),
+            proto: TransportProtocol::Tcp,
+        };
+
+        let first = add_mapping(
+            State(state.clone()),
+            Path("c1".into()),
+            Json(make_req("10.0.0.2")),
+        )
+        .await
+        .unwrap()
+        .0;
+        fake.set_fail_remove(true);
+
+        let result = add_mapping(
+            State(state.clone()),
+            Path("c1".into()),
+            Json(make_req("10.0.0.3")),
+        )
+        .await;
+
+        assert_eq!(
+            result.unwrap_err().0,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a failed remove must surface an error"
+        );
+        let stored = state.daemon_state.read().await.mapping.get("c1").unwrap()[0].clone();
+        assert_eq!(
+            stored.request.container_addr,
+            SocketAddr::new(IpAddr::from_str("10.0.0.2").unwrap(), 80),
+            "a failed remove must keep the stored address pointing at the surviving rule"
+        );
+        assert_eq!(
+            fake.installed_mappings(),
+            vec![first],
+            "no second rule may be installed under the same comment"
+        );
+        assert!(
+            fake.removed_mappings().is_empty(),
+            "the fake must have rejected the remove"
+        );
     }
 
     #[tokio::test]

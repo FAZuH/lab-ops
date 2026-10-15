@@ -4,8 +4,11 @@
 //! API: lab-lib owns the inspect parsing, and this module converts the shared
 //! [`lab_ops_lab_lib::docker::PortMapping`] shape into natmap's [`DockerPortMap`] view.
 
+use std::net::IpAddr;
+
 use bollard::Docker;
 use color_eyre::Result;
+use color_eyre::eyre::eyre;
 
 use crate::models::DockerPortMap;
 use crate::models::DockerPortMapRequest;
@@ -13,6 +16,14 @@ use crate::models::DockerPortMapRequest;
 /// Connects to the local Docker daemon via its default Unix socket.
 pub fn connect() -> Result<Docker> {
     lab_ops_lab_lib::docker::connect()
+}
+
+/// Inspects a container and returns its primary network IP.
+pub async fn get_container_ip(docker: &Docker, c_id: &str) -> Result<IpAddr> {
+    let inspect = docker.inspect_container(c_id, None).await?;
+    lab_ops_lab_lib::docker::parse_container_inspect(&inspect)
+        .ip
+        .ok_or_else(|| eyre!("container {c_id} has no IP address"))
 }
 
 /// Discovers all published port mappings for a container.
