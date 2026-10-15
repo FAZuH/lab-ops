@@ -49,7 +49,7 @@ test that reaches `allocate`.
 Per-file counts in this file are historical; the **totals** below are the measured source of truth, each with the exact command that produced it. `cargo test -p <crate>` is authoritative.
 
 
-**Total: 296 inline unit tests**, measured from the four lib test binaries after a forced rebuild (`cargo test -p lab-ops -p lab-ops_natmap -p lab-ops_auto-discover -p lab-ops_lab-lib --lib --all-features`): 57 + 145 + 80 + 14. (Measured 2026-10-04, loadavg 14.25.)
+**Total: 307 inline unit tests**, measured from the four lib test binaries after a forced rebuild (`cargo test -p lab-ops -p lab-ops_natmap -p lab-ops_auto-discover -p lab-ops_lab-lib --lib --all-features`): 57 + 154 + 82 + 14. (Measured 2026-10-14.)
 
 ### Doc Tests
 
@@ -88,9 +88,9 @@ Located in `tests/` or `crates/*/tests/` directories.
 
 ### Docker Integration Tests
 
-Located in `tests/natmap_docker.rs` (35 tests) and `tests/auto_discover/` (44 tests across 7 modules), behind `#[cfg(feature = "docker-tests")]`.
+Located in `tests/natmap_docker.rs` (36 tests) and `tests/auto_discover/` (46 tests across 7 modules), behind `#[cfg(feature = "docker-tests")]`.
 
-**natmap Docker tests** (`tests/natmap_docker.rs`, 35 tests):
+**natmap Docker tests** (`tests/natmap_docker.rs`, 36 tests):
 Spins up a privileged Ubuntu container with iptables, runs the natmap daemon, and verifies iptables NAT rule creation/removal, startup flush, graceful shutdown, policy routing, and port allocation via CLI commands over the Unix socket.
 
 | Category | Count (historical) |
@@ -103,7 +103,7 @@ Spins up a privileged Ubuntu container with iptables, runs the natmap daemon, an
 | Policy routing | 2 |
 | Other | 9 |
 
-**auto-discover Docker tests** (`tests/auto_discover/`, 44 tests across 7 modules):
+**auto-discover Docker tests** (`tests/auto_discover/`, 46 tests across 7 modules):
 Spins up a privileged Docker container running Consul, natmap, and auto-discover daemons. Verifies Consul registration, port binding, forwarding metadata, crash recovery, config change handling, registration metadata, forwarding sync (DNAT rules), concurrency, and large configs.
 
 | Module | Tests | Covers |
@@ -111,14 +111,14 @@ Spins up a privileged Docker container running Consul, natmap, and auto-discover
 | `forwarding.rs` | 9 | DNAT sync, duplicate/stale rules, multi-port, hairpin, preserve_src_ip hairpin |
 
 | `port_binding.rs` | 5 | Static/ephemeral ports, bind_ip, bind_interface, local forwarding |
-| `registration.rs` | 12 | Consul registrations, container events, domain slug, extra fields, concurrent starts |
-| `recovery.rs` | 7 | Config changes, crash recovery, YAML validation, pre/postprocess, config sync |
+| `registration.rs` | 13 | Consul registrations, container events, domain slug, extra fields, concurrent starts, sync idempotency |
+| `recovery.rs` | 8 | Config changes, crash recovery, YAML validation, pre/postprocess, config sync, restart-with-state |
 | `local_services.rs` | 4 | Local service type, forwarding remote, reachability, combined rproxy+forwarding |
 | `preserve_src_ip.rs` | 6 | Global/per-service preserve_src_ip, policy route, idempotency, cleanup |
 
 | `startup_race.rs` | 1 | Startup race before natmap socket is ready |
 
-**Total: 79 Docker tests**: 35 (`tests/natmap_docker`) + 44 (`tests/auto_discover/`). Reproduce with `cargo test -p lab-ops --test natmap_docker --all-features` and `cargo test -p lab-ops --test auto_discover --all-features`.
+**Total: 82 Docker tests**: 36 (`tests/natmap_docker`) + 46 (`tests/auto_discover/`). Reproduce with `cargo test -p lab-ops --test natmap_docker --all-features` and `cargo test -p lab-ops --test auto_discover --all-features`.
 
 The Docker image is built once via `Once` from `ubuntu:24.04` with `iptables` installed.
 

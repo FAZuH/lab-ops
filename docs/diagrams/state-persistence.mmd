@@ -22,4 +22,4 @@ flowchart LR
     SHUTDOWN -->|"deallocate_all()"| PORTS["Release ports"]
 
     STARTUP -->|"read"| JSON
-    STARTUP -->|"reconcile"| DS
+    STARTUP -->|"reconcile (install mappings from stored addresses when Docker is down)"| DS

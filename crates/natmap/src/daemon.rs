@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use axum::Router;
 use axum::routing::delete;
@@ -35,8 +36,10 @@ use hyper_util::server::conn::auto::Builder;
 use lab_ops_lab_lib::port::PortAllocator;
 use serde::Serialize;
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 use tower_service::Service;
+use tracing::Instrument;
 use tracing::info;
 
 use crate::api::add_dnat;
@@ -60,9 +63,15 @@ use crate::iptables::IptablesManager;
 use crate::models::DaemonState;
 use crate::models::DnatConfig;
 use crate::models::DockerPortMap;
-use crate::models::DockerPortMapRequest;
 use crate::models::HairpinConfig;
 use crate::policy_route::PolicyRouteManager;
+
+/// First delay of the Docker reconnect backoff; each failed probe doubles the
+/// delay until it reaches [`DOCKER_RETRY_MAX`].
+const DOCKER_RETRY_MIN: Duration = Duration::from_secs(1);
+/// Cap of the Docker reconnect backoff: probes continue indefinitely, at most
+/// one per this interval once the ramp has topped out.
+const DOCKER_RETRY_MAX: Duration = Duration::from_secs(30);
 
 /// Shared application state held by all Axum route handlers.
 #[derive(Clone)]
@@ -71,8 +80,15 @@ pub struct AppState {
     pub daemon_state: Arc<RwLock<DaemonState>>,
     pub iptables: Arc<dyn Iptables>,
     pub policy_route: Arc<PolicyRouteManager>,
-    /// Docker client (None if Docker is unavailable).
-    pub docker: Option<Docker>,
+    /// Docker client (`None` while Docker is unreachable). The maintenance
+    /// task refreshes it once the Docker API answers again, so a daemon
+    /// started before dockerd recovers without a restart.
+    pub docker: Arc<RwLock<Option<Docker>>>,
+    /// Serializes reload against the mutating API handlers: `reload` flushes
+    /// rules, deallocates every port, and wholesale-replaces daemon state, so
+    /// a handler mutating state/ports/iptables mid-reload would be discarded,
+    /// orphaned past the flush, or racing `deallocate_all`.
+    pub mutation_lock: Arc<Mutex<()>>,
     /// Filesystem path for persisting state to JSON.
     pub state_path: PathBuf,
     pub socket_path: PathBuf,
@@ -91,15 +107,45 @@ impl AppState {
     }
 
     /// Writes the current daemon state to disk (atomically via a temp file).
-    pub async fn persist(&self) {
-        let data = {
+    ///
+    /// Returns an error, and logs it, when the state cannot be serialized or
+    /// the file cannot be written/replaced — never an empty or partial file —
+    /// so `reload` cannot report success while the file disagrees with the
+    /// rules it just installed. Handlers ignore the returned error (already
+    /// logged); `reload` propagates it.
+    pub async fn persist(&self) -> Result<()> {
+        let serialized = {
             let lock = self.daemon_state.read().await;
-            serde_json::to_string(&*lock).unwrap_or_default()
+            serde_json::to_string(&*lock)
+        };
+        let data = match serialized {
+            Ok(data) => data,
+            Err(e) => {
+                tracing::error!(
+                    error = %format!("{e:#}"),
+                    "failed to serialize daemon state, state file left untouched"
+                );
+                return Err(e).wrap_err("failed to serialize daemon state");
+            }
         };
         let tmp = self.state_path.with_extension("tmp");
-        if fs::write(&tmp, data).is_ok() {
-            let _ = fs::rename(&tmp, &self.state_path);
+        if let Err(e) = fs::write(&tmp, data) {
+            tracing::error!(
+                path = %tmp.display(),
+                error = %format!("{e:#}"),
+                "failed to write state file"
+            );
+            return Err(e).wrap_err("failed to write state file");
         }
+        if let Err(e) = fs::rename(&tmp, &self.state_path) {
+            tracing::error!(
+                path = %self.state_path.display(),
+                error = %format!("{e:#}"),
+                "failed to replace state file"
+            );
+            return Err(e).wrap_err("failed to replace state file");
+        }
+        Ok(())
     }
 }
 
@@ -181,7 +227,8 @@ impl Daemon {
             daemon_state,
             iptables,
             policy_route,
-            docker,
+            docker: Arc::new(RwLock::new(docker)),
+            mutation_lock: Arc::new(Mutex::new(())),
             state_path,
             next_id: Arc::new(AtomicU64::new(1)),
             ports,
@@ -197,22 +244,23 @@ impl Daemon {
 
     /// Runs the natmap daemon with explicit paths for the socket, state file, and group.
     ///
-    /// Sets up iptables chains, loads persisted state, spawns Docker event listeners,
-    /// installs a Ctrl-C handler for clean shutdown, and starts the HTTP API server.
+    /// Sets up iptables chains, loads persisted state, spawns the Docker
+    /// maintenance task, installs a Ctrl-C handler for clean shutdown, and
+    /// starts the HTTP API server.
     #[tracing::instrument(skip_all, fields(daemon = "natmap", socket.path = %self.state.socket_path.display()))]
     pub async fn run(&self) -> Result<()> {
-        self.reload().await?;
+        // `false` here means the startup reload could not reach Docker: the
+        // persisted rules are installed from state anyway, and the maintenance
+        // task waits Docker out and reloads once it answers.
+        let docker_live = self.reload().await?;
 
         let state = self.state.clone();
 
-        if state.docker.is_some() {
-            let self_clone = self.clone();
-            tokio::spawn(async move {
-                if let Err(e) = self_clone.listen_docker_events().await {
-                    tracing::error!(error = %format!("{e:#}"), "docker listener exited with error");
-                }
-            });
-        }
+        let maintenance = self.clone();
+        tokio::spawn(
+            async move { maintenance.maintain_docker(docker_live).await }
+                .instrument(tracing::info_span!("docker_maintenance", daemon = "natmap")),
+        );
 
         tokio::spawn(async move {
             tokio::signal::ctrl_c().await.ok();
@@ -272,9 +320,15 @@ impl Daemon {
     /// Loads persisted state from disk and reconciles with the current system state.
     ///
     /// Flushes iptables rules, releases old port reservations, and re-installs
-    /// rules for surviving containers and static configurations.
+    /// rules for surviving containers and static configurations. When Docker
+    /// is unreachable, persisted Docker mappings are reinstalled from their
+    /// stored addresses instead of being dropped. Returns whether the Docker
+    /// reconcile ran, so [`Daemon::run`] can hand that to the maintenance task.
     #[tracing::instrument(skip_all, fields(mappings.count = tracing::field::Empty, dnats.count = tracing::field::Empty))]
-    pub async fn reload(&self) -> Result<()> {
+    pub async fn reload(&self) -> Result<bool> {
+        // Held for the whole reload: flush → deallocate → reconcile → state
+        // swap → persist must not interleave with a mutating handler.
+        let _mutation = self.state.mutation_lock.lock().await;
         info!("crash recovery: flushing stale iptables rules");
         let state = self.state.clone();
         let ports = self.state.ports.clone();
@@ -288,10 +342,13 @@ impl Daemon {
         let _ = policy_route.flush_all(&state.daemon_state.read().await.policy_routes);
         ports.deallocate_all().await;
 
-        let _ = self
-            .reconcile_docker_portmaps(&mut daemon_state)
-            .await
-            .map_err(|e| tracing::error!(error = %format!("{e:#}"), "error when reconciling docker portmaps"));
+        let docker_reconciled = match self.reconcile_docker_portmaps(&mut daemon_state).await {
+            Ok(reconciled) => reconciled,
+            Err(e) => {
+                tracing::error!(error = %format!("{e:#}"), "error when reconciling docker portmaps");
+                false
+            }
+        };
 
         self.reconcile_hairpins(&mut daemon_state).await;
         self.reconcile_dnats(&mut daemon_state).await;
@@ -306,10 +363,10 @@ impl Daemon {
         span.record("dnats.count", dnats_count);
 
         *state.daemon_state.write().await = daemon_state;
-        self.state.persist().await;
+        self.state.persist().await?;
 
         tracing::info!("reload complete");
-        Ok(())
+        Ok(docker_reconciled)
     }
 
     /// Handles a single Docker event, creating the required span.
@@ -353,6 +410,7 @@ impl Daemon {
     ///
     /// - CONTAINER events: container id is in `actor.id`.
     /// - NETWORK events: container id is in `actor.attributes["container"]`; `actor.id` is the network id.
+    ///
     /// Returns `None` if the id cannot be resolved for the event type (caller logs).
     fn container_id_from_event(
         typ: bollard::plugin::EventMessageTypeEnum,
@@ -373,12 +431,10 @@ impl Daemon {
     ///
     /// On `start` / `network connect`: discovers published ports and installs rules.
     /// On `die` / `kill` / `network disconnect`: removes all rules for the container.
-    async fn listen_docker_events(&self) -> Result<()> {
-        let docker = self
-            .state
-            .docker
-            .as_ref()
-            .ok_or_else(|| eyre!("Docker not available"))?;
+    ///
+    /// Returns when the event stream ends (dockerd restart or outage); the
+    /// caller resubscribes after re-verifying the connection.
+    async fn listen_docker_events(&self, docker: &Docker) -> Result<()> {
         let opts = EventsOptions {
             since: None,
             until: None,
@@ -400,6 +456,72 @@ impl Daemon {
         Ok(())
     }
 
+    // --- Docker maintenance ---
+
+    /// Keeps the Docker integration alive for the daemon's lifetime.
+    ///
+    /// `docker_live` reports whether the startup reload already reconciled
+    /// against a serving Docker daemon. When it did not — Docker was missing
+    /// or not yet serving — this waits it out with capped backoff and reloads
+    /// to reconcile once it answers. Whenever the event stream ends (dockerd
+    /// restart or outage), it re-verifies the connection, reloads, and
+    /// resubscribes, so container events are never silently lost again. Runs
+    /// until the process exits.
+    async fn maintain_docker(&self, mut docker_live: bool) {
+        let mut delay = DOCKER_RETRY_MIN;
+        loop {
+            if !docker_live {
+                while self.reconnect_docker().await.is_none() {
+                    tracing::debug!(
+                        retry.delay_secs = delay.as_secs(),
+                        "docker not answering, retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(DOCKER_RETRY_MAX);
+                }
+                delay = DOCKER_RETRY_MIN;
+                tracing::info!("docker available, reloading to reconcile");
+                if let Err(e) = self.reload().await {
+                    tracing::error!(error = %format!("{e:#}"), "reload failed after docker became available");
+                }
+            }
+            let Some(docker) = self.state.docker.read().await.clone() else {
+                docker_live = false;
+                continue;
+            };
+            if let Err(e) = self.listen_docker_events(&docker).await {
+                tracing::warn!(error = %format!("{e:#}"), "docker event stream ended, resubscribing");
+            }
+            // The stream only ends when dockerd went away or restarted:
+            // re-verify (a reload reconciles whatever changed) before listening.
+            docker_live = false;
+        }
+    }
+
+    /// Verifies the stored Docker client answers the API, connecting first
+    /// when there is none.
+    ///
+    /// Returns the serving client, or `None` after clearing the slot, so a
+    /// handle built before the socket existed (or after dockerd died) is not
+    /// reused forever.
+    async fn reconnect_docker(&self) -> Option<Docker> {
+        let candidate = match self.state.docker.read().await.clone() {
+            Some(d) => d,
+            None => docker::connect().ok()?,
+        };
+        let opt = ListContainersOptionsBuilder::new().build();
+        match candidate.list_containers(Some(opt)).await {
+            Ok(_) => {
+                *self.state.docker.write().await = Some(candidate.clone());
+                Some(candidate)
+            }
+            Err(_) => {
+                *self.state.docker.write().await = None;
+                None
+            }
+        }
+    }
+
     async fn on_container_stop(&self, container_id: String) {
         tracing::debug!("container died, flushing rules");
         let state = &self.state;
@@ -414,7 +536,7 @@ impl Daemon {
             state.ports.deallocate(m.request.host_addr).await;
         }
         drop(lock);
-        state.persist().await;
+        let _ = state.persist().await;
     }
 
     async fn on_container_start(&self, container_id: String, docker: &Docker) {
@@ -435,7 +557,7 @@ impl Daemon {
         existing.retain(|m| !auto_comments.contains(&m.rule_comment));
         existing.extend(assigned);
         drop(lock);
-        state.persist().await;
+        let _ = state.persist().await;
     }
 
     /// Allocates and installs rules for a container's freshly discovered mappings.
@@ -494,36 +616,28 @@ impl Daemon {
 
     /// Re-verifies and reinstalls a tracked mapping, dropping it on failure.
     ///
-    /// Returns `Some(mapping)` when the mapping was kept, `None` when it was
-    /// dropped (re-inspect miss, port held elsewhere, allocation failure, or
+    /// `current_ip` is the container's re-inspected primary IP, when Docker
+    /// could report one. A changed IP retargets the rule in place; an unknown
+    /// IP keeps the stored address — the container is running (the caller
+    /// checked), so the rule must come back rather than be dropped for a
+    /// Docker hiccup. Returns `Some(mapping)` when the mapping was kept,
+    /// `None` when it was dropped (port held elsewhere, allocation failure, or
     /// install failure).
     async fn reconcile_tracked_mapping(
         &self,
         container_id: &str,
         mut m: DockerPortMap,
-        current_addrs: &HashMap<SocketAddr, SocketAddr>,
+        current_ip: Option<IpAddr>,
     ) -> Option<DockerPortMap> {
         let host_addr = m.request.host_addr;
 
-        // Drop on re-inspect miss: reinstalling the stored IP would point the
-        // rule at a pre-reboot address with no later event correcting it.
-        let Some(&current_ctn_addr) = current_addrs.get(&host_addr) else {
-            tracing::warn!(container.id = %container_id, host.addr = %host_addr,
-                "re-inspect missed container address on reload, dropping stale mapping");
-            return None;
-        };
-        let proto = m.request.proto;
-        if reconcile_container_addr(
-            &mut m.request,
-            &DockerPortMapRequest {
-                host_addr,
-                container_addr: current_ctn_addr,
-                proto,
-            },
-        ) {
+        if let Some(ip) = current_ip
+            && m.request.container_addr.ip() != ip
+        {
+            m.request.container_addr.set_ip(ip);
             tracing::info!(
                 container.id = %container_id, host.port = %host_addr.port(),
-                "container IP changed on reload"
+                "container IP changed on reload, retargeting rule"
             );
         }
 
@@ -563,71 +677,129 @@ impl Daemon {
         installed
     }
 
-    async fn reconcile_docker_portmaps(&self, daemon_state: &mut DaemonState) -> Result<()> {
-        if let Some(docker) = &self.state.docker {
-            let opt = ListContainersOptionsBuilder::new().build();
-            let running_ids: HashSet<String> = docker
-                .list_containers(Some(opt))
-                .await?
-                .into_iter()
-                .filter_map(|c| c.id)
-                .collect();
-
-            let mut max_id: u64 = 0;
-            let old_maps: Vec<(String, Vec<DockerPortMap>)> =
-                daemon_state.mapping.drain().collect();
-            let mut new_docker = HashMap::new();
-
-            for (id, maps) in old_maps {
-                if !running_ids.contains(&id) {
-                    tracing::info!(container.id = %id, "container gone, removing mappings");
-                    continue;
-                }
-
-                // Re-inspect: the network may have been recreated while the daemon was down.
-                let current_addrs: HashMap<SocketAddr, SocketAddr> =
-                    docker::get_port_mappings(docker, &id)
-                        .await
-                        .ok()
-                        .into_iter()
-                        .flat_map(|mappings| {
-                            mappings
-                                .into_iter()
-                                .map(|m| (m.request.host_addr, m.request.container_addr))
-                        })
-                        .collect();
-
-                let mut kept = Vec::new();
-                for m in maps {
-                    if let Some(m) = self.reconcile_tracked_mapping(&id, m, &current_addrs).await {
-                        max_id = max_id.max(m.id);
-                        kept.push(m);
-                    }
-                }
-                if !kept.is_empty() {
-                    new_docker.insert(id, kept);
-                }
+    /// Reconciles persisted Docker mappings against the live Docker daemon.
+    ///
+    /// Returns whether the Docker reconcile ran. When Docker is unreachable —
+    /// no client yet, or the API does not answer — the persisted mappings are
+    /// reinstalled from their stored addresses instead
+    /// ([`Daemon::install_persisted_mappings`]), so a Docker outage at startup
+    /// never leaves the flushed chain empty.
+    async fn reconcile_docker_portmaps(&self, daemon_state: &mut DaemonState) -> Result<bool> {
+        let docker = self.state.docker.read().await.clone();
+        let Some(docker) = docker else {
+            tracing::info!("docker unavailable, reinstalling persisted mappings from state");
+            self.install_persisted_mappings(daemon_state).await;
+            return Ok(false);
+        };
+        match self.reconcile_live_portmaps(&docker, daemon_state).await {
+            Ok(()) => Ok(true),
+            Err(e) => {
+                self.install_persisted_mappings(daemon_state).await;
+                Err(e)
             }
-
-            let tracked: HashSet<String> = new_docker.keys().cloned().collect();
-            for id in untracked_container_ids(&running_ids, &tracked) {
-                tracing::info!(container.id = %id, "discovering untracked container");
-                let Ok(discovered) = docker::get_port_mappings(docker, id).await else {
-                    continue;
-                };
-                let installed = self
-                    .ensure_container_mappings(id, discovered, &mut max_id)
-                    .await;
-                if !installed.is_empty() {
-                    new_docker.insert(id.to_string(), installed);
-                }
-            }
-
-            daemon_state.mapping = new_docker;
-            self.state
-                .next_id
-                .store(max_id.saturating_add(1), Ordering::SeqCst);
         }
+    }
+
+    /// Reinstalls every persisted mapping from its stored addresses, without
+    /// Docker to verify against.
+    ///
+    /// Used when Docker is unreachable during reload: the chain was just
+    /// flushed, so each persisted mapping must be reinstalled as recorded or
+    /// its rules silently vanish until the next Docker reconcile. Mappings
+    /// whose ports cannot be reserved are dropped with a warning, and the id
+    /// counter is advanced past the highest persisted id.
+    async fn install_persisted_mappings(&self, daemon_state: &mut DaemonState) {
+        let mut max_id: u64 = 0;
+        let mut keep: HashMap<String, Vec<DockerPortMap>> = HashMap::new();
+        for (container_id, maps) in daemon_state.mapping.drain() {
+            let mut kept = Vec::new();
+            for m in maps {
+                max_id = max_id.max(m.id);
+                if let Err(e) =
+                    ensure_docker_mapping(&self.state.ports, self.state.iptables.as_ref(), &m).await
+                {
+                    tracing::warn!(container.id = %container_id, mapping = ?m, error = %format!("{e:#}"),
+                        "failed to reinstall persisted mapping, dropping");
+                    continue;
+                }
+                kept.push(m);
+            }
+            if !kept.is_empty() {
+                keep.insert(container_id, kept);
+            }
+        }
+        daemon_state.mapping = keep;
+        self.state
+            .next_id
+            .store(max_id.saturating_add(1), Ordering::SeqCst);
+    }
+
+    async fn reconcile_live_portmaps(
+        &self,
+        docker: &Docker,
+        daemon_state: &mut DaemonState,
+    ) -> Result<()> {
+        let opt = ListContainersOptionsBuilder::new().build();
+        let running_ids: HashSet<String> = docker
+            .list_containers(Some(opt))
+            .await?
+            .into_iter()
+            .filter_map(|c| c.id)
+            .collect();
+
+        let mut max_id: u64 = 0;
+        let old_maps: Vec<(String, Vec<DockerPortMap>)> = daemon_state.mapping.drain().collect();
+        let mut new_docker = HashMap::new();
+
+        for (id, maps) in old_maps {
+            if !running_ids.contains(&id) {
+                tracing::info!(container.id = %id, "container gone, removing mappings");
+                continue;
+            }
+
+            // Re-inspect: the network may have been recreated while the daemon was down.
+            let current_ip = match docker::get_container_ip(docker, &id).await {
+                Ok(ip) => Some(ip),
+                Err(e) => {
+                    tracing::warn!(
+                        container.id = %id,
+                        error = %format!("{e:#}"),
+                        "container inspect failed on reload, keeping stored address"
+                    );
+                    None
+                }
+            };
+
+            let mut kept = Vec::new();
+            for m in maps {
+                if let Some(m) = self.reconcile_tracked_mapping(&id, m, current_ip).await {
+                    max_id = max_id.max(m.id);
+                    kept.push(m);
+                }
+            }
+            if !kept.is_empty() {
+                new_docker.insert(id, kept);
+            }
+        }
+
+        let tracked: HashSet<String> = new_docker.keys().cloned().collect();
+        for id in untracked_container_ids(&running_ids, &tracked) {
+            tracing::info!(container.id = %id, "discovering untracked container");
+            let Ok(discovered) = docker::get_port_mappings(docker, id).await else {
+                continue;
+            };
+            let installed = self
+                .ensure_container_mappings(id, discovered, &mut max_id)
+                .await;
+            if !installed.is_empty() {
+                new_docker.insert(id.to_string(), installed);
+            }
+        }
+
+        daemon_state.mapping = new_docker;
+        self.state
+            .next_id
+            .store(max_id.saturating_add(1), Ordering::SeqCst);
         Ok(())
     }
 
@@ -797,20 +969,6 @@ fn untracked_container_ids<'a>(
         .collect()
 }
 
-/// Updates `stored` container address from `current` if it changed.
-///
-/// Returns `true` if an update was made.
-fn reconcile_container_addr(
-    stored: &mut DockerPortMapRequest,
-    current: &DockerPortMapRequest,
-) -> bool {
-    if stored.container_addr == current.container_addr {
-        return false;
-    }
-    stored.container_addr = current.container_addr;
-    true
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use std::collections::HashMap;
@@ -824,7 +982,10 @@ pub(crate) mod tests {
     use std::sync::atomic::AtomicU64;
     use std::sync::atomic::Ordering;
 
+    use axum::Json;
     use axum::Router;
+    use axum::extract::Path;
+    use axum::extract::State;
     use bollard::Docker;
     use bollard::models::EventActor;
     use bollard::models::EventMessage;
@@ -838,12 +999,13 @@ pub(crate) mod tests {
     use super::StaticRule;
     use super::ensure_docker_mapping;
     use super::ensure_static_rule;
-    use super::reconcile_container_addr;
     use super::resolve_stale_container;
     use super::untracked_container_ids;
+    use crate::api::add_mapping;
     use crate::iptables::Iptables;
     use crate::models::DaemonState;
     use crate::models::DnatConfig;
+    use crate::models::DockerAddMapRequest;
     use crate::models::DockerPortMap;
     use crate::models::DockerPortMapRequest;
     use crate::models::HairpinConfig;
@@ -861,6 +1023,7 @@ pub(crate) mod tests {
         rules_lines: Mutex<Vec<String>>,
         flushed: AtomicBool,
         fail_dockermap: AtomicBool,
+        fail_remove: AtomicBool,
         fail_dnat: AtomicBool,
         fail_hairpin: AtomicBool,
     }
@@ -876,7 +1039,8 @@ pub(crate) mod tests {
             self.installed_mappings.lock().unwrap().clone()
         }
 
-        fn removed_mappings(&self) -> Vec<DockerPortMap> {
+        /// Every mapping the fake iptables was asked to remove.
+        pub(crate) fn removed_mappings(&self) -> Vec<DockerPortMap> {
             self.removed_mappings.lock().unwrap().clone()
         }
 
@@ -896,6 +1060,11 @@ pub(crate) mod tests {
         /// Test hook: make the next `install_dockermap` fail.
         pub(crate) fn set_fail_dockermap(&self, fail: bool) {
             self.fail_dockermap.store(fail, Ordering::SeqCst);
+        }
+
+        /// Test hook: make `remove_mapping` fail.
+        pub(crate) fn set_fail_remove(&self, fail: bool) {
+            self.fail_remove.store(fail, Ordering::SeqCst);
         }
 
         fn set_fail_dnat(&self, fail: bool) {
@@ -922,6 +1091,9 @@ pub(crate) mod tests {
         }
 
         fn remove_mapping(&self, map: &DockerPortMap) -> color_eyre::Result<()> {
+            if self.fail_remove.load(Ordering::SeqCst) {
+                return Err(eyre!("fake docker mapping remove failure"));
+            }
             self.removed_mappings.lock().unwrap().push(map.clone());
             Ok(())
         }
@@ -1056,18 +1228,22 @@ pub(crate) mod tests {
         Arc::new(RwLock::new(state))
     }
 
-    fn make_stored_request(host: &str, container: &str) -> DockerPortMapRequest {
-        DockerPortMapRequest {
-            host_addr: host.parse().unwrap(),
-            container_addr: container.parse().unwrap(),
-            proto: TransportProtocol::Tcp,
-        }
-    }
-
     fn test_daemon_with(
         state_path: PathBuf,
         iptables: Arc<dyn Iptables>,
         ports: Arc<PortAllocator>,
+    ) -> Daemon {
+        test_daemon_with_docker(state_path, iptables, ports, None)
+    }
+
+    /// Like [`test_daemon_with`], but with an explicit Docker client — pass
+    /// `Some` with a handle pointing at a dead socket to exercise the
+    /// not-yet-serving Docker paths.
+    pub(crate) fn test_daemon_with_docker(
+        state_path: PathBuf,
+        iptables: Arc<dyn Iptables>,
+        ports: Arc<PortAllocator>,
+        docker: Option<Docker>,
     ) -> Daemon {
         let daemon_state = Arc::new(RwLock::new(DaemonState::default()));
         let policy_route = Arc::new(PolicyRouteManager::new());
@@ -1077,7 +1253,8 @@ pub(crate) mod tests {
             daemon_state,
             iptables,
             policy_route,
-            docker: None,
+            docker: Arc::new(RwLock::new(docker)),
+            mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             state_path,
             next_id: Arc::new(AtomicU64::new(1)),
             ports,
@@ -1104,7 +1281,8 @@ pub(crate) mod tests {
             daemon_state,
             iptables,
             policy_route,
-            docker: None,
+            docker: Arc::new(RwLock::new(None)),
+            mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             state_path: dir.path().join("state.json"),
             next_id: Arc::new(AtomicU64::new(1)),
             ports: Arc::new(PortAllocator::new()),
@@ -1355,39 +1533,6 @@ pub(crate) mod tests {
         assert!(result.is_empty());
     }
 
-    #[test]
-    fn reconcile_addr_no_change() {
-        let mut stored = make_stored_request("0.0.0.0:9000", "10.0.0.2:9000");
-        let current = make_stored_request("0.0.0.0:9000", "10.0.0.2:9000");
-        assert!(!reconcile_container_addr(&mut stored, &current));
-        assert_eq!(
-            stored.container_addr,
-            "10.0.0.2:9000".parse::<SocketAddr>().unwrap()
-        );
-    }
-
-    #[test]
-    fn reconcile_addr_updated() {
-        let mut stored = make_stored_request("0.0.0.0:9000", "10.0.0.2:9000");
-        let current = make_stored_request("0.0.0.0:9000", "10.0.0.3:9000");
-        assert!(reconcile_container_addr(&mut stored, &current));
-        assert_eq!(
-            stored.container_addr,
-            "10.0.0.3:9000".parse::<SocketAddr>().unwrap()
-        );
-    }
-
-    #[test]
-    fn reconcile_addr_different_host_port_same_container_ip() {
-        let mut stored = make_stored_request("0.0.0.0:8080", "10.0.0.2:80");
-        let current = make_stored_request("0.0.0.0:9090", "10.0.0.2:80");
-        assert!(!reconcile_container_addr(&mut stored, &current));
-        assert_eq!(
-            stored.container_addr,
-            "10.0.0.2:80".parse::<SocketAddr>().unwrap()
-        );
-    }
-
     // --- Ensure docker mapping ---
 
     #[tokio::test]
@@ -1592,16 +1737,66 @@ pub(crate) mod tests {
         );
         let port = test_port();
         let stored = make_tracked_mapping(7, port, "10.0.0.2:8080");
-        let current_addrs = HashMap::from([(make_addr(port), make_addr(8080))]);
+        let current_ip = Some(make_addr(8080).ip());
 
         let kept = daemon
-            .reconcile_tracked_mapping("c1", stored.clone(), &current_addrs)
+            .reconcile_tracked_mapping("c1", stored.clone(), current_ip)
             .await
             .unwrap();
 
         assert_eq!(kept.request.container_addr, make_addr(8080));
-        assert_eq!(fake.installed_mappings(), vec![kept.clone()]);
+        assert_eq!(fake.installed_mappings(), vec![kept]);
         assert!(ports.is_allocated(make_addr(port)).await);
+    }
+
+    #[tokio::test]
+    async fn reconcile_tracked_mapping_retargets_changed_container_ip() {
+        let fake = Arc::new(FakeIptables::default());
+        let ports = Arc::new(PortAllocator::new());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let daemon = test_daemon_with(
+            temp_dir.path().join("state.json"),
+            fake.clone(),
+            ports.clone(),
+        );
+        let port = test_port();
+        let stored = make_tracked_mapping(7, port, "10.0.0.2:8080");
+        let current_ip = Some(make_addr(8081).ip());
+
+        let kept = daemon
+            .reconcile_tracked_mapping("c1", stored.clone(), current_ip)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            kept.request.container_addr,
+            SocketAddr::new(make_addr(8081).ip(), 8080),
+            "the container port is kept, only the IP is retargeted"
+        );
+        assert_eq!(fake.installed_mappings(), vec![kept]);
+    }
+
+    #[tokio::test]
+    async fn reconcile_tracked_mapping_keeps_stored_address_when_inspect_unavailable() {
+        // Docker could not report an IP (inspect hiccup) — the container is
+        // running, so the stored address must be reinstalled, not dropped.
+        let fake = Arc::new(FakeIptables::default());
+        let ports = Arc::new(PortAllocator::new());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let daemon = test_daemon_with(
+            temp_dir.path().join("state.json"),
+            fake.clone(),
+            ports.clone(),
+        );
+        let port = test_port();
+        let stored = make_tracked_mapping(9, port, "10.0.0.2:8080");
+
+        let kept = daemon
+            .reconcile_tracked_mapping("c1", stored.clone(), None)
+            .await;
+
+        assert_eq!(kept, Some(stored.clone()));
+        assert_eq!(fake.installed_mappings(), vec![stored]);
     }
 
     #[tokio::test]
@@ -1620,30 +1815,10 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let stored = make_tracked_mapping(8, port, "10.0.0.2:8080");
-        let current_addrs = HashMap::from([(make_addr(port), make_addr(8080))]);
+        let current_ip = Some(make_addr(8080).ip());
 
         let kept = daemon
-            .reconcile_tracked_mapping("c1", stored, &current_addrs)
-            .await;
-
-        assert!(kept.is_none());
-        assert!(fake.installed_mappings().is_empty());
-    }
-
-    #[tokio::test]
-    async fn reconcile_tracked_mapping_drops_when_reinspect_missing() {
-        let fake = Arc::new(FakeIptables::default());
-        let ports = Arc::new(PortAllocator::new());
-        let temp_dir = tempfile::tempdir().unwrap();
-        let daemon = test_daemon_with(
-            temp_dir.path().join("state.json"),
-            fake.clone(),
-            ports.clone(),
-        );
-        let stored = make_tracked_mapping(9, test_port(), "10.0.0.2:8080");
-
-        let kept = daemon
-            .reconcile_tracked_mapping("c1", stored, &HashMap::new())
+            .reconcile_tracked_mapping("c1", stored, current_ip)
             .await;
 
         assert!(kept.is_none());
@@ -1938,5 +2113,156 @@ pub(crate) mod tests {
         assert!(result.is_err());
         assert!(!fake.flushed());
         assert!(ports.is_allocated(make_addr(port)).await);
+    }
+
+    /// Writes `state` to `state_path` in the shape [`AppState::persist`] produces.
+    fn write_persisted_state(state_path: &std::path::Path, state: &DaemonState) {
+        std::fs::write(state_path, serde_json::to_string(state).unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reload_reinstalls_persisted_mappings_when_docker_unavailable() {
+        // VM boot: the daemon starts before dockerd, so the docker client is
+        // None. The chain was just flushed, so the persisted mapping must be
+        // reinstalled from its stored addresses anyway.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+        let fake = Arc::new(FakeIptables::default());
+        let ports = Arc::new(PortAllocator::new());
+        let port = test_port();
+        let mapping = make_mapping(3, port, 8080, "c1");
+        write_persisted_state(
+            &state_path,
+            &DaemonState {
+                mapping: HashMap::from([("c1".to_string(), vec![mapping.clone()])]),
+                ..Default::default()
+            },
+        );
+        let daemon = test_daemon_with(state_path, fake.clone(), ports.clone());
+
+        let _ = daemon.reload().await;
+
+        assert_eq!(fake.installed_mappings(), vec![mapping]);
+        assert!(ports.is_allocated(make_addr(port)).await);
+    }
+
+    #[tokio::test]
+    async fn reload_reinstalls_persisted_mappings_when_docker_not_serving() {
+        // The docker socket file exists (so the client builds) but dockerd is
+        // not answering yet: list_containers fails, and the persisted mapping
+        // must still be reinstalled rather than dropped on the error path.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+        let fake = Arc::new(FakeIptables::default());
+        let ports = Arc::new(PortAllocator::new());
+        let port = test_port();
+        let mapping = make_mapping(3, port, 8080, "c1");
+        write_persisted_state(
+            &state_path,
+            &DaemonState {
+                mapping: HashMap::from([("c1".to_string(), vec![mapping.clone()])]),
+                ..Default::default()
+            },
+        );
+        let daemon = test_daemon_with_docker(
+            state_path,
+            fake.clone(),
+            ports.clone(),
+            Some(make_offline_docker(&temp_dir)),
+        );
+
+        let _ = daemon.reload().await;
+
+        assert_eq!(fake.installed_mappings(), vec![mapping]);
+        assert!(ports.is_allocated(make_addr(port)).await);
+    }
+
+    /// Regression: `reload` runs mid-serve from the Docker maintenance task.
+    /// Without the mutation lock a concurrent `add_mapping` could be discarded
+    /// by the wholesale state swap, orphaned past the flush, or racing
+    /// `deallocate_all` into a double-issued host port. Deterministic version:
+    /// hold the lock, prove reload blocks on it, queue the handler behind it,
+    /// then show the handler's mutation survives the reload.
+    #[tokio::test]
+    async fn add_mapping_queued_behind_runtime_reload_survives() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let fake = Arc::new(FakeIptables::default());
+        let ports = Arc::new(PortAllocator::new());
+        let daemon = test_daemon_with(
+            temp_dir.path().join("state.json"),
+            fake.clone(),
+            ports.clone(),
+        );
+
+        let held = daemon.state.mutation_lock.lock().await;
+        let mut reloader = {
+            let daemon = daemon.clone();
+            tokio::spawn(async move { daemon.reload().await })
+        };
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut reloader)
+                .await
+                .is_err(),
+            "reload must block on the mutation lock while a handler holds it"
+        );
+
+        let add_state = daemon.state.clone();
+        let adder = tokio::spawn(async move {
+            let req = DockerAddMapRequest {
+                host_ip: "127.0.0.1".into(),
+                host_port: 0,
+                container_port: 80,
+                target_ip: Some("10.0.0.2".into()),
+                proto: TransportProtocol::Tcp,
+            };
+            add_mapping(State(add_state), Path("c1".into()), Json(req)).await
+        });
+        // Yield so the handler queues on the lock behind reload (FIFO).
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        drop(held);
+
+        reloader.await.unwrap().unwrap();
+        let added = adder.await.unwrap().unwrap().0;
+
+        assert_eq!(
+            daemon
+                .state
+                .daemon_state
+                .read()
+                .await
+                .mapping
+                .get("c1")
+                .map(Vec::len),
+            Some(1),
+            "the handler's mutation must survive the reload"
+        );
+        assert_eq!(fake.installed_mappings(), vec![added.clone()]);
+        assert!(
+            ports.is_allocated(added.request.host_addr).await,
+            "the host port must stay reserved after reload's deallocate_all"
+        );
+    }
+
+    /// Regression: `persist` must not report success when the file could not
+    /// be written — reload would otherwise look successful with the file
+    /// disagreeing with the installed rules (and a later start would read a
+    /// missing/empty state file).
+    #[tokio::test]
+    async fn persist_reports_write_failure_instead_of_silent_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = test_app_state_with(&dir, Arc::new(FakeIptables::default()));
+        // Parent directory does not exist, so the temp-file write fails.
+        state.state_path = dir.path().join("missing-dir/state.json");
+
+        let result = state.persist().await;
+
+        assert!(
+            result.is_err(),
+            "a failed write must not be reported as success"
+        );
+        assert!(
+            !state.state_path.exists(),
+            "no partial state file must appear"
+        );
     }
 }

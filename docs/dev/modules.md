@@ -118,9 +118,10 @@ The `handle_list()` function combines raw `iptables-save` output with daemon-man
 The largest module. Contains:
 
 - **`AppState`**: Shared state (DaemonState, IptablesManager, PortAllocator, Docker client, next_id counter)
-- **`run_daemon_with_paths()`**: Startup sequence (setup, reload, event listeners, graceful shutdown)
-- **`reload_state()`**: Crash recovery — flushes stale rules, rebinds from state.json
-- **`persist_state()`**: Atomic write of DaemonState to state.json (via temp file + rename)
+- **`Daemon::run()`**: Startup sequence (setup, reload, Docker maintenance task, graceful shutdown)
+- **`reload()`**: Crash recovery — flushes stale rules, rebinds from state.json; when Docker is unreachable, reinstalls persisted mappings from their stored addresses
+- **`AppState::persist()`**: Atomic write of DaemonState to state.json (via temp file + rename)
+- **`maintain_docker()`**: Docker maintenance task — reconnects with capped backoff, reloads, and resubscribes the event stream
 - **`listen_docker_events()`**: Docker event stream handler for container start/die events
 - **API handlers**: `add_dnat`, `remove_dnat`, `add_snat`, `remove_snat`, `add_hairpin`, `remove_hairpin`, `add_mapping`, `remove_mapping`, `remove_mapping_by_id`, `remap_port`, `list_mappings`
 
