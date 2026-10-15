@@ -227,7 +227,7 @@ Without `--lan-cidr` (full hairpin), it produces:
 
 ### Docker Container Mappings
 
-All Docker commands require the daemon to have access to the Docker socket (`/var/run/docker.sock`). If Docker is unavailable, the daemon will start without Docker support and Docker commands will return an error.
+All Docker commands require the daemon to have access to the Docker socket (`/var/run/docker.sock`). If Docker is unavailable, the daemon starts without Docker support and Docker commands that need inspection return an error. This is not permanent: the daemon reinstalls persisted mappings from `state.json` as soon as it starts, keeps retrying the Docker connection with capped backoff (1 s doubling to a 30 s cap), and reconciles plus starts listening for container events once the Docker API answers — no restart needed when dockerd comes up after natmap.
 
 #### Listing Mappings
 
@@ -264,6 +264,8 @@ lab-ops natmap docker add 8080:127.0.0.1:80 --name my-local-service
 # Host port only — container port is the same
 lab-ops natmap docker add my-nginx 8080
 ```
+
+Re-adding an existing mapping (same container, container port, protocol, and host IP) is idempotent: the daemon returns the live mapping with its host port unchanged and installs no duplicate rule. If the container's address changed, the rule is rewritten in place. This keeps repeated `auto-discover sync` passes on a stable host port. Requesting a *different* explicit host port creates a second mapping for the same container port.
 
 #### Removing a Mapping
 

@@ -139,7 +139,7 @@ Replace custom error enums (`ConfigError`, `DaemonError`, `ConsulError`, etc.) i
 
 ### 4.3. No `unwrap()` / `expect()` / `process::exit()`
 
-- `unwrap()` and `expect()` are only allowed in `LazyLock<Regex>` statics (compile-time known-valid patterns).
+- `unwrap()` and `expect()` are only allowed in `LazyLock<Regex>` statics (compile-time known-valid patterns), and in test code — inline `#[cfg(test)]` modules and `tests/` integration targets (§7.1) — where a failure is itself the assertion.
 - `process::exit()` is never called from library code. Only the binary entrypoint (`main.rs`) may exit the process.
 - Prefer `?` and `bail!()`.
 
@@ -404,6 +404,7 @@ event_loop              ← long-lived, fields: daemon="auto-discover"
 **natmap hierarchy:**
 ```
 daemon                  ← long-lived, fields: daemon="natmap", socket.path
+  docker_maintenance    ← long-lived, field: daemon="natmap"; reconnect, reload, event resubscribe
   handle_docker_event     ← per-event, fields: container.id, event.action
   reload                  ← fields: mappings.count, dnats.count
   add_dnat / remove_dnat  ← fields: ext.ip, int.ip, ports, proto
