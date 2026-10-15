@@ -480,6 +480,8 @@ lab-ops auto-discover --version
 
 The natmap daemon owns ephemeral port allocation. Auto-discover sends `host_port: 0` in the mapping request when it does not specify a host port. The daemon allocates a port from its own ephemeral range (32768-61000) and reports the assigned port in the response. Auto-discover uses the reported port for the Consul registration. Auto-discover persists no port state and does not check ports locally.
 
+Mapping registration is idempotent on the natmap side: re-registering the same container and container port reuses the live host port (rewriting the rule in place if the container's IP changed) instead of allocating a new one. Repeated sync passes therefore keep the Consul registration stable and never accumulate duplicate DNAT rules.
+
 **ForwardRemote services** use static ports from `ext_ports[0]` instead of ephemeral allocation. If the port is already mapped, the daemon rejects the request with a conflict. Auto-discover then registers the service with the requested port.
 
 ## Generation Tracking

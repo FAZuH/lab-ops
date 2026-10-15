@@ -69,7 +69,7 @@ This allows the daemon to find and delete specific rules by container ID and por
 
 ## Crash Recovery Cleaning
 
-On crash recovery (`reload_state()`), the daemon calls `iptables.flush_all_natmap()`:
+On crash recovery (`reload()`), the daemon calls `iptables.flush_all_natmap()`:
 
 1. `iptables -t nat -F NATMAP` — flush all rules from the nat NATMAP chain
 2. `iptables -t nat -X NATMAP` — delete the nat NATMAP chain

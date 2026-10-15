@@ -128,6 +128,7 @@ event_loop              ← long-lived, fields: daemon="auto-discover"
 
 ```
 daemon                  ← long-lived, fields: daemon="natmap", socket.path
+  docker_maintenance    ← long-lived, field: daemon="natmap"; reconnect, reload, event resubscribe
   handle_docker_event     ← per-event, fields: container.id, event.action
   reload                  ← fields: mappings.count, dnats.count
   add_dnat / remove_dnat  ← fields: ext.ip, int.ip, ports, proto

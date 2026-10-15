@@ -112,6 +112,62 @@ docker rm -f it-nmrestart-a it-nmrestart-c 2>/dev/null || true
     run(&script);
 }
 
+/// Restarting natmap with its state.json kept must reinstall the persisted
+/// mapping: the DNAT rule comes back from state, and a follow-up sync
+/// re-registers the same host port instead of allocating a new one.
+#[test]
+fn restart_natmap_with_state_keeps_mappings() {
+    let cname = "it-nmstate-a";
+    let _guard = ContainerGuard::new(&[cname]);
+    let services_yaml = r#"
+services:
+  it-svc-nmstate:
+    type: docker
+    match:
+      project: it-svc-nmstate
+    rproxylocal:
+    - port: 80
+      template: HTTP_PROXY
+      domains:
+      - it-svc-nmstate.test.local"#;
+    let script = format!(
+        r#"{setup}
+{daemon}
+docker run -d --name {cname} -l "com.docker.compose.project=it-svc-nmstate" nginx:alpine
+{first}
+
+PORT_BEFORE=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-nmstate") | .value.Port')
+if [ -z "$PORT_BEFORE" ] || [ "$PORT_BEFORE" = "null" ]; then echo "FAIL: first run not registered" >&2; exit 1; fi
+
+{natmap_down}
+rm -f /tmp/natmap.sock
+lab-ops natmap daemon --socket /tmp/natmap.sock --state /tmp/natmap_state.json --socket-group root >/tmp/natmap2.log 2>&1 &
+NATMAP_PID=$!
+for i in $(seq 1 40); do [ -S /tmp/natmap.sock ] && break; sleep 0.2; done
+if ! [ -S /tmp/natmap.sock ]; then echo "FAIL: natmap did not come back" >&2; cat /tmp/natmap2.log; exit 1; fi
+
+iptables -t nat -S NATMAP | grep -q "natmap:.*:$PORT_BEFORE" || (echo 'FAIL: persisted mapping not reinstalled after restart' >&2; iptables -t nat -S NATMAP >&2; exit 1)
+
+lab-ops auto-discover sync /tmp/discovery.yaml >/tmp/sync.log 2>&1 || (echo 'FAIL: sync failed after natmap restart' >&2; cat /tmp/sync.log >&2; exit 1)
+
+PORT_AFTER=$(curl -sf $CONSUL_HTTP_ADDR/v1/agent/services | jq -r 'to_entries[] | select(.value.Service == "it-svc-nmstate") | .value.Port')
+if [ "$PORT_BEFORE" != "$PORT_AFTER" ]; then echo "FAIL: port changed from $PORT_BEFORE to $PORT_AFTER across the restart" >&2; exit 1; fi
+RULES=$(iptables -t nat -S NATMAP | grep -c 'to-destination' || true)
+if [ "$RULES" -ne 1 ]; then echo "FAIL: expected 1 DNAT rule after re-sync, got $RULES" >&2; iptables -t nat -S NATMAP >&2; exit 1; fi
+
+echo "PASS: mapping and port survived natmap restart with state kept"
+{teardown}
+"#,
+        setup = base_setup(services_yaml, true),
+        daemon = start_daemon("--no-forwarding"),
+        first = wait_for_consul_service("it-svc-nmstate", 30),
+        natmap_down = stop_natmap(),
+        teardown = teardown(&[cname]),
+        cname = cname,
+    );
+    run(&script);
+}
+
 #[test]
 fn add_service_to_config_picked_up_on_sync() {
     let _guard = ContainerGuard::new(&["it-cfg-a", "it-cfg-b"]);

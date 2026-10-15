@@ -588,6 +588,37 @@ mod natmap_docker {
         ]);
     }
 
+    /// Restarting with a persisted state.json must reinstall the stored Docker
+    /// mapping. The test container has no Docker daemon, so this is the VM-boot
+    /// case: dockerd is not up yet, and the chain must not come back empty.
+    #[test]
+    fn restart_with_state_reinstalls_mappings_without_docker() {
+        run_in_docker(&[
+            // Newline-separated statements, not a `&&` chain: a chain before `&`
+            // would background the whole list, and the socket poll below would
+            // then race the restart against a stale socket file.
+            "lab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root >/tmp/d1.log 2>&1 &",
+            "DAEMON_PID=$!",
+            "&&",
+            WAIT_SOCKET,
+            "&&",
+            "lab-ops natmap --socket /tmp/ns docker add 8080:127.0.0.1:80 --name persist-check",
+            "&&",
+            "iptables -t nat -S NATMAP | grep -q 'natmap:persist-check:8080' || (echo 'FAIL: mapping not installed' >&2 && exit 1)",
+            "&&",
+            &stop_job("$DAEMON_PID", "-TERM"),
+            "&&",
+            "rm -f /tmp/ns\nif [ ! -s /tmp/st ]; then echo 'FAIL: state file missing, so the restart check below proves nothing' >&2; exit 1; fi\nlab-ops natmap daemon --socket /tmp/ns --state /tmp/st --socket-group root >/tmp/d2.log 2>&1 &",
+            "D2_PID=$!",
+            "&&",
+            WAIT_SOCKET,
+            "&&",
+            "iptables -t nat -S NATMAP | grep -q 'natmap:persist-check:8080' || (echo 'FAIL: persisted mapping not reinstalled without docker' >&2; iptables -t nat -S NATMAP >&2; cat /tmp/d2.log >&2; exit 1)",
+            "&&",
+            "echo 'PASS'",
+        ]);
+    }
+
     // --- Tests for new Port Allocator (IP_FREEBIND) behaviors ---
 
     /// IP_FREEBIND must allow reserving a port on an IP that is not local to the machine.

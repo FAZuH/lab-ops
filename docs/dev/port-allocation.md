@@ -53,6 +53,22 @@ Instead of binding to `0.0.0.0` or failing when an IP isn't present, the socket 
 
 Keys are the actual `SocketAddr` object (e.g., `203.0.113.43:25`). The IP in the key is the external IP from the DNAT/hairpin config.
 
+## Idempotent Mapping Re-Registration
+
+`POST /mapping/{container_id}` is idempotent for an existing mapping. When the
+same container, container port, and protocol already have a live mapping on the
+requested host IP — and the request either asks for an ephemeral port
+(`host_port: 0`) or names that same host port — the daemon returns the live
+mapping with its host port unchanged and installs no second rule. A changed
+container address (the container restarted on a new IP) rewrites the rule in
+place, keeping the host port and mapping id. Re-registering with a *different*
+explicit host port still creates a second mapping, so one container port can be
+exposed on several host ports.
+
+This is what keeps repeated `auto-discover sync` passes stable: they all send
+`host_port: 0`, and each one gets the same live host port back for its Consul
+registration instead of accumulating a fresh ephemeral mapping per pass.
+
 ## Which Rules Reserve Ports?
 
 | Rule Type | Reserves Port? | Reason |
