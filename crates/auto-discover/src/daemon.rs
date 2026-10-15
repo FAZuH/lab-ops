@@ -212,6 +212,11 @@ impl DiscoveryDaemon {
 
         let mut current_service_ids = Vec::new();
         let mut sync_errors: usize = 0;
+        // Set when any service failed because of a natmap-side outage —
+        // Connect, Http, Internal, or Unavailable (see is_natmap_outage).
+        // The failed services are healthy and unrefreshed this pass, so the
+        // sweep must not interpret them as stale.
+        let mut natmap_outage = false;
 
         let all_resolved = config.resolve_all();
 
@@ -233,6 +238,7 @@ impl DiscoveryDaemon {
                             Ok(id) => ids.push(id),
                             Err(e) => {
                                 sync_errors += 1;
+                                natmap_outage |= is_natmap_outage(&e);
                                 tracing::error!(
                                     service.id_prefix = %resolved.service_id_prefix,
                                     error = %format!("{e:#}"),
@@ -264,6 +270,7 @@ impl DiscoveryDaemon {
                             .map(|id| vec![id])
                             .map_err(|e| {
                                 sync_errors += 1;
+                                natmap_outage |= is_natmap_outage(&e);
                                 tracing::error!(
                                     service.id_prefix = %resolved.service_id_prefix,
                                     error = %format!("{e:#}"),
@@ -280,13 +287,23 @@ impl DiscoveryDaemon {
         }
 
         // Fail-closed: a partial failure with zero registrations blocks the sweep,
-        // so a broken pass never wipes the catalog.
-        let sweep_stale = should_sweep_stale(current_service_ids.len(), sync_errors);
+        // so a broken pass never wipes the catalog. A natmap outage blocks it too:
+        // the services it failed are healthy, only their natmap call was refused,
+        // and nothing re-registers them this pass — sweeping would deregister
+        // them from Consul while they keep running.
+        let sweep_stale =
+            should_sweep_stale(current_service_ids.len(), sync_errors) && !natmap_outage;
         if sweep_stale {
             let _ = self
                 .consul
                 .deregister_stale_services(&server_name, &current_service_ids)
                 .await;
+        } else if natmap_outage {
+            tracing::warn!(
+                services.errors = sync_errors,
+                services.registered = current_service_ids.len(),
+                "natmap unavailable during sync; skipping stale-service deregistration to protect existing registrations"
+            );
         } else {
             tracing::warn!(
                 services.errors = sync_errors,
@@ -295,7 +312,10 @@ impl DiscoveryDaemon {
         }
 
         if !sweep_stale {
-            bail!("sync failed: {sync_errors} service(s) errored, 0 registered");
+            bail!(
+                "sync failed: {sync_errors} service(s) errored, stale sweep skipped ({} registered)",
+                current_service_ids.len()
+            );
         }
 
         tracing::info!(
@@ -592,6 +612,13 @@ impl DiscoveryDaemon {
             Err(e @ NatmapError::NotFound(_)) if host_port == 0 => {
                 Err(e).wrap_err("container not found for dynamic port allocation")
             }
+            // natmap's Docker integration is still recovering (503): an
+            // explicit port registers unchanged, like Conflict. A dynamic
+            // request has no port to register, so it stays fatal — sync()
+            // gates the stale sweep on this outage class.
+            Err(e @ NatmapError::Unavailable(_)) if host_port == 0 => {
+                Err(e).wrap_err("natmap unavailable")
+            }
             Err(NatmapError::Conflict(e)) => {
                 tracing::warn!(
                     error = %format!("{e:#}"),
@@ -601,6 +628,13 @@ impl DiscoveryDaemon {
             }
             Err(NatmapError::NotFound(e)) => {
                 tracing::warn!(error = %format!("{e:#}"), "container not found, registering with requested port");
+                Ok(host_port)
+            }
+            Err(NatmapError::Unavailable(e)) => {
+                tracing::warn!(
+                    error = %e,
+                    "natmap mapping unavailable (503), registering with requested port"
+                );
                 Ok(host_port)
             }
             Err(e) => Err(e).wrap_err("natmap command failed"),
@@ -643,6 +677,30 @@ impl DiscoveryDaemon {
 /// failed to re-register this pass.
 fn should_sweep_stale(registered: usize, errors: usize) -> bool {
     !(errors > 0 && registered == 0)
+}
+
+/// True when `e` traces back to a natmap-side outage rather than a rejection
+/// of this specific service: the daemon is down (`Connect` — socket refused
+/// while natmap restarts), the exchange failed (`Http`), the daemon failed
+/// internally (`Internal`), or its Docker integration is still recovering
+/// (`Unavailable` — 503).
+///
+/// Such a failure must not feed the stale sweep: the service is healthy, only
+/// its natmap call was refused, and it will re-register on the next pass.
+/// Service-specific rejections (`BadRequest`, `NotFound`, `Conflict`) are not
+/// outages and keep the existing sweep semantics.
+fn is_natmap_outage(e: &color_eyre::Report) -> bool {
+    e.chain().any(|c| {
+        matches!(
+            c.downcast_ref::<NatmapError>(),
+            Some(
+                NatmapError::Connect(_)
+                    | NatmapError::Http(_)
+                    | NatmapError::Internal(_)
+                    | NatmapError::Unavailable(_)
+            )
+        )
+    })
 }
 
 /// Match a container against a resolved service definition.
@@ -817,6 +875,8 @@ mod tests {
         fail_add_mapping: AtomicBool,
         conflict_add_mapping: AtomicBool,
         not_found_add_mapping: AtomicBool,
+        unavailable_add_mapping: AtomicBool,
+        connect_add_mapping: AtomicBool,
     }
 
     impl FakeNatmap {
@@ -837,6 +897,14 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<DockerPortMap, NatmapError>> + Send + '_>> {
             let container_id = container_id.to_string();
             Box::pin(async move {
+                if self.connect_add_mapping.load(Ordering::SeqCst) {
+                    return Err(NatmapError::Connect(
+                        "fake natmap socket refused (daemon down)".into(),
+                    ));
+                }
+                if self.unavailable_add_mapping.load(Ordering::SeqCst) {
+                    return Err(NatmapError::Unavailable("fake natmap unavailable".into()));
+                }
                 if self.fail_add_mapping.load(Ordering::SeqCst) {
                     return Err(NatmapError::Internal("fake add_mapping failure".into()));
                 }
@@ -893,11 +961,18 @@ mod tests {
     #[derive(Default)]
     struct FakeConsul {
         registrations: Mutex<Vec<ConsulServiceRegistration>>,
+        stale_sweeps: Mutex<Vec<Vec<String>>>,
     }
 
     impl FakeConsul {
         fn registrations(&self) -> Vec<ConsulServiceRegistration> {
             self.registrations.lock().unwrap().clone()
+        }
+
+        /// Every stale-sweep call's `current_ids` argument (empty when the
+        /// sweep never ran).
+        fn stale_sweeps(&self) -> Vec<Vec<String>> {
+            self.stale_sweeps.lock().unwrap().clone()
         }
     }
 
@@ -923,9 +998,13 @@ mod tests {
         fn deregister_stale_services(
             &self,
             _server_name: &str,
-            _current_ids: &[String],
+            current_ids: &[String],
         ) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send + '_>> {
-            Box::pin(async move { Ok(vec![]) })
+            let ids = current_ids.to_vec();
+            Box::pin(async move {
+                self.stale_sweeps.lock().unwrap().push(ids);
+                Ok(vec![])
+            })
         }
     }
 
@@ -1483,6 +1562,114 @@ services:
         assert!(
             logs_contain("fake add_mapping failure"),
             "the log must carry the cause, not just the wrap_err context"
+        );
+    }
+
+    /// Regression: when natmap answers 503 mid-sync (its Docker integration
+    /// still recovering), the services that failed only because of that outage
+    /// must not fall into the stale sweep — `deregister_stale_services` would
+    /// remove their HEALTHY registrations, which nothing re-registers until
+    /// the next pass.
+    #[tokio::test]
+    async fn sync_natmap_unavailable_skips_stale_deregistration() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = r#"
+node:
+  name: test-node
+services:
+  it-outage-local:
+    type: local
+    address: 10.0.0.99
+    rproxylocal:
+    - port: 80
+      template: HTTP_PROXY
+      domains:
+      - local.test.local
+  it-outage-docker:
+    type: docker
+    match:
+      project: myproj
+    rproxylocal:
+    - port: 80
+      template: HTTP_PROXY
+      domains:
+      - docker.test.local
+"#;
+        std::fs::write(dir.path().join("discovery.yaml"), config).unwrap();
+        let natmap = Arc::new(FakeNatmap::default());
+        natmap.unavailable_add_mapping.store(true, Ordering::SeqCst);
+        let consul = Arc::new(FakeConsul::default());
+        let running = vec![make_container_info("abc123def456", "web", Some("myproj"))];
+        let daemon = make_daemon(
+            &dir,
+            natmap,
+            consul.clone(),
+            Arc::new(FakeDocker::with_running(running)),
+        );
+
+        let _ = daemon.sync().await;
+
+        assert!(
+            !consul.registrations().is_empty(),
+            "the service that needs no natmap call must still register during the outage"
+        );
+        assert!(
+            consul.stale_sweeps().is_empty(),
+            "a natmap outage must not trigger the stale-service sweep"
+        );
+    }
+
+    /// Regression (daemon-restart case): the common outage is natmap being
+    /// *down* — a socket refusal arrives as `NatmapError::Connect`, not as a
+    /// 503. It must gate the stale sweep exactly like `Unavailable`, or every
+    /// service healthy before the restart is deregistered while natmap is
+    /// merely restarting.
+    #[tokio::test]
+    async fn sync_natmap_daemon_down_skips_stale_deregistration() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = r#"
+node:
+  name: test-node
+services:
+  it-down-local:
+    type: local
+    address: 10.0.0.99
+    rproxylocal:
+    - port: 80
+      template: HTTP_PROXY
+      domains:
+      - local.test.local
+  it-down-docker:
+    type: docker
+    match:
+      project: myproj
+    rproxylocal:
+    - port: 80
+      template: HTTP_PROXY
+      domains:
+      - docker.test.local
+"#;
+        std::fs::write(dir.path().join("discovery.yaml"), config).unwrap();
+        let natmap = Arc::new(FakeNatmap::default());
+        natmap.connect_add_mapping.store(true, Ordering::SeqCst);
+        let consul = Arc::new(FakeConsul::default());
+        let running = vec![make_container_info("abc123def456", "web", Some("myproj"))];
+        let daemon = make_daemon(
+            &dir,
+            natmap,
+            consul.clone(),
+            Arc::new(FakeDocker::with_running(running)),
+        );
+
+        let _ = daemon.sync().await;
+
+        assert!(
+            !consul.registrations().is_empty(),
+            "the service that needs no natmap call must still register while natmap is down"
+        );
+        assert!(
+            consul.stale_sweeps().is_empty(),
+            "a natmap daemon-down outage must not trigger the stale-service sweep"
         );
     }
 
