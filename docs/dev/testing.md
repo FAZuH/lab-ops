@@ -24,14 +24,15 @@ Located in `#[cfg(test)] mod tests { }` blocks within source files.
 | `src/cmd/cf2ansible.rs` | 4 | DNS zone parsing, record extraction, YAML output |
 | `src/cmd/cf2terra.rs` | 1 | Terraform HCL output |
 | `src/cmd/dockernet.rs` | 8 | IP formatting and port bind parsing |
-| `crates/lab-lib/src/discovery.rs` | 18 | `discovery.yaml` parsing, defaults propagation, `resolve_all`, container matching |
+| `crates/lab-lib/src/discovery.rs` | 21 | `discovery.yaml` parsing, defaults propagation, `resolve_all`, container matching |
 | `crates/lab-lib/src/docker.rs` | 8 | Inspect parsing, primary-IP selection, port-mapping parsing |
 | `crates/lab-lib/src/port.rs` | 6 | Port reservation lifecycle, conflict detection, UDP binding |
 | `crates/natmap/src/api.rs` | 46 | HTTP handlers, `parse_socket_addrs`, port-reservation decisions for local vs forwarded DNAT |
-| `crates/natmap/src/apply.rs` | 15 | Port decisions, mapping/`target_ip` wiring, policy-route fallbacks, daemon-error tolerance |
+| `crates/natmap/src/apply.rs` | 43 | Declared-mapping derivation, ownership refusal, prune safety, apply ordering; port decisions, mapping/`target_ip` wiring, policy-route fallbacks, daemon-error tolerance |
+| `crates/natmap/src/client.rs` | 11 | Typed client over a real Unix-socket daemon: owner round-trip, mapping removal |
 | `crates/natmap/src/daemon.rs` | 45 | State, reload reconciliation, Docker event handling, span fields |
 | `crates/natmap/src/iptables.rs` | 11 | Exact argv for every rule builder, including the loopback accept hook |
-| `crates/natmap/src/models.rs` | 15 | Serialization, rule comments, IPv6 detection |
+| `crates/natmap/src/models.rs` | 17 | Serialization, rule comments, IPv6 detection |
 | `crates/natmap/src/policy_route.rs` | 22 | `ip rule`/`ip route` parsing and flush behaviour |
 | `crates/natmap/src/utils.rs` | 8 | HTTP-over-Unix-socket request helper and status mapping |
 
@@ -50,7 +51,7 @@ test that reaches `allocate`.
 Per-file counts in this file are historical; the **totals** below are the measured source of truth, each with the exact command that produced it. `cargo test -p <crate>` is authoritative.
 
 
-**Total: 262 inline unit tests**, measured from the three lib test binaries (`cargo test -p lab-ops -p lab-ops_natmap -p lab-ops_lab-lib --lib --all-features`): 57 + 173 + 32. (Measured 2026-11-02.)
+**Total: 298 inline unit tests**, measured from the three lib test binaries (`cargo test -p lab-ops -p lab-ops_natmap -p lab-ops_lab-lib --lib --all-features`): 57 + 206 + 35. (Measured 2026-11-03.)
 
 ### Doc Tests
 

@@ -44,6 +44,8 @@ Manage iptables NAT rules for static VMs and dynamic Docker port remapping. Runs
 ```bash
 lab-ops natmap daemon                   # Start the daemon
 sudo lab-ops natmap install             # Install as systemd service
+lab-ops natmap plan --from nodes/<node>/discovery.yaml   # What the declaration would change
+lab-ops natmap apply --from nodes/<node>/discovery.yaml  # Converge to the declaration
 lab-ops natmap dnat --ext-ip ... --int-ip ... --ports 80  # Static DNAT
 lab-ops natmap docker add nginx 8080:80 # Docker port mapping
 lab-ops natmap ls                       # List all rules

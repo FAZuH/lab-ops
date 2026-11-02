@@ -6,6 +6,95 @@
 - **SNAT**: Source NAT — rewrites source IP of outgoing traffic from internal hosts. Creates POSTROUTING rules
 - **Hairpin NAT**: Allows internal hosts to reach themselves via the external IP. Creates PREROUTING DNAT + POSTROUTING MASQUERADE rules
 - **Docker mapping**: Dynamic port remapping managed by natmap — maps a host port to a container port without restarting the container
+- **Declaration**: A node's `discovery.yaml` — the host ports each service owns (`ports:`), and the address each answers on. natmap never allocates a port for a declared service: the declared port is the port used
+- **Ownership ledger**: The `owner` the daemon records on every mapping an apply created, saying which service owns the port. A mapping with no owner was added by hand
+- **Covered port**: A declared port whose service already answers on the node's tailnet address (or on every address), so it needs no mapping
+- **Drift**: Anything the daemon holds that disagrees with the declaration. `plan` reports it and exits non-zero
+
+## Declarative apply
+
+`natmap plan` and `natmap apply --from <file>` converge one node to the mappings
+its declaration names. The declaration is `nodes/<node>/discovery.yaml`:
+
+```yaml
+node:
+  name: fazuh-sg-2
+  tailnet_ip: 100.64.0.17    # how other nodes reach this one
+
+defaults:
+  bind_ip: 127.0.0.1         # where a declared port answers unless it says otherwise
+
+services:
+  fazuh-uptime:
+    type: docker
+    ports:                     # the ledger: ports this service owns
+      - port: 3001
+  fazuh-grafana:
+    type: docker
+    ports:
+      - port: 3000
+        bind_ip: 10.0.0.5      # this one answers on a concrete address
+    nginx:                     # not natmap's business; ignored
+      target: nodes/fazuh-sg-2/fazuh-grafana/nginx.conf
+      context: http
+```
+
+One declared port produces one mapping: the node's `tailnet_ip` on that port,
+forwarded to the address the port names (`bind_ip`, else `defaults.bind_ip`,
+else `127.0.0.1`). The port is the same on both sides — nothing is allocated.
+
+A port whose address is the tailnet IP, or a wildcard (`0.0.0.0` / `::`), is
+already reachable there and is reported as **covered** instead of mapped. That
+is the migration path: a container that still publishes on the tailnet address
+needs no mapping, and one moved to loopback gets its mapping on the next apply.
+
+### `plan`
+
+```bash
+lab-ops natmap plan --from nodes/fazuh-sg-2/discovery.yaml
+lab-ops natmap plan --from nodes/fazuh-sg-2/discovery.yaml --prune
+lab-ops natmap --json plan --from nodes/fazuh-sg-2/discovery.yaml
+```
+
+Prints what would change — `create`, `update`, `release`, `stale`, `keep`,
+`covered`, `conflict` — writes nothing, and exits non-zero when the node does
+not match the declaration. `--prune` changes what counts as drift: without it a
+mapping this node created that the declaration dropped is reported `stale` and
+kept.
+
+### `apply`
+
+```bash
+lab-ops natmap apply --from nodes/fazuh-sg-2/discovery.yaml            # converge
+lab-ops natmap apply --from nodes/fazuh-sg-2/discovery.yaml --prune    # also release
+lab-ops natmap apply --from nodes/fazuh-sg-2/discovery.yaml --dry-run  # plan, write nothing
+```
+
+`--dry-run` prints the plan, writes nothing, and exits non-zero on drift —
+identical to `plan`.
+
+Order is part of the contract: creates and updates first, then releases. A port
+this apply hands to another service is the one exception — that release runs
+first, because the daemon arbitrates the port and would answer 409 to the
+create.
+
+### Ownership
+
+The daemon records which service owns each port on the mapping itself, so the
+mapping set is the ledger:
+
+- A port is only ever handed to the service the declaration gives it to. A port
+  owned by another service is refused, naming both.
+- A port is released only by the apply that removes its owner. `--prune` is that
+  apply; a plain `apply` refuses a port transfer and says so.
+- Only a mapping an apply created is pruned. A mapping added by hand
+  (`natmap docker add`) has no owner and survives every prune. If a hand-added
+  mapping sits on a declared port, apply refuses rather than adopt it — remove
+  it, then apply.
+- A port claimed by two services in one declaration is a declaration error,
+  naming both.
+
+`apply` exits zero once it converged everything it was allowed to touch.
 
 ## Daemon
 

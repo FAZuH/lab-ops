@@ -40,16 +40,20 @@ The shared container-inspection contract, consumed by `natmap`:
 
 ### `discovery.rs` — `discovery.yaml` Model
 
-The declaration model for a node's published services, kept reachable for
-`natmap::apply` and a planned `natmap apply --from discovery.yaml`:
+The declaration model for a node's published services, consumed by
+`natmap::apply`:
 
-- `DiscoveryConfig {node, defaults, services}` — root of the file. `load(path)` reads and deserializes it
+- `DiscoveryConfig {node, defaults, services}` — root of the file. `load(path)` reads and deserializes it. Unknown keys are ignored, so a declaration may carry blocks this model does not know (`nginx:`) and still load
+- `NodeConfig {name, tailnet_ip}` — the node's name and the address other nodes reach it on
 - `Defaults` — values a service inherits when it does not set them (`proxy_on`, `proxy_ip`, `bind_ip`, `bind_interface`, `preserve_src_ip*`)
-- `ServiceConfig` — one `services:` entry: `type` (`docker` / `local`), optional `match` block, `address`, `bind_ip`, `bind_interface`, and the port registrations (`rproxylocal`, `rproxyremote`, `forwardlocal`, `forwardremote`)
+- `ServiceConfig` — one `services:` entry: `type` (`docker` / `local`), optional `match` block, `address`, `bind_ip`, `bind_interface`, the owned ports (`ports`, the ownership ledger), and the port registrations (`rproxylocal`, `rproxyremote`, `forwardlocal`, `forwardremote`)
+- `PortClaim {port, bind_ip}` — one host port a service owns, and the address it answers on
+- `default_bind_ip()` — `defaults.bind_ip`, else `DEFAULT_BIND_IP` (`127.0.0.1`); the consumer renderer carries the same default
+- `port_claims() -> Vec<(&str, &PortClaim)>` — every owned port with its service, in port order
 - `MatchConfig` — container criteria. `matches(container)` requires every criterion set; an invalid `container_regex` matches nothing
 - `ServiceConfig::matches_container(container)` — a service without a `match` block covers every container
 - `resolve_all() -> Vec<ResolvedService>` — expands every service into one resolved registration per port, with defaults applied
-- `ResolvedService` / `ResolvedPortType` — the flattened result `apply` consumes. `primary_domain()`, `domain_slug()`, and `domains()` are rproxy helpers
+- `ResolvedService` / `ResolvedPortType` — the flattened result `apply_service` consumes. `primary_domain()`, `domain_slug()`, and `domains()` are rproxy helpers
 
 ### `port.rs` — Port Utilities & Management
 
@@ -88,11 +92,20 @@ pub mod policy_route;
 pub mod utils;
 ```
 
-### `apply.rs` — Apply a Discovery Service
+### `apply.rs` — Apply a Declaration
 
-The mapping half of a discovery pass, with no Consul involvement:
+Two entry points over one daemon seam, with no Consul involvement:
 
-- `NatmapApply` — seam over the daemon's `add_mapping` and `policy_route`; `NatmapClient` is the production implementation, tests fake it
+**Declarative apply** (`natmap plan` / `natmap apply`):
+
+- `NatmapApply` — seam over the daemon's `add_mapping`, `list_mappings`, `remove_mapping` and `policy_route`; `NatmapClient` is the production implementation, tests fake it
+- `declared_mappings(config) -> (Vec<DeclaredMapping>, Vec<CoveredPort>)` — one mapping per declared port, from the node's tailnet address to the address the port answers on. A port already on the tailnet address or on a wildcard is covered instead. Refuses a missing `tailnet_ip`, a port claimed twice, and port 0
+- `plan(declared, covered, live, prune) -> Plan` — the diff: `create`, `update`, `remove`, `keep` (hand-added, never pruned), `stale` (owned, left without `--prune`), `covered`, `conflicts`. `Plan::drift_message()` / `conflict_message()` word the report
+- `converge(apply, config, options) -> Result<Plan>` — refuses conflicts before writing, then releases handed-over ports, creates and updates, then releases the stale ones. `ConvergeOptions {prune, dry_run}`
+- `Drift` — the marker `plan` and `apply --dry-run` return when the node does not match; `main.rs` turns it into exit 1 without an error report
+
+**Per-service apply** (the older whole-node path):
+
 - `ApplyTarget {id, container_ip, local_ip}` — what a resolved service points at (a container ID, or the service key for a local service)
 - `decide_ports(resolved, local_target) -> Option<PortDecision>` — explicit `bind_port`/`ext_ports[0]`, or `host_port: 0` for daemon allocation; `None` when an rproxy service on a local target needs no mapping
 - `natmap_bind_ip(resolved)` — `bind_ip`, else the first IPv4 address of `bind_interface`, else the daemon's `0.0.0.0`
@@ -105,7 +118,7 @@ The mapping half of a discovery pass, with no Consul involvement:
 `pub struct NatmapClient { socket: PathBuf }` — one typed method per daemon operation, speaking the same HTTP-over-Unix-socket protocol as the CLI's `request_json`:
 
 - Static NAT ops take the typed config struct + an explicit `delete: bool` and return `Result<Option<T>, NatmapError>` (daemon echo on install, `None` on delete): `dnat(DnatConfig, bool)`, `hairpin`, `policy_route`.
-- Docker mapping ops mirror the daemon endpoints: `add_mapping(&str, DockerAddMapRequest) -> Result<DockerPortMap>` and `rules() -> Result<Vec<LiveRule>>` (live rules parsed from `iptables-save`).
+- Docker mapping ops mirror the daemon endpoints: `add_mapping(&str, DockerAddMapRequest) -> Result<DockerPortMap>`, `mappings() -> Result<Vec<DockerPortMap>>` (the daemon's persisted mappings, with their owners), `remove_mapping(&str, u16)` (a mapping the daemon no longer holds is already released, so `NotFound` is success), and `rules() -> Result<Vec<LiveRule>>` (live rules parsed from `iptables-save`).
 - `new(impl Into<PathBuf>)` and `default_socket()` (env `NATMAP_SOCKET`, else `lab_ops_lab_lib::NATMAP_SOCKET`). Re-exports `NatmapError` from `utils.rs`. Consumed by `apply` and other callers that use the config structs directly rather than building `cli::Cli` values.
 
 ### `cli.rs` — CLI Definitions
@@ -118,6 +131,8 @@ pub enum Command {
     Snat { int_ip, ext_if, ext_ip, delete },
     Hairpin { ext_ip, int_ip, proto, ports, lan_cidr, delete },
     List { container_id },
+    Plan { from, prune },
+    Apply { from, prune, dry_run },
     Docker { cmd: Docker },
     Save,
     Fwd,
@@ -139,6 +154,11 @@ Also defines the top-level `Cli` struct with global `--socket`, `--json`, and `-
 Each subcommand has a handler function. Handlers for rule management (`handle_dnat`, `handle_snat`, `handle_hairpin`) serialize arguments to JSON and send HTTP requests to the daemon. Docker handlers (`add`, `remove`, `remap`) do the same against `/mapping/*` endpoints.
 
 The `handle_list()` function combines raw `iptables-save` output with daemon-managed state for a complete view.
+
+`handle_plan` and `handle_apply` read the declaration named by `--from`, run
+`apply::converge` against the daemon, and print the resulting `Plan` as a table
+(or JSON with `--json`) through `print_plan`. `plan` and `apply --dry-run` return
+`apply::Drift` after printing, which the binary entrypoint maps to exit 1.
 
 ### `daemon.rs` — API Server & State
 
@@ -163,9 +183,9 @@ Key types:
 | `HairpinConfig` | Persisted hairpin rule (ext_ip, int_ip, ports, proto, optional lan_cidr) |
 | `DaemonState` | Top-level persisted state (docker, dnats, snats, hairpins) |
 | `ListResponse` | API response for `GET /mappings` |
-| `DockerPortMap` | Running Docker mapping (id, request, container info, comment) |
+| `DockerPortMap` | Running Docker mapping (id, request, container info, comment, `owner` — the service the apply that created it recorded, `None` when added by hand) |
 | `DockerPortMapRequest` | Docker mapping config (host_addr, container_addr, proto) |
-| `DockerAddMapRequest` / `DockerRemapRequest` | Docker API request bodies |
+| `DockerAddMapRequest` / `DockerRemapRequest` | Docker API request bodies. `DockerAddMapRequest::owner` carries the ledger entry |
 
 The `TransportProtocol` enum is re-exported from `lab_lib::TransportProtocol`.
 

@@ -27,7 +27,7 @@ lab-ops/
 │   ├── natmap/                   # NAT management crate
 │   │   └── src/
 │   │   ├── lib.rs            # Module declarations
-│   │   ├── apply.rs          # Apply a resolved discovery service: mapping + policy route
+│   │   ├── apply.rs          # Declarative apply (plan/converge from discovery.yaml) + per-service mapping and policy route
 │   │   ├── cli.rs            # Command enum + CLI dispatch
 │   │   ├── client.rs         # Typed NatmapClient (HTTP over Unix socket)
 │   │   ├── command.rs        # Handler functions for all subcommands
@@ -54,7 +54,7 @@ lab-ops/
 
 The `natmap` CLI operates in two modes depending on the subcommand:
 
-**Daemon-dependent commands** (`dnat`, `snat`, `hairpin`, `docker add/rm/remap`, `ls`):
+**Daemon-dependent commands** (`dnat`, `snat`, `hairpin`, `plan`, `apply`, `docker add/rm/remap`, `ls`):
 1. CLI parses arguments into a JSON request body
 2. Sends HTTP request to the daemon via Unix socket (`/run/natmap.sock`)
 3. Daemon performs port allocation, iptables management, and state persistence
