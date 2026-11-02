@@ -62,6 +62,7 @@ lab-ops_natmap = { workspace = true }
 [dev-dependencies]
 serde = { workspace = true }
 serde_yaml = "0.9"
+tempfile = { workspace = true }
 
 [lints.clippy]
 uninlined_format_args = "warn"

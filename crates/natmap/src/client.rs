@@ -163,6 +163,7 @@ mod tests {
     use crate::daemon::AppState;
     use crate::daemon::build_router;
     use crate::daemon::tests::FakeIptables;
+    use crate::daemon::tests::spawn_daemon;
     use crate::daemon::tests::test_app_state_with;
     use crate::daemon::tests::test_port;
     use crate::models::DockerAddMapRequest;
@@ -175,34 +176,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = test_app_state_with(&dir, Arc::new(FakeIptables::default()));
         (dir, state)
-    }
-
-    /// Serves the daemon router over a real Unix socket in a background task.
-    ///
-    /// Returns the socket path (and the temp dir that keeps it alive) the
-    /// client should connect to.
-    async fn spawn_daemon(state: AppState) -> (tempfile::TempDir, PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("natmap-test.sock");
-        let app = build_router(state);
-
-        let listener = UnixListener::bind(&socket_path).unwrap();
-        tokio::spawn(async move {
-            loop {
-                let (stream, _) = listener.accept().await.unwrap();
-                let app = app.clone();
-                tokio::spawn(async move {
-                    let io = TokioIo::new(stream);
-                    let srv = hyper::service::service_fn(
-                        move |req: hyper::Request<hyper::body::Incoming>| app.clone().call(req),
-                    );
-                    let _ = Builder::new(TokioExecutor::new())
-                        .serve_connection_with_upgrades(io, srv)
-                        .await;
-                });
-            }
-        });
-        (dir, socket_path)
     }
 
     fn dnat_config(ports: &str) -> DnatConfig {

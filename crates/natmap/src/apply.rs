@@ -48,6 +48,7 @@ use crate::client::NatmapError;
 use crate::models::DockerAddMapRequest;
 use crate::models::DockerPortMap;
 use crate::models::PolicyRouteConfig;
+use crate::models::service_mapping_key;
 
 /// A boxed future returned by the [`NatmapApply`] seam.
 type ApplyFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -688,20 +689,35 @@ pub struct ConvergeOptions {
     pub dry_run: bool,
 }
 
+/// What one converge did.
+///
+/// Refusing is a value, not an error: the plan that names the conflicting
+/// services is what the caller has to show, and it was computed before
+/// anything was written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Converged {
+    /// The declared mappings are in place. The plan says what changed.
+    Applied(Plan),
+    /// Nothing was written: a declared port is held by a mapping this apply
+    /// will not remove. `plan.conflicts` says which, and names both services.
+    Refused(Plan),
+}
+
 /// Brings the daemon's mappings in line with a declaration.
 ///
-/// Refuses, before writing anything, when a declared port is held by a mapping
-/// this apply will not remove. Otherwise creates and updates the declared
-/// mappings, then releases the stale ones — the reverse would drop a port
-/// before its replacement exists. The one exception is a port this apply hands
-/// to another service: that release runs first, because the daemon arbitrates
-/// the port and would answer 409 to the create.
+/// Refuses — writing nothing and returning [`Converged::Refused`] — when a
+/// declared port is held by a mapping this apply will not remove. Otherwise
+/// creates and updates the declared mappings, then releases the stale ones —
+/// the reverse would drop a port before its replacement exists. The one
+/// exception is a port this apply hands to another service: that release runs
+/// first, because the daemon arbitrates the port and would answer 409 to the
+/// create.
 #[tracing::instrument(skip_all, fields(node = %config.node.name, prune = options.prune, dry_run = options.dry_run))]
 pub async fn converge(
     apply: &dyn NatmapApply,
     config: &DiscoveryConfig,
     options: ConvergeOptions,
-) -> Result<Plan> {
+) -> Result<Converged> {
     let (declared, covered) = declared_mappings(config)?;
     let live: Vec<LiveMapping> = apply
         .list_mappings()
@@ -712,11 +728,11 @@ pub async fn converge(
         .collect();
 
     let plan = plan(&declared, &covered, &live, options.prune);
-    if let Some(message) = plan.conflict_message() {
-        bail!("{message}");
+    if !plan.conflicts.is_empty() {
+        return Ok(Converged::Refused(plan));
     }
     if options.dry_run {
-        return Ok(plan);
+        return Ok(Converged::Applied(plan));
     }
 
     let (handing_over, releasing): (Vec<&LiveMapping>, Vec<&LiveMapping>) =
@@ -742,10 +758,14 @@ pub async fn converge(
         release(apply, mapping).await?;
     }
 
-    Ok(plan)
+    Ok(Converged::Applied(plan))
 }
 
 /// Creates or rewrites one declared mapping, recording its owner.
+///
+/// The mapping is stored under a service key, not the service name: a
+/// container id keys container mappings, and no container event may match a
+/// mapping the declaration owns.
 async fn create(apply: &dyn NatmapApply, wanted: &DeclaredMapping) -> Result<()> {
     let request = DockerAddMapRequest {
         host_ip: wanted.host_ip.clone(),
@@ -756,7 +776,7 @@ async fn create(apply: &dyn NatmapApply, wanted: &DeclaredMapping) -> Result<()>
         owner: Some(wanted.service.clone()),
     };
     apply
-        .add_mapping(&wanted.service, request)
+        .add_mapping(&service_mapping_key(&wanted.service), request)
         .await
         .map_err(|e| {
             eyre!(
@@ -1336,6 +1356,13 @@ mod tests {
         }
     }
 
+    /// The plan a converge produced, whichever way it ended.
+    fn plan_of(converged: Converged) -> Plan {
+        match converged {
+            Converged::Applied(plan) | Converged::Refused(plan) => plan,
+        }
+    }
+
     #[test]
     fn declared_mappings_names_one_mapping_per_declared_port() {
         let cfg = config(&[
@@ -1649,7 +1676,7 @@ mod tests {
 
         let mappings = fake.mappings();
         assert_eq!(mappings.len(), 1);
-        assert_eq!(mappings[0].0, "fazuh-uptime");
+        assert_eq!(mappings[0].0, service_mapping_key("fazuh-uptime"));
         assert_eq!(mappings[0].1.host_port, 3001);
         assert_eq!(mappings[0].1.container_port, 3001);
         assert_eq!(mappings[0].1.host_ip, TAILNET);
@@ -1668,13 +1695,15 @@ mod tests {
         )]);
         let cfg = config(&[("fazuh-grafana", vec![claim(3001, None)])]);
 
-        let error = converge(&fake, &cfg, ConvergeOptions::default())
+        let converged = converge(&fake, &cfg, ConvergeOptions::default())
             .await
-            .unwrap_err()
-            .to_string();
-
-        assert!(error.contains("\"fazuh-uptime\""), "{error}");
-        assert!(error.contains("\"fazuh-grafana\""), "{error}");
+            .unwrap();
+        let Converged::Refused(plan) = &converged else {
+            panic!("a port owned by another service must be refused: {converged:?}");
+        };
+        let message = plan.conflict_message().unwrap();
+        assert!(message.contains("\"fazuh-uptime\""), "{message}");
+        assert!(message.contains("\"fazuh-grafana\""), "{message}");
         assert!(fake.mappings().is_empty());
         assert!(fake.removed().is_empty());
     }
@@ -1779,16 +1808,18 @@ mod tests {
         let fake = FakeNatmap::default();
         let cfg = config(&[("fazuh-uptime", vec![claim(3001, None)])]);
 
-        let plan = converge(
-            &fake,
-            &cfg,
-            ConvergeOptions {
-                prune: true,
-                dry_run: true,
-            },
-        )
-        .await
-        .unwrap();
+        let plan = plan_of(
+            converge(
+                &fake,
+                &cfg,
+                ConvergeOptions {
+                    prune: true,
+                    dry_run: true,
+                },
+            )
+            .await
+            .unwrap(),
+        );
 
         assert!(fake.mappings().is_empty());
         assert!(fake.removed().is_empty());
@@ -1807,16 +1838,18 @@ mod tests {
         )]);
         let cfg = config(&[("fazuh-uptime", vec![claim(3001, None)])]);
 
-        let plan = converge(
-            &fake,
-            &cfg,
-            ConvergeOptions {
-                prune: true,
-                dry_run: false,
-            },
-        )
-        .await
-        .unwrap();
+        let plan = plan_of(
+            converge(
+                &fake,
+                &cfg,
+                ConvergeOptions {
+                    prune: true,
+                    dry_run: false,
+                },
+            )
+            .await
+            .unwrap(),
+        );
 
         assert!(plan.is_clean());
         assert!(fake.order().is_empty(), "{:?}", fake.order());

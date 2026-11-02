@@ -94,7 +94,25 @@ mapping set is the ledger:
 - A port claimed by two services in one declaration is a declaration error,
   naming both.
 
-`apply` exits zero once it converged everything it was allowed to touch.
+A declared port whose service answers on loopback — the normal case — needs no
+userspace listener: the kernel rule alone services it, and the daemon holds only
+a claim on the address. The claim is what answers 409 to a second mapping of the
+same port, so the conflict gate survives without a socket competing with the
+rule (or with the service holding the port being forwarded to). A mapping to a
+container address is forwarded, not delivered locally, and keeps its listener.
+
+Declared mappings are stored under a `service:` key, not the service name, and a
+reload replays them from their stored addresses whatever Docker reports: they
+answer on an address this node owns, so no container id matches them and no
+inspect can retarget them. Only an apply that stops declaring the port removes
+one.
+
+`apply` exits zero once it converged everything it was allowed to touch. A
+refusal prints the plan first — the `conflict` row names the port, the holder
+and the requesting service — and then fails with the same two names.
+
+The `conflict` row and the `conflicts` JSON field are only non-empty for a
+refusal; a converged or merely drifting plan has none.
 
 ## Daemon
 
@@ -148,8 +166,11 @@ sudo systemctl restart natmap
 The daemon persists state to `/var/lib/natmap/state.json`. On restart or crash recovery, it:
 - Flushes all stale iptables rules
 - Releases all port reservations
-- Reads the state file and rebinds only rules whose ports are still available
-- Skips rules for ports taken by other services (logged as warnings)
+- Reads the state file and reinstalls rules whose ports are still available
+- Replays a declared mapping (`service:` key) from its stored addresses, and
+  keeps it whatever Docker reports
+- Drops a container mapping whose container is no longer running, and skips
+  rules for ports taken by other services (logged as warnings)
 
 A missing state file starts with empty state. A present but unparseable state file (including a truncated write) is fatal: the daemon refuses to start with an error naming the path and the parse failure, and leaves the file untouched for inspection.
 

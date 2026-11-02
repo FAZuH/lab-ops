@@ -28,6 +28,15 @@ mapping state, and create, update and release mappings themselves.
   both, and releases a port only in the apply that removes its owner.
 - **Only what an apply created is pruned.** A hand-added mapping has no owner
   and survives every prune; it is also never adopted silently.
+- **A declared mapping outlives containers.** It is stored under a `service:`
+  key, never a container id, and a reload replays it from its stored addresses
+  whatever Docker reports: no container id matches it and no inspect can
+  retarget it. Only an apply removes it.
+- **A locally delivered destination holds a claim, not a listener.** When the
+  mapping forwards to an address on this node the kernel rule alone services
+  it, so the daemon claims the host address in its allocator instead of binding
+  it. The claim keeps the 409 conflict gate; the listener would compete with
+  the rule, and with the service holding the port being forwarded to.
 - **Order is creates, then releases.** The exception is a port this apply hands
   to another service: that release runs first, because the daemon arbitrates
   the port.
@@ -41,6 +50,8 @@ state natmap owns.
 ## Consequences
 
 - One publishing path. A port cannot change owner without an apply that says so.
+- A restart is not a re-publish: the declaration's mappings come back from state
+  before anything asks about them, so `plan` after a restart reports converged.
 - Drift heals only when something runs `apply`; scheduling that is a separate
   decision, not a second reconciler.
 - A node whose declaration is absent or empty converges to nothing, and prunes

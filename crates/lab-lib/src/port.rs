@@ -57,6 +57,13 @@ pub fn create_freebind_socket(addr: &SocketAddr, socket_type: Type) -> std::io::
 enum ReservedSocket {
     Tcp(TcpListener),
     Udp(UdpSocket),
+    /// A claim with no socket behind it.
+    ///
+    /// For a destination that is delivered locally the kernel rule alone
+    /// services the port, so holding a listener would compete with that rule.
+    /// The claim still answers [`PortAllocator::is_allocated`], so a second
+    /// claim of the same address is refused the way a bind would refuse it.
+    Unbound,
 }
 
 /// A concurrency-safe port reservation system backed by protocol-aware
@@ -156,6 +163,26 @@ impl PortAllocator {
             }
         }
 
+        Ok(())
+    }
+
+    /// Claims `addr` without binding a socket.
+    ///
+    /// Use this when a kernel rule alone services the address — a DNAT whose
+    /// destination is delivered locally. Claiming keeps the conflict gate: a
+    /// second claim of the same address is refused, exactly as a bind would
+    /// refuse it, so callers still answer 409 to a port already taken.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the address is already claimed or reserved.
+    pub async fn claim(&self, addr: SocketAddr) -> Result<()> {
+        let mut sockets = self.sockets.write().await;
+        if sockets.contains_key(&addr) {
+            return Err(eyre!("Failed to reserve {addr}: already claimed"));
+        }
+        sockets.insert(addr, ReservedSocket::Unbound);
+        info!("Claimed {addr} (no listener)");
         Ok(())
     }
 
@@ -299,5 +326,52 @@ mod tests {
         assert!(allocator.is_allocated(addr).await);
         allocator.deallocate(addr).await;
         assert!(!allocator.is_allocated(addr).await);
+    }
+
+    #[tokio::test]
+    async fn claim_holds_no_listener_so_the_address_stays_bindable() {
+        let allocator = PortAllocator::new();
+        let addr = loopback(test_ports(1)[0]);
+
+        allocator.claim(addr).await.unwrap();
+
+        assert!(allocator.is_allocated(addr).await);
+        // `allocate` holds a listener; a claim must leave the address free for
+        // the kernel rule that services it.
+        let bound = std::net::TcpListener::bind(addr);
+        assert!(bound.is_ok(), "a claim must not hold a listener: {bound:?}");
+    }
+
+    #[tokio::test]
+    async fn claim_refuses_an_address_already_claimed() {
+        let allocator = PortAllocator::new();
+        let addr = loopback(test_ports(1)[0]);
+        allocator.claim(addr).await.unwrap();
+
+        assert!(allocator.claim(addr).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn claim_refuses_an_address_already_reserved() {
+        let allocator = PortAllocator::new();
+        let addr = loopback(test_ports(1)[0]);
+        allocator
+            .allocate(addr, TransportProtocol::Tcp)
+            .await
+            .unwrap();
+
+        assert!(allocator.claim(addr).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn deallocate_releases_a_claim() {
+        let allocator = PortAllocator::new();
+        let addr = loopback(test_ports(1)[0]);
+        allocator.claim(addr).await.unwrap();
+
+        allocator.deallocate(addr).await;
+
+        assert!(!allocator.is_allocated(addr).await);
+        assert!(allocator.claim(addr).await.is_ok());
     }
 }

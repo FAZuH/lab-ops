@@ -17,6 +17,7 @@ use lab_ops_lab_lib::TransportProtocol;
 use lab_ops_lab_lib::discovery::DiscoveryConfig;
 
 use crate::apply::ConvergeOptions;
+use crate::apply::Converged;
 use crate::apply::Drift;
 use crate::apply::Plan;
 use crate::apply::converge;
@@ -292,7 +293,9 @@ pub async fn handle_plan(
 ) -> Result<()> {
     let config = load_declaration(&from)?;
     let client = NatmapClient::new(socket.as_ref());
-    let plan = converge(
+    // A refusal is still the answer to "what would change": it is drift, and
+    // the plan names the services that disagree.
+    let plan = match converge(
         &client,
         &config,
         ConvergeOptions {
@@ -300,7 +303,10 @@ pub async fn handle_plan(
             dry_run: true,
         },
     )
-    .await?;
+    .await?
+    {
+        Converged::Applied(plan) | Converged::Refused(plan) => plan,
+    };
     print_plan(&config, &plan, true, json, use_color)?;
     if plan.drift_message().is_some() {
         return Err(Drift.into());
@@ -311,7 +317,8 @@ pub async fn handle_plan(
 /// Converges this node's mappings to the ones its declaration names.
 ///
 /// `--dry-run` prints the plan and writes nothing, and exits non-zero when
-/// there is drift, exactly like `plan`.
+/// there is drift, exactly like `plan`. A refusal prints the plan — conflicts
+/// included — and then fails, naming the services that disagree.
 pub async fn handle_apply(
     from: PathBuf,
     prune: bool,
@@ -322,8 +329,18 @@ pub async fn handle_apply(
 ) -> Result<()> {
     let config = load_declaration(&from)?;
     let client = NatmapClient::new(socket.as_ref());
-    let plan = converge(&client, &config, ConvergeOptions { prune, dry_run }).await?;
-    print_plan(&config, &plan, dry_run, json, use_color)?;
+    let converged = converge(&client, &config, ConvergeOptions { prune, dry_run }).await?;
+    let plan = match &converged {
+        Converged::Applied(plan) | Converged::Refused(plan) => plan,
+    };
+    print_plan(&config, plan, dry_run, json, use_color)?;
+
+    if let Converged::Refused(plan) = &converged {
+        let message = plan
+            .conflict_message()
+            .unwrap_or_else(|| "a declared port is held elsewhere".to_string());
+        bail!("{message}");
+    }
     if dry_run && plan.drift_message().is_some() {
         return Err(Drift.into());
     }

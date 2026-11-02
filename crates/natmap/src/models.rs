@@ -4,12 +4,25 @@
 //! enums used across the CLI, daemon, and iptables modules.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::net::SocketAddr;
 
 /// Re-exported so callers need only the `lab_ops_natmap::models` path.
 pub use lab_ops_lab_lib::TransportProtocol;
 use serde::Deserialize;
 use serde::Serialize;
+
+/// Whether a DNAT destination is an address on this host.
+///
+/// A packet to such an address is delivered locally after DNAT: it traverses
+/// the `input` hook, never `forward`, and the kernel rule alone services it. So
+/// the accept rule belongs in `input`, and the daemon must hold no userspace
+/// listener on the external address — that listener would compete with the
+/// rule, and for a mapping to a loopback target it would collide with the
+/// service holding the very port being forwarded to.
+pub fn is_locally_delivered(addr: IpAddr) -> bool {
+    addr.is_loopback()
+}
 
 /// Describes the desired port mapping between a host and a container.
 ///
@@ -36,6 +49,14 @@ impl DockerPortMapRequest {
     /// Returns whether the host address is an IPv6 address.
     pub fn is_ipv6(&self) -> bool {
         self.host_addr.is_ipv6()
+    }
+
+    /// Whether this mapping ends on an address on this host.
+    ///
+    /// See [`is_locally_delivered`]. Such a mapping is serviced by its kernel
+    /// rule alone and holds no listener on the host address.
+    pub fn targets_local_delivery(&self) -> bool {
+        is_locally_delivered(self.container_addr.ip())
     }
 }
 
@@ -176,15 +197,11 @@ impl DnatConfig {
 
     /// Whether the DNAT destination is an address on this host.
     ///
-    /// A loopback destination (`127.0.0.1`, `::1`) is always delivered
-    /// locally after DNAT, so its accept rule belongs in `input`, never
-    /// `forward` — and the kernel rule alone services the mapping, so the
-    /// daemon must not hold a userspace port reservation on the external
-    /// address.
+    /// See [`is_locally_delivered`] for what that implies.
     pub fn targets_local_delivery(&self) -> bool {
         self.int_ip
-            .parse::<std::net::IpAddr>()
-            .map(|ip| ip.is_loopback())
+            .parse::<IpAddr>()
+            .map(is_locally_delivered)
             .unwrap_or(false)
     }
 }
@@ -270,6 +287,24 @@ pub struct LiveRule {
 }
 
 // --- Persisted daemon state ---
+
+/// Prefix of a mapping-state key that names a declared service, not a container.
+///
+/// A container's mappings are keyed by its id, and a container event, a
+/// reload's liveness check and a container stop all act on those keys. A
+/// mapping this node's declaration owns answers on an address of its own and
+/// outlives every container, so it gets a key nothing can mistake for one.
+pub const SERVICE_KEY_PREFIX: &str = "service:";
+
+/// The key a declared service's mappings are stored under.
+pub fn service_mapping_key(service: &str) -> String {
+    format!("{SERVICE_KEY_PREFIX}{service}")
+}
+
+/// Whether a mapping-state key names a declared service rather than a container.
+pub fn is_service_mapping_key(key: &str) -> bool {
+    key.starts_with(SERVICE_KEY_PREFIX)
+}
 
 /// The complete persisted state of the natmap daemon.
 ///

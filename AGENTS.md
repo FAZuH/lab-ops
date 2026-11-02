@@ -40,6 +40,7 @@ export OPENSSL_INCLUDE_DIR=/nix/store/0la6k2nj90y1716c1znhdm713ia1qgx8-openssl-3
 ```bash
 cargo test -p lab-ops_lab-lib                    # lab-lib unit tests only
 cargo test -p lab-ops_natmap                     # natmap unit tests only
+cargo test -p lab-ops --test natmap_plan                    # plan/apply exit codes through the binary
 cargo test -p lab-ops --all-features --test natmap_docker   # natmap Docker integration tests
 cargo test test_name -p crate_name                 # single test
 ```

@@ -101,7 +101,7 @@ Two entry points over one daemon seam, with no Consul involvement:
 - `NatmapApply` — seam over the daemon's `add_mapping`, `list_mappings`, `remove_mapping` and `policy_route`; `NatmapClient` is the production implementation, tests fake it
 - `declared_mappings(config) -> (Vec<DeclaredMapping>, Vec<CoveredPort>)` — one mapping per declared port, from the node's tailnet address to the address the port answers on. A port already on the tailnet address or on a wildcard is covered instead. Refuses a missing `tailnet_ip`, a port claimed twice, and port 0
 - `plan(declared, covered, live, prune) -> Plan` — the diff: `create`, `update`, `remove`, `keep` (hand-added, never pruned), `stale` (owned, left without `--prune`), `covered`, `conflicts`. `Plan::drift_message()` / `conflict_message()` word the report
-- `converge(apply, config, options) -> Result<Plan>` — refuses conflicts before writing, then releases handed-over ports, creates and updates, then releases the stale ones. `ConvergeOptions {prune, dry_run}`
+- `converge(apply, config, options) -> Result<Converged>` — refuses conflicts before writing (`Converged::Refused(plan)`, nothing written), then releases handed-over ports, creates and updates, then releases the stale ones (`Converged::Applied(plan)`). `ConvergeOptions {prune, dry_run}`. A declared mapping is written under `service_mapping_key(service)`, never under the bare service name
 - `Drift` — the marker `plan` and `apply --dry-run` return when the node does not match; `main.rs` turns it into exit 1 without an error report
 
 **Per-service apply** (the older whole-node path):
@@ -171,6 +171,8 @@ The largest module. Contains:
 - **`maintain_docker()`**: Docker maintenance task — reconnects with capped backoff, reloads, and resubscribes the event stream
 - **`listen_docker_events()`**: Docker event stream handler for container start/die events
 - **API handlers**: `add_dnat`, `remove_dnat`, `add_snat`, `remove_snat`, `add_hairpin`, `remove_hairpin`, `add_mapping`, `remove_mapping`, `remove_mapping_by_id`, `remap_port`, `list_mappings`
+- **`reconcile_persisted_entries`**: the persisted half of a reload, against a set of running container ids and their current addresses. A `service:` entry is replayed and kept whatever Docker reports; a container entry is kept only while its container runs. `reconcile_live_portmaps` adds the inspect and untracked-container discovery around it
+- **`reserve_mapping_addr`**: the one place a mapping takes its host address — a claim for a locally delivered target, a bound listener otherwise
 
 ### `models.rs` — Data Types
 
@@ -184,6 +186,8 @@ Key types:
 | `DaemonState` | Top-level persisted state (docker, dnats, snats, hairpins) |
 | `ListResponse` | API response for `GET /mappings` |
 | `DockerPortMap` | Running Docker mapping (id, request, container info, comment, `owner` — the service the apply that created it recorded, `None` when added by hand) |
+| `is_locally_delivered(addr)` | Whether a DNAT destination is on this host: `input` hook, kernel rule alone, no userspace listener. `DnatConfig::targets_local_delivery()` and `DockerPortMapRequest::targets_local_delivery()` both delegate to it |
+| `SERVICE_KEY_PREFIX` / `service_mapping_key` / `is_service_mapping_key` | The `service:` namespace that keeps a declared mapping's state key from being mistaken for a container id |
 | `DockerPortMapRequest` | Docker mapping config (host_addr, container_addr, proto) |
 | `DockerAddMapRequest` / `DockerRemapRequest` | Docker API request bodies. `DockerAddMapRequest::owner` carries the ledger entry |
 
