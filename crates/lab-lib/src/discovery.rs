@@ -17,8 +17,16 @@ use serde::Serialize;
 use crate::docker::ContainerInfo;
 use crate::protocol::TransportProtocol;
 
+/// Address a service port answers on when neither the port nor the defaults
+/// name one. `scripts/nginx-render.py` in the consumer repo carries the same
+/// default; a declared port binds loopback unless it says otherwise.
+pub const DEFAULT_BIND_IP: &str = "127.0.0.1";
+
 /// Root of `discovery.yaml`: this node's identity, the defaults every
 /// service inherits, and the per-service map.
+///
+/// Unknown keys are ignored, so a declaration may carry blocks this model does
+/// not know about (`nginx:`, for instance) without failing to load.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DiscoveryConfig {
     pub node: NodeConfig,
@@ -28,10 +36,14 @@ pub struct DiscoveryConfig {
     pub services: HashMap<String, ServiceConfig>,
 }
 
-/// Identity this node registers its own Consul agent under.
+/// Identity of this node, and the address other nodes reach it on.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NodeConfig {
+    /// Must equal the node's directory name.
     pub name: String,
+    /// The node's address on the tailnet — how other nodes reach this one.
+    #[serde(default)]
+    pub tailnet_ip: Option<String>,
 }
 
 /// Fallback values for any service that does not set them itself.
@@ -61,6 +73,17 @@ pub enum ServiceType {
     Local,
 }
 
+/// One host port owned by a service, and the address it answers on.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PortClaim {
+    /// The host port this service owns.
+    pub port: u16,
+    /// Address the service answers on; `None` inherits `defaults.bind_ip`,
+    /// then [`DEFAULT_BIND_IP`].
+    #[serde(default)]
+    pub bind_ip: Option<String>,
+}
+
 /// One entry under `services:` in `discovery.yaml`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ServiceConfig {
@@ -79,6 +102,13 @@ pub struct ServiceConfig {
 
     #[serde(default)]
     pub bind_interface: Option<String>,
+
+    /// The host ports this service owns, and the address each answers on.
+    ///
+    /// This is the ownership ledger: a port listed here belongs to this
+    /// service, and nothing else may be published on it.
+    #[serde(default)]
+    pub ports: Vec<PortClaim>,
 
     #[serde(default)]
     pub rproxylocal: Vec<RProxyLocalConfig>,
@@ -289,6 +319,27 @@ impl DiscoveryConfig {
         Ok(config)
     }
 
+    /// The address declared ports answer on when they do not name one.
+    pub fn default_bind_ip(&self) -> &str {
+        self.defaults.bind_ip.as_deref().unwrap_or(DEFAULT_BIND_IP)
+    }
+
+    /// Every declared port ownership, as `(service, claim)` in port order.
+    pub fn port_claims(&self) -> Vec<(&str, &PortClaim)> {
+        let mut claims: Vec<(&str, &PortClaim)> = self
+            .services
+            .iter()
+            .flat_map(|(service, config)| {
+                config
+                    .ports
+                    .iter()
+                    .map(move |claim| (service.as_str(), claim))
+            })
+            .collect();
+        claims.sort_by(|a, b| (a.1.port, a.0).cmp(&(b.1.port, b.0)));
+        claims
+    }
+
     fn resolve_binding(
         &self,
         svc_ip: Option<&String>,
@@ -467,6 +518,7 @@ mod tests {
             address: None,
             bind_ip: None,
             bind_interface: None,
+            ports: vec![],
             rproxylocal: vec![],
             rproxyremote: vec![],
             forwardlocal: vec![],
@@ -498,6 +550,7 @@ mod tests {
         DiscoveryConfig {
             node: NodeConfig {
                 name: "test-node".into(),
+                tailnet_ip: None,
             },
             defaults: Defaults {
                 preserve_src_ip: Some(true),
@@ -621,6 +674,92 @@ services:
         let cfg: DiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(cfg.services.is_empty());
         assert_eq!(cfg.defaults, Defaults::default());
+        assert_eq!(cfg.node.tailnet_ip, None);
+        assert_eq!(cfg.default_bind_ip(), DEFAULT_BIND_IP);
+    }
+
+    #[test]
+    fn discovery_config_parses_the_tailnet_ip_and_port_claims() {
+        let yaml = r#"
+node:
+  name: fazuh-sg-2
+  tailnet_ip: 100.64.0.17
+defaults:
+  bind_ip: 127.0.0.1
+services:
+  fazuh-uptime:
+    type: docker
+    ports:
+      - port: 3001
+        bind_ip: 100.64.0.17
+  rclone-serve-restic:
+    type: local
+    address: 127.0.0.1
+    ports:
+      - port: 9091
+"#;
+        let cfg: DiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.node.tailnet_ip.as_deref(), Some("100.64.0.17"));
+        assert_eq!(cfg.default_bind_ip(), "127.0.0.1");
+
+        let claims: Vec<(&str, u16, Option<&str>)> = cfg
+            .port_claims()
+            .into_iter()
+            .map(|(service, claim)| (service, claim.port, claim.bind_ip.as_deref()))
+            .collect();
+        assert_eq!(
+            claims,
+            vec![
+                ("fazuh-uptime", 3001, Some("100.64.0.17")),
+                ("rclone-serve-restic", 9091, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn discovery_config_ignores_a_block_it_does_not_model() {
+        let yaml = r#"
+node:
+  name: fazuh-sg-2
+services:
+  fazuh-vpn:
+    type: docker
+    ports:
+      - port: 18443
+    nginx:
+      target: nodes/fazuh-sg-2/fazuh-vpn/nginx/vpn.conf
+      context: http
+      servers:
+        - listen: {bind_ip: 127.0.0.1, port: 18443}
+          domains: [vpn.fazuh.com]
+"#;
+        let cfg: DiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.services["fazuh-vpn"].ports[0].port, 18443);
+    }
+
+    #[test]
+    fn port_claims_are_ordered_by_port_across_services() {
+        let yaml = r#"
+node:
+  name: abi-id-1
+services:
+  zulu:
+    type: docker
+    ports:
+      - port: 18090
+      - port: 18080
+  alpha:
+    type: docker
+    ports:
+      - port: 18085
+"#;
+        let cfg: DiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
+        let ports: Vec<u16> = cfg
+            .port_claims()
+            .into_iter()
+            .map(|(_, claim)| claim.port)
+            .collect();
+        assert_eq!(ports, vec![18080, 18085, 18090]);
     }
 
     #[test]
@@ -704,6 +843,7 @@ services:
             address: None,
             bind_ip: None,
             bind_interface: None,
+            ports: vec![],
             rproxylocal: vec![],
             rproxyremote: vec![],
             forwardlocal: vec![],
