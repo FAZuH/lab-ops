@@ -328,12 +328,13 @@ pub async fn remap_port(
         let mut new_req = old.request.clone();
         new_req.host_addr.set_port(req.new_host_port);
         let id = state.allocate_id();
-        let new_mapping = DockerPortMap::new(
+        let mut new_mapping = DockerPortMap::new(
             id,
             new_req,
             container_id.clone(),
             old.container_name.clone(),
         );
+        new_mapping.owner = old.owner.clone();
         if let Err(e) = state
             .ports
             .allocate(new_mapping.request.host_addr, old.request.proto)
@@ -430,6 +431,15 @@ pub async fn add_mapping(
                     && (req.host_port == 0 || req.host_port == m.request.host_addr.port())
             })
         {
+            // A re-register that names an owner adopts the mapping: only the
+            // declarative apply sends one, and it has already refused a port
+            // owned by another service.
+            if let Some(owner) = &req.owner
+                && existing.owner.as_deref() != Some(owner.as_str())
+            {
+                existing.owner = Some(owner.clone());
+                updated_in_place = true;
+            }
             if existing.request.container_addr != container_addr {
                 let old = existing.clone();
                 existing.request.container_addr = container_addr;
@@ -506,7 +516,8 @@ pub async fn add_mapping(
         proto,
     };
     let id = state.allocate_id();
-    let mapping = DockerPortMap::new(id, request, container_id.clone(), container_name);
+    let mut mapping = DockerPortMap::new(id, request, container_id.clone(), container_name);
+    mapping.owner = req.owner.clone();
 
     if let Err(e) = state.iptables.install_dockermap(&mapping) {
         state.ports.deallocate(host_addr).await;
@@ -1122,6 +1133,7 @@ mod tests {
             container_port: 80,
             target_ip: Some("10.0.0.2".into()),
             proto: TransportProtocol::Tcp,
+            owner: None,
         };
         let result = add_mapping(State(state), Path("test123".into()), Json(req)).await;
         assert!(result.is_err());
@@ -1139,6 +1151,7 @@ mod tests {
             container_port: 80,
             target_ip: Some("10.0.0.2".into()),
             proto: TransportProtocol::Tcp,
+            owner: None,
         };
         let mapping = add_mapping(State(state.clone()), Path("test123".into()), Json(req))
             .await
@@ -1168,6 +1181,7 @@ mod tests {
             container_port: 80,
             target_ip: Some("10.0.0.2".into()),
             proto: TransportProtocol::Tcp,
+            owner: None,
         };
 
         let result = add_mapping(State(state.clone()), Path("c1".into()), Json(req)).await;
@@ -1197,6 +1211,7 @@ mod tests {
             container_port: 80,
             target_ip: Some("10.0.0.2".into()),
             proto: TransportProtocol::Tcp,
+            owner: None,
         };
 
         let first = add_mapping(State(state.clone()), Path("c1".into()), Json(req.clone()))
@@ -1245,6 +1260,7 @@ mod tests {
             container_port: 80,
             target_ip: Some(target.to_string()),
             proto: TransportProtocol::Tcp,
+            owner: None,
         };
 
         let first = add_mapping(
@@ -1308,6 +1324,7 @@ mod tests {
             container_port: 80,
             target_ip: Some(target.to_string()),
             proto: TransportProtocol::Tcp,
+            owner: None,
         };
 
         let _first = add_mapping(
@@ -1353,6 +1370,7 @@ mod tests {
             container_port: 80,
             target_ip: Some(target.to_string()),
             proto: TransportProtocol::Tcp,
+            owner: None,
         };
 
         let first = add_mapping(
@@ -1412,6 +1430,7 @@ mod tests {
             container_port: 80,
             target_ip: Some("10.0.0.2".into()),
             proto: TransportProtocol::Tcp,
+            owner: None,
         };
 
         let result = add_mapping(State(state.clone()), Path("c1".into()), Json(req)).await;
@@ -1432,6 +1451,7 @@ mod tests {
             container_port: 80,
             target_ip: Some("10.0.0.2".into()),
             proto: TransportProtocol::Tcp,
+            owner: None,
         };
 
         let result = add_mapping(State(state.clone()), Path("c1".into()), Json(req.clone())).await;
@@ -1484,6 +1504,7 @@ mod tests {
             container_port: 80,
             target_ip: Some("10.0.0.2".into()),
             proto: TransportProtocol::Tcp,
+            owner: None,
         };
 
         let result = add_mapping(State(state.clone()), Path("c1".into()), Json(req.clone())).await;

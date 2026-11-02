@@ -3,6 +3,7 @@
 //! Parses CLI arguments and dispatches to the appropriate subcommand handler.
 
 use std::io::IsTerminal;
+use std::io::Write;
 use std::path::Path;
 
 use clap::CommandFactory;
@@ -77,7 +78,20 @@ fn main() -> Result<()> {
             rt.block_on(dockernet::run(use_color))?;
         }
         Command::NatMap { args } => {
-            rt.block_on(lab_ops_natmap::cli::run_cli(args, use_color))?;
+            match rt.block_on(lab_ops_natmap::cli::run_cli(args, use_color)) {
+                Ok(()) => {}
+                // Drift is an answer, not a failure: the plan is on stdout and
+                // the exit code is the whole report.
+                Err(error)
+                    if error
+                        .downcast_ref::<lab_ops_natmap::apply::Drift>()
+                        .is_some() =>
+                {
+                    std::io::stdout().flush()?;
+                    std::process::exit(1);
+                }
+                Err(error) => return Err(error),
+            }
         }
     };
 

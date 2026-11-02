@@ -165,7 +165,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/rules", get(list_rules))
         .route("/remap/:container_id", put(remap_port))
         .route("/mapping/:container_id", post(add_mapping))
-        .route("/mapping/{container_id}/{port}", delete(remove_mapping))
+        .route("/mapping/:container_id/:port", delete(remove_mapping))
         .route("/mapping/by-id/:id", delete(remove_mapping_by_id))
         .route("/dnat", post(add_dnat))
         .route("/dnat", delete(remove_dnat))
@@ -2268,6 +2268,7 @@ pub(crate) mod tests {
                 container_port: 80,
                 target_ip: Some("10.0.0.2".into()),
                 proto: TransportProtocol::Tcp,
+                owner: None,
             };
             add_mapping(State(add_state), Path("c1".into()), Json(req)).await
         });

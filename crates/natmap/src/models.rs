@@ -52,6 +52,10 @@ pub struct DockerPortMap {
     pub container_name: String,
     /// iptables comment used to identify this mapping's rules.
     pub rule_comment: String,
+    /// Service that owns the host port. `None` for a mapping added by hand,
+    /// which no apply will prune.
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 impl DockerPortMap {
@@ -86,6 +90,7 @@ impl DockerPortMap {
             container_id,
             container_name,
             rule_comment,
+            owner: None,
         }
     }
 }
@@ -119,6 +124,10 @@ pub struct DockerAddMapRequest {
     /// Transport protocol (`tcp` or `udp`, defaults to `tcp`).
     #[serde(default = "default_proto")]
     pub proto: TransportProtocol,
+    /// Service that owns the host port. Set by the declarative apply path; a
+    /// mapping without an owner was added by hand and is never pruned.
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 fn default_host_ip() -> String {
@@ -375,6 +384,42 @@ mod tests {
         let m = DockerPortMap::new(0, req, "id-zero".into(), "zero-port".into());
         assert_eq!(m.id, 0);
         assert_eq!(m.rule_comment, "natmap:id-zero:0");
+    }
+
+    #[test]
+    fn docker_port_map_without_an_owner_loads_as_unowned() {
+        let state = r#"{
+            "id": 7,
+            "request": {
+                "host_addr": "127.0.0.1:8080",
+                "container_addr": "10.0.0.2:80",
+                "proto": "tcp"
+            },
+            "container_id": "abc123",
+            "container_name": "my-nginx",
+            "rule_comment": "natmap:abc123:8080"
+        }"#;
+
+        let mapping: DockerPortMap = serde_json::from_str(state).unwrap();
+
+        assert_eq!(mapping.owner, None);
+    }
+
+    #[test]
+    fn add_mapping_request_round_trips_its_owner() {
+        let req = DockerAddMapRequest {
+            host_ip: "100.64.0.17".into(),
+            host_port: 3001,
+            container_port: 3001,
+            target_ip: Some("127.0.0.1".into()),
+            proto: TransportProtocol::Tcp,
+            owner: Some("fazuh-uptime".into()),
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let back: DockerAddMapRequest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(back.owner.as_deref(), Some("fazuh-uptime"));
     }
 
     #[test]

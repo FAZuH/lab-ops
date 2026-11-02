@@ -12,10 +12,12 @@ use clap_complete::engine::ArgValueCompleter;
 use color_eyre::Result;
 
 use crate::command::add;
+use crate::command::handle_apply;
 use crate::command::handle_clear;
 use crate::command::handle_dnat;
 use crate::command::handle_hairpin;
 use crate::command::handle_list;
+use crate::command::handle_plan;
 use crate::command::handle_policy_route;
 use crate::command::handle_snat;
 use crate::command::remap;
@@ -137,6 +139,29 @@ pub enum Command {
             add = ArgValueCompleter::new(crate::completions::complete_container_id)
         )]
         container_id: Option<String>,
+    },
+    /// Shows the mappings a declaration asks for that this node does not have.
+    #[command(name = "plan")]
+    Plan {
+        /// Path to the node's `discovery.yaml`.
+        #[arg(long, value_name = "FILE")]
+        from: PathBuf,
+        /// Also count the mappings this node created that the declaration dropped.
+        #[arg(long)]
+        prune: bool,
+    },
+    /// Converges this node's mappings to the ones its declaration names.
+    #[command(name = "apply")]
+    Apply {
+        /// Path to the node's `discovery.yaml`.
+        #[arg(long, value_name = "FILE")]
+        from: PathBuf,
+        /// Release the mappings this node created that the declaration no longer names.
+        #[arg(long)]
+        prune: bool,
+        /// Report the plan without changing anything.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Removes all managed NAT rules and resets daemon state.
     #[command(name = "clear")]
@@ -296,6 +321,16 @@ pub async fn run_cli(cli: Cli, use_color: bool) -> Result<()> {
         }
         Command::List { container_id } => {
             handle_list(&socket, container_id, json, use_color).await?;
+        }
+        Command::Plan { from, prune } => {
+            handle_plan(from, prune, json, use_color, &socket).await?;
+        }
+        Command::Apply {
+            from,
+            prune,
+            dry_run,
+        } => {
+            handle_apply(from, prune, dry_run, json, use_color, &socket).await?;
         }
         Command::Clear => {
             handle_clear(&socket).await?;
