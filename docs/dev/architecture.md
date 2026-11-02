@@ -20,12 +20,14 @@ lab-ops/
 │   │   └── src/
 │   │       ├── lib.rs             # Module declarations
 │   │       ├── consts.rs          # Shared constants (NATMAP_SOCKET, etc.)
+│   │       ├── discovery.rs       # discovery.yaml model: parse, defaults, resolve, container match
 │   │       ├── docker.rs          # Docker client + shared inspect: parse_container_inspect → ContainerInfo, parse_port_mappings → PortMapping
 │   │       ├── port.rs            # Port availability checking (SO_REUSEADDR, IP_FREEBIND)
 │   │       └── protocol.rs        # TransportProtocol enum (TCP/UDP)
 │   ├── natmap/                   # NAT management crate
 │   │   └── src/
 │   │   ├── lib.rs            # Module declarations
+│   │   ├── apply.rs          # Apply a resolved discovery service: mapping + policy route
 │   │   ├── cli.rs            # Command enum + CLI dispatch
 │   │   ├── client.rs         # Typed NatmapClient (HTTP over Unix socket)
 │   │   ├── command.rs        # Handler functions for all subcommands
@@ -36,16 +38,6 @@ lab-ops/
 │   │       ├── docker.rs         # Docker API client (bollard)
 │   │       ├── install.rs        # Systemd service installation
 │   │       └── utils.rs          # HTTP client for daemon communication
-│   └── auto-discover/            # Service discovery daemon
-│       └── src/
-│           ├── lib.rs            # Module declarations
-│           ├── cli.rs            # CLI definitions and dispatch
-│           ├── config.rs         # YAML config parsing
-│           ├── consul.rs         # Consul service registration
-│           ├── daemon.rs         # Core discovery daemon
-│           ├── forwarding.rs     # Proxy-side DNAT rule sync
-
-│           └── port.rs           # Port assignment persistence + allocation
 ├── tests/                        # Integration tests
 │   ├── integration.rs            # cf2ansible integration tests
 │   └── natmap_docker.rs          # Docker-based NAT integration tests

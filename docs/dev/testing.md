@@ -10,9 +10,7 @@ See [standards.md §7](standards.md#7-testing) for naming conventions, test loca
 cargo test --workspace                              # All tests (excl. Docker)
 cargo test -p lab-ops_lab-lib                       # lab-lib crate only
 cargo test -p lab-ops_natmap                        # natmap crate only
-cargo test -p lab-ops_auto-discover                 # auto-discover crate only
 cargo test -p lab-ops --all-features --test natmap_docker   # natmap Docker integration tests
-cargo test -p lab-ops --all-features --test auto_discover   # auto-discover Docker integration tests
 cargo test -p lab-ops_natmap --test model           # natmap model integration tests
 cargo test --doc -p lab-ops_natmap -p lab-ops_lab-lib  # Doc tests only
 ```
@@ -26,13 +24,16 @@ Located in `#[cfg(test)] mod tests { }` blocks within source files.
 | `src/cmd/cf2ansible.rs` | 4 | DNS zone parsing, record extraction, YAML output |
 | `src/cmd/cf2terra.rs` | 1 | Terraform HCL output |
 | `src/cmd/dockernet.rs` | 8 | IP formatting and port bind parsing |
-| `crates/lab-lib/src/port.rs` | 11 | Port allocation, persistence, free-port checks |
-| `crates/natmap/src/api.rs` | 22 | HTTP handlers, `parse_socket_addrs` boundary/edge cases |
-| `crates/natmap/src/daemon.rs` | 2 | Tracing span fields on daemon ops |
-| `crates/auto-discover/src/config.rs` | 11 | preserve_src_ip config propagation (defaults, overrides) |
-| `crates/auto-discover/src/consul.rs` | 5 | Consul service registration, metadata, URL encoding |
-| `crates/auto-discover/src/daemon.rs` | 2 | Tracing span fields on container events |
-| `crates/auto-discover/src/forwarding.rs` | 27 | `group_forwarding_services`, `parse_dnat_rule`, 5 proptest invariants, edge cases |
+| `crates/lab-lib/src/discovery.rs` | 18 | `discovery.yaml` parsing, defaults propagation, `resolve_all`, container matching |
+| `crates/lab-lib/src/docker.rs` | 8 | Inspect parsing, primary-IP selection, port-mapping parsing |
+| `crates/lab-lib/src/port.rs` | 6 | Port reservation lifecycle, conflict detection, UDP binding |
+| `crates/natmap/src/api.rs` | 46 | HTTP handlers, `parse_socket_addrs`, port-reservation decisions for local vs forwarded DNAT |
+| `crates/natmap/src/apply.rs` | 15 | Port decisions, mapping/`target_ip` wiring, policy-route fallbacks, daemon-error tolerance |
+| `crates/natmap/src/daemon.rs` | 45 | State, reload reconciliation, Docker event handling, span fields |
+| `crates/natmap/src/iptables.rs` | 11 | Exact argv for every rule builder, including the loopback accept hook |
+| `crates/natmap/src/models.rs` | 15 | Serialization, rule comments, IPv6 detection |
+| `crates/natmap/src/policy_route.rs` | 22 | `ip rule`/`ip route` parsing and flush behaviour |
+| `crates/natmap/src/utils.rs` | 8 | HTTP-over-Unix-socket request helper and status mapping |
 
 #### Test ports
 
@@ -49,7 +50,7 @@ test that reaches `allocate`.
 Per-file counts in this file are historical; the **totals** below are the measured source of truth, each with the exact command that produced it. `cargo test -p <crate>` is authoritative.
 
 
-**Total: 307 inline unit tests**, measured from the four lib test binaries after a forced rebuild (`cargo test -p lab-ops -p lab-ops_natmap -p lab-ops_auto-discover -p lab-ops_lab-lib --lib --all-features`): 57 + 154 + 82 + 14. (Measured 2026-10-14.)
+**Total: 262 inline unit tests**, measured from the three lib test binaries (`cargo test -p lab-ops -p lab-ops_natmap -p lab-ops_lab-lib --lib --all-features`): 57 + 173 + 32. (Measured 2026-11-02.)
 
 ### Doc Tests
 
@@ -69,7 +70,6 @@ Documented inline with their parent modules. Proptest invariants live alongside 
 
 | Location | Tests | Covers |
 |---|---|---|
-| `crates/auto-discover/src/forwarding.rs` | 5 | `group_forwarding_services`: dedup keys, sorted ports, all ports in group, hairpin/preserve_src_ip OR |
 | `crates/natmap/tests/cli.rs` | 8 | `parse_docker_mapping`: 1- to 5-part format roundtrips |
 
 `service_matches_group` helper is defined outside the `proptest!` block (the macro doesn't support mixing regular functions with test functions).
@@ -88,7 +88,7 @@ Located in `tests/` or `crates/*/tests/` directories.
 
 ### Docker Integration Tests
 
-Located in `tests/natmap_docker.rs` (36 tests) and `tests/auto_discover/` (46 tests across 7 modules), behind `#[cfg(feature = "docker-tests")]`.
+Located in `tests/natmap_docker.rs` (36 tests), behind `#[cfg(feature = "docker-tests")]`.
 
 **natmap Docker tests** (`tests/natmap_docker.rs`, 36 tests):
 Spins up a privileged Ubuntu container with iptables, runs the natmap daemon, and verifies iptables NAT rule creation/removal, startup flush, graceful shutdown, policy routing, and port allocation via CLI commands over the Unix socket.
@@ -103,28 +103,13 @@ Spins up a privileged Ubuntu container with iptables, runs the natmap daemon, an
 | Policy routing | 2 |
 | Other | 9 |
 
-**auto-discover Docker tests** (`tests/auto_discover/`, 46 tests across 7 modules):
-Spins up a privileged Docker container running Consul, natmap, and auto-discover daemons. Verifies Consul registration, port binding, forwarding metadata, crash recovery, config change handling, registration metadata, forwarding sync (DNAT rules), concurrency, and large configs.
-
-| Module | Tests | Covers |
-|---|---|---|
-| `forwarding.rs` | 9 | DNAT sync, duplicate/stale rules, multi-port, hairpin, preserve_src_ip hairpin |
-
-| `port_binding.rs` | 5 | Static/ephemeral ports, bind_ip, bind_interface, local forwarding |
-| `registration.rs` | 13 | Consul registrations, container events, domain slug, extra fields, concurrent starts, sync idempotency |
-| `recovery.rs` | 8 | Config changes, crash recovery, YAML validation, pre/postprocess, config sync, restart-with-state |
-| `local_services.rs` | 4 | Local service type, forwarding remote, reachability, combined rproxy+forwarding |
-| `preserve_src_ip.rs` | 6 | Global/per-service preserve_src_ip, policy route, idempotency, cleanup |
-
-| `startup_race.rs` | 1 | Startup race before natmap socket is ready |
-
-**Total: 82 Docker tests**: 36 (`tests/natmap_docker`) + 46 (`tests/auto_discover/`). Reproduce with `cargo test -p lab-ops --test natmap_docker --all-features` and `cargo test -p lab-ops --test auto_discover --all-features`.
+**Total: 36 Docker tests** in `tests/natmap_docker.rs`. Reproduce with `cargo test -p lab-ops --test natmap_docker --all-features`.
 
 The Docker image is built once via `Once` from `ubuntu:24.04` with `iptables` installed.
 
 ## How Tests Run
 
-`./dev.sh test` executes `cargo test --workspace --all-targets --all-features`. Note that `--all-features` enables `docker-tests` in the root crate and the auto-discover crate, so all test categories are included.
+`./dev.sh test` executes `cargo test --workspace --all-targets --all-features`. Note that `--all-features` enables `docker-tests` in the root crate, so all test categories are included.
 
 `--all-features` is not decorative. The repo's `.cargo/config.toml` sets
 `[build] rustflags = ["--cfg", "feature=\"docker-tests\""]`, which is the
@@ -178,7 +163,7 @@ cargo test --workspace --all-features -- --test-threads=1
 ## Common Pitfalls
 
 1. **Docker tests hang**: pass `--test-threads=1` yourself. Nothing in the tree sets it: `.cargo/config.toml` sets only `rustflags`, so the Docker suites run at cargo's default parallelism, where they are currently flaky (#54).
-2. **Daemon connection refused**: start the daemon inside the container with `&`, then poll for the socket (`WAIT_SOCKET` in `tests/natmap_docker.rs`, the `wait_for_*` helpers in `tests/auto_discover/mod.rs`). Never a bare `sleep`.
+2. **Daemon connection refused**: start the daemon inside the container with `&`, then poll for the socket (`WAIT_SOCKET` in `tests/natmap_docker.rs`). Never a bare `sleep`.
 3. **Port binding fails in Docker**: Use `--privileged`. Port allocation requires `CAP_NET_BIND_SERVICE` or root.
 4. **State file conflicts**: Not possible as written. `run()` uses `docker run --rm` and mounts no host `/tmp`, so every `/tmp` path inside a test script is already fresh per test. Adding per-test paths is unnecessary.
 
@@ -205,6 +190,6 @@ Add a `#[test]` function to `tests/` or `crates/*/tests/`. Use `env!("CARGO_BIN_
 
 ### Docker Integration Test
 
-1. Add a `#[test]` function to `tests/natmap_docker.rs` or the appropriate module in `tests/auto_discover/`
+1. Add a `#[test]` function to `tests/natmap_docker.rs`
 2. Use `run_in_docker(&[...])` for shell commands
 3. Pattern: start daemon → wait → run command → verify output

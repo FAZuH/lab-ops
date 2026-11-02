@@ -3,7 +3,7 @@
 //! The daemon is the central authority for all iptables NAT rules. It:
 //!
 //! - Hosts an HTTP API on a Unix socket (`/run/natmap.sock`)
-//! - Auto-discovers Docker container ports on start/stop events
+//! - Discovers Docker container ports on start/stop events
 //! - Persists state to JSON and recovers after crashes
 //! - Prevents port conflicts using [`PortAllocator`]
 
@@ -189,7 +189,7 @@ pub struct Daemon {
 
 impl Daemon {
     /// Builds the daemon and its iptables chains. Fails when the chains cannot be
-    /// created; Docker is optional and its absence only disables auto-discovery.
+    /// created; Docker is optional and its absence only disables Docker discovery.
     pub async fn new(
         socket_path: PathBuf,
         state_path: PathBuf,
@@ -905,22 +905,28 @@ async fn ensure_static_rule(
     };
     let ip: IpAddr = ext_ip.parse().wrap_err("invalid IP")?;
 
+    // A loopback DNAT destination is serviced by the kernel rule alone; a
+    // userspace reservation would compete with locally delivered traffic.
+    let kernel_only = matches!(&rule, StaticRule::Dnat(config) if config.targets_local_delivery());
+
     let mut reserved = Vec::new();
-    for port in ports_csv
-        .split(',')
-        .filter_map(|p| p.trim().parse::<u16>().ok())
-    {
-        let addr = SocketAddr::new(ip, port);
-        if ports.is_allocated(addr).await {
-            continue;
-        }
-        if let Err(e) = ports.allocate(addr, proto).await {
-            for reserved_addr in &reserved {
-                ports.deallocate(*reserved_addr).await;
+    if !kernel_only {
+        for port in ports_csv
+            .split(',')
+            .filter_map(|p| p.trim().parse::<u16>().ok())
+        {
+            let addr = SocketAddr::new(ip, port);
+            if ports.is_allocated(addr).await {
+                continue;
             }
-            return Err(e.wrap_err("failed to reserve port"));
+            if let Err(e) = ports.allocate(addr, proto).await {
+                for reserved_addr in &reserved {
+                    ports.deallocate(*reserved_addr).await;
+                }
+                return Err(e.wrap_err("failed to reserve port"));
+            }
+            reserved.push(addr);
         }
-        reserved.push(addr);
     }
 
     let install = match rule {
@@ -1202,6 +1208,54 @@ pub(crate) mod tests {
             proto: TransportProtocol::Tcp,
             lan_cidr: None,
         }
+    }
+
+    /// Reload reconciliation must not reserve a port for a loopback DNAT: the
+    /// kernel rule alone services it.
+    #[tokio::test]
+    async fn ensure_static_rule_loopback_dnat_skips_reservation() {
+        let port = test_port();
+        let addr = make_addr(port);
+        let ports = PortAllocator::new();
+        let fake = FakeIptables::default();
+        let config = DnatConfig {
+            ext_ip: "127.0.0.1".to_string(),
+            int_ip: "127.0.0.1".to_string(),
+            ports: port.to_string(),
+            proto: TransportProtocol::Tcp,
+            ext_if: None,
+            preserve_src_ip: false,
+        };
+
+        ensure_static_rule(&ports, &fake, StaticRule::Dnat(&config))
+            .await
+            .unwrap();
+
+        assert_eq!(fake.installed_dnats(), vec![config]);
+        assert!(!ports.is_allocated(addr).await);
+    }
+
+    /// The forwarded case is unchanged: its external port stays reserved.
+    #[tokio::test]
+    async fn ensure_static_rule_forwarded_dnat_reserves_the_external_port() {
+        let port = test_port();
+        let addr = make_addr(port);
+        let ports = PortAllocator::new();
+        let fake = FakeIptables::default();
+        let config = DnatConfig {
+            ext_ip: "127.0.0.1".to_string(),
+            int_ip: "10.0.0.99".to_string(),
+            ports: port.to_string(),
+            proto: TransportProtocol::Tcp,
+            ext_if: None,
+            preserve_src_ip: false,
+        };
+
+        ensure_static_rule(&ports, &fake, StaticRule::Dnat(&config))
+            .await
+            .unwrap();
+
+        assert!(ports.is_allocated(addr).await);
     }
 
     fn id_set(ids: &[&str]) -> HashSet<String> {

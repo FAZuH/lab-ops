@@ -79,9 +79,6 @@ fn main() -> Result<()> {
         Command::NatMap { args } => {
             rt.block_on(lab_ops_natmap::cli::run_cli(args, use_color))?;
         }
-        Command::AutoDiscover { args } => {
-            rt.block_on(lab_ops_auto_discover::cli::run_cli(args))?;
-        }
     };
 
     Ok(())

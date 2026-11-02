@@ -2,12 +2,13 @@
 
 ## `crates/lab-lib/src/`
 
-Shared utilities and types consumed by both `natmap` and `auto-discover`.
+Shared utilities and types consumed by `natmap` and the root binary.
 
 ### `lib.rs` — Library Root
 
 ```rust
 pub mod consts;
+pub mod discovery;
 pub mod docker;
 pub mod port;
 pub mod protocol;
@@ -15,19 +16,19 @@ pub mod protocol;
 
 ### `protocol.rs` — TransportProtocol
 
-The canonical `TransportProtocol` enum (`Tcp` / `Udp`) with serde, `Display`, and `TryFrom<String>`. Originally defined in natmap; extracted here so auto-discover can use it without depending on natmap.
+The canonical `TransportProtocol` enum (`Tcp` / `Udp`) with serde, `Display`, and `TryFrom<String>`. Originally defined in natmap; extracted here so every crate can share it without depending on natmap.
 
 ### `consts.rs` — Shared Constants
 
 | Constant | Value | Used By |
 |---|---|---|
-| `NATMAP_SOCKET` | `/run/natmap.sock` | natmap, auto-discover |
-| `LAB_OPS_BIN` | `/usr/local/bin/lab-ops` | auto-discover |
-| `LAB_OPS_CMD` | `lab-ops` | auto-discover |
+| `NATMAP_SOCKET` | `/run/natmap.sock` | natmap |
+| `LAB_OPS_BIN` | `/usr/local/bin/lab-ops` | natmap install |
+| `LAB_OPS_CMD` | `lab-ops` | completion helpers |
 
 ### `docker.rs` — Docker Helpers & Shared Inspection
 
-The shared container-inspection contract, consumed by both `natmap` and `auto-discover`:
+The shared container-inspection contract, consumed by `natmap`:
 
 - `connect()` — Connects to the local Docker daemon via `Docker::connect_with_local_defaults()`
 - `trim_container_name(name) -> &str` — Strips the leading `/` from Docker container names
@@ -36,6 +37,19 @@ The shared container-inspection contract, consumed by both `natmap` and `auto-di
 - `ContainerNetwork {name, ip, gateway}` — The settings for one network a container is attached to
 - `parse_container_inspect(inspect) -> ContainerInfo` — Parses a `ContainerInspectResponse` into the shared container shape
 - `parse_port_mappings(inspect) -> Vec<PortMapping>` — Parses the published port mappings from an inspect response
+
+### `discovery.rs` — `discovery.yaml` Model
+
+The declaration model for a node's published services, kept reachable for
+`natmap::apply` and a planned `natmap apply --from discovery.yaml`:
+
+- `DiscoveryConfig {node, defaults, services}` — root of the file. `load(path)` reads and deserializes it
+- `Defaults` — values a service inherits when it does not set them (`proxy_on`, `proxy_ip`, `bind_ip`, `bind_interface`, `preserve_src_ip*`)
+- `ServiceConfig` — one `services:` entry: `type` (`docker` / `local`), optional `match` block, `address`, `bind_ip`, `bind_interface`, and the port registrations (`rproxylocal`, `rproxyremote`, `forwardlocal`, `forwardremote`)
+- `MatchConfig` — container criteria. `matches(container)` requires every criterion set; an invalid `container_regex` matches nothing
+- `ServiceConfig::matches_container(container)` — a service without a `match` block covers every container
+- `resolve_all() -> Vec<ResolvedService>` — expands every service into one resolved registration per port, with defaults applied
+- `ResolvedService` / `ResolvedPortType` — the flattened result `apply` consumes. `primary_domain()`, `domain_slug()`, and `domains()` are rproxy helpers
 
 ### `port.rs` — Port Utilities & Management
 
@@ -59,6 +73,7 @@ Declares all modules with `pub` visibility:
 
 ```rust
 pub mod api;
+pub mod apply;
 pub mod cli;
 pub mod client;
 pub mod command;
@@ -73,13 +88,25 @@ pub mod policy_route;
 pub mod utils;
 ```
 
+### `apply.rs` — Apply a Discovery Service
+
+The mapping half of a discovery pass, with no Consul involvement:
+
+- `NatmapApply` — seam over the daemon's `add_mapping` and `policy_route`; `NatmapClient` is the production implementation, tests fake it
+- `ApplyTarget {id, container_ip, local_ip}` — what a resolved service points at (a container ID, or the service key for a local service)
+- `decide_ports(resolved, local_target) -> Option<PortDecision>` — explicit `bind_port`/`ext_ports[0]`, or `host_port: 0` for daemon allocation; `None` when an rproxy service on a local target needs no mapping
+- `natmap_bind_ip(resolved)` — `bind_ip`, else the first IPv4 address of `bind_interface`, else the daemon's `0.0.0.0`
+- `service_address(resolved, target)` — the node-side address used as the policy-route source fallback
+- `apply_service(apply, resolved, target) -> Result<u16>` — decide the port, create the mapping (returning the daemon-reported host port), then install the `preserve_src_ip` policy route when the service sets one. An explicit port survives a `Conflict`, `NotFound`, or `Unavailable` response; a rejected dynamic request fails
+- `resolve_interface_ip(iface)` — first IPv4 address from `ip -j -4 addr show`
+
 ### `client.rs` — Typed Client
 
 `pub struct NatmapClient { socket: PathBuf }` — one typed method per daemon operation, speaking the same HTTP-over-Unix-socket protocol as the CLI's `request_json`:
 
 - Static NAT ops take the typed config struct + an explicit `delete: bool` and return `Result<Option<T>, NatmapError>` (daemon echo on install, `None` on delete): `dnat(DnatConfig, bool)`, `hairpin`, `policy_route`.
 - Docker mapping ops mirror the daemon endpoints: `add_mapping(&str, DockerAddMapRequest) -> Result<DockerPortMap>` and `rules() -> Result<Vec<LiveRule>>` (live rules parsed from `iptables-save`).
-- `new(impl Into<PathBuf>)` and `default_socket()` (env `NATMAP_SOCKET`, else `lab_ops_lab_lib::NATMAP_SOCKET`). Re-exports `NatmapError` from `utils.rs`. Consumed by auto-discover, which calls the config structs directly rather than building `cli::Cli` values.
+- `new(impl Into<PathBuf>)` and `default_socket()` (env `NATMAP_SOCKET`, else `lab_ops_lab_lib::NATMAP_SOCKET`). Re-exports `NatmapError` from `utils.rs`. Consumed by `apply` and other callers that use the config structs directly rather than building `cli::Cli` values.
 
 ### `cli.rs` — CLI Definitions
 
@@ -131,7 +158,7 @@ Key types:
 
 | Type | Purpose |
 |------|---------|
-| `DnatConfig` | Persisted DNAT rule (ext_ip, int_ip, ports, proto, ext_if, preserve_src_ip) |
+| `DnatConfig` | Persisted DNAT rule (ext_ip, int_ip, ports, proto, ext_if, preserve_src_ip). `targets_local_delivery()` reports a loopback destination |
 | `SnatConfig` | Persisted SNAT rule (int_ip, ext_ip, ext_if) |
 | `HairpinConfig` | Persisted hairpin rule (ext_ip, int_ip, ports, proto, optional lan_cidr) |
 | `DaemonState` | Top-level persisted state (docker, dnats, snats, hairpins) |
@@ -150,9 +177,9 @@ Stateless manager for iptables operations. Key methods:
 |--------|---------|
 | `setup()` | Create NATMAP chains and jump rules in filter/nat tables |
 | `flush_all_natmap()` | Flush ALL rules in NATMAP chains (crash recovery) |
-| `install_mapping()` | Install Docker port mapping (DNAT + FORWARD + MASQUERADE + OUTPUT) |
+| `install_dockermap()` | Install Docker port mapping (DNAT + accept + MASQUERADE + OUTPUT) |
 | `remove_mapping()` | Remove Docker mapping by comment |
-| `install_dnat()` / `remove_dnat()` | Static DNAT rules |
+| `install_dnat()` / `remove_dnat()` | Static DNAT rules. The accept lands in `INPUT` when the destination is loopback (locally delivered), in `FORWARD` otherwise; a loopback rule is installed with `ip6tables` when the destination is IPv6 |
 | `install_snat()` / `remove_snat()` | Static SNAT rules |
 | `install_hairpin()` / `remove_hairpin()` | Static hairpin rules. When `lan_cidr` is set on the config, skips PREROUTING DNAT and uses the LAN subnet as the MASQUERADE source match instead of `0.0.0.0/0` |
 | `flush_container_rules()` | Remove all rules for a container |
@@ -179,77 +206,6 @@ Wraps the `bollard` Docker API crate:
 HTTP client for daemon communication:
 - `NatmapError` — typed error enum (variants: `Connect`, `Http`, `Json`, `BadRequest`, `NotFound`, `Conflict`, `Internal`, `Unavailable`, `UnexpectedStatus { status, body }`). Hand-implemented `Display` + `std::error::Error`; status → variant via `from_status()`. This is the one deliberate exception to the "no custom error enums" rule (see `docs/dev/standards.md` §4).
 - `request_json<T, R>(socket_path, method, path, body) -> Result<T, NatmapError>` — Sends HTTP request to Unix socket, deserializes JSON response. Maps non-success statuses to `NatmapError` variants instead of a flat error string.
-
-## `crates/auto-discover/src/`
-
-### `lib.rs` — Library Root
-
-Declares all modules. Only `cli` is `pub` (consumed by the root `lab-ops` binary for CLI dispatch):
-
-```rust
-pub mod cli;
-mod config;
-mod consul;
-mod daemon;
-mod forwarding;
-```
-
-### `cli.rs` — CLI Definitions
-
-Defines `Cli` struct and `Commands` enum with clap derives. The `run_cli(cli, _use_color)` function dispatches each variant. Subcommands:
-
-| Variant | Purpose |
-|---|---|
-| `Daemon` | Unified long-running daemon (discovery + forwarding) |
-| `Sync` | One-shot discovery sync pass |
-| `Check` | Validate `discovery.yaml` |
-| `ForwardingSync` | One-shot proxy-side DNAT rule sync |
-
-### `config.rs` — DiscoveryConfig
-
-Parses `/etc/auto-discover/discovery.yaml`:
-
-- **`DiscoveryConfig`**: Top-level config (`name`, `bind_ip`, `bind_interface`, `networks`, `defaults`)
-- **`NetworkEntry`**: Per-network config (`name`, `container_port`, `protocol`, `template`, `forwarding`)
-- **`ResolvedService`**: Fully resolved config with all defaults applied
-
-### `consul.rs` — ConsulClient
-
-Interacts with Consul Agent API:
-
-- `register_service()` — Register/update a service with metadata
-- `deregister_by_container()` — Remove all services matching a container ID
-- `get_services_by_container()` — Query services by container ID
-- `get_forwarding_services()` — Query catalog for forwarding services across all agents
-- `get_all_catalog_service_ids()` — Query the Consul catalog cluster-wide for all registered service instance IDs
-- `delete_kv()` — Delete a single KV entry
-
-### `daemon.rs` — DiscoveryDaemon
-
-Orchestrates the full discovery lifecycle:
-
-- `sync()` — Full reconciliation: sync running containers against config
-- `handle_container_start()` — Match started container to network entries, allocate ports, register
-- `handle_container_die()` — Deregister stale services
-- `run_config_watcher()` — Watch `discovery.yaml` for file changes and re-sync
-- `ensure_docker_mapping()` — Adds a Docker mapping via `lab_ops_natmap::client::NatmapClient` and returns the daemon-reported host port. A `Conflict`/`NotFound` response is non-fatal only for explicit host ports. A rejected dynamic request (`host_port: 0`) fails the sync
-
-### Docker (shared with lab-lib)
-
-auto-discover has no local docker module. It uses the shared `lab_ops_lab_lib::docker` types:
-
-- `DockerClient` — `list_running_containers()` and `inspect_container()` return the shared `ContainerInfo` shape
-- `ContainerInfo {id, name, compose_project, ip, networks}` — The shared container shape, including the primary container IP
-- `ContainerNetwork {name, ip, gateway}` — The settings for one network a container is attached to
-
-The IP fallback in `determine_consul_ip()` (see `daemon.rs` above) is: `bind_ip`, then `bind_interface`, then `ContainerInfo.ip`, read from the shared inspect shape rather than a `docker inspect` subprocess.
-
-### `forwarding.rs` — Forwarding Rule Sync
-
-Proxy-side DNAT management:
-- `sync_forwarding_rules()` — Query Consul for forwarding services, apply DNAT rules via `lab_ops_natmap::client::NatmapClient`
-- `parse_group_proto(proto)` — Parses a forwarding group's protocol string, rejecting invalid values so a misconfigured service fails the sync instead of silently installing a TCP rule
-- `get_lan_cidr(ip)` — Determine the LAN subnet CIDR containing the given IP by querying the routing table (used for LAN-limited hairpin when `preserve_src_ip` is true)
 
 ## `src/` (Root Crate)
 

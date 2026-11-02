@@ -92,15 +92,23 @@ pub async fn add_dnat(
         }
     }
 
-    bind_ports(
-        state.ports.clone(),
-        &config.ext_ip,
-        &config.ports,
-        config.proto,
-    )
-    .await?;
+    // A loopback destination is reached through the kernel rule alone: the
+    // daemon holds no userspace listener for it, because such a listener would
+    // accept locally delivered traffic itself instead of forwarding it.
+    let kernel_only = config.targets_local_delivery();
+    if !kernel_only {
+        bind_ports(
+            state.ports.clone(),
+            &config.ext_ip,
+            &config.ports,
+            config.proto,
+        )
+        .await?;
+    }
     if let Err(e) = state.iptables.install_dnat(&config) {
-        unbind_ports(state.ports, &config.ext_ip, &config.ports).await;
+        if !kernel_only {
+            unbind_ports(state.ports, &config.ext_ip, &config.ports).await;
+        }
         return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
     }
     state.daemon_state.write().await.dnats.push(config.clone());
@@ -992,6 +1000,57 @@ mod tests {
             fake.installed_dnats(),
             vec![req],
             "a duplicate must not install a second rule"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_dnat_loopback_destination_holds_no_port_reservation() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Arc::new(FakeIptables::default());
+        let state = test_app_state_with(&dir, fake.clone());
+        let port = test_port();
+        let addr = SocketAddr::new(IpAddr::from_str("127.0.0.1").unwrap(), port);
+        let req = DnatConfig {
+            ext_ip: "127.0.0.1".into(),
+            int_ip: "127.0.0.1".into(),
+            ports: port.to_string(),
+            proto: TransportProtocol::Tcp,
+            ext_if: None,
+            preserve_src_ip: false,
+        };
+
+        let _ = add_dnat(State(state.clone()), Json(req.clone()))
+            .await
+            .unwrap();
+
+        assert_eq!(fake.installed_dnats(), vec![req]);
+        assert!(
+            !state.ports.is_allocated(addr).await,
+            "the kernel rule alone services a loopback destination; a userspace listener would compete with it"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_dnat_forwarded_destination_still_reserves_the_external_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Arc::new(FakeIptables::default());
+        let state = test_app_state_with(&dir, fake.clone());
+        let port = test_port();
+        let addr = SocketAddr::new(IpAddr::from_str("127.0.0.1").unwrap(), port);
+        let req = DnatConfig {
+            ext_ip: "127.0.0.1".into(),
+            int_ip: "10.0.0.1".into(),
+            ports: port.to_string(),
+            proto: TransportProtocol::Tcp,
+            ext_if: None,
+            preserve_src_ip: false,
+        };
+
+        let _ = add_dnat(State(state.clone()), Json(req)).await.unwrap();
+
+        assert!(
+            state.ports.is_allocated(addr).await,
+            "a forwarded destination keeps the external port reserved"
         );
     }
 

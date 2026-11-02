@@ -4,7 +4,7 @@
 //! [`DockerClient`] wrapper around the Bollard API, and the pure inspect
 //! parsers [`parse_container_inspect`] and [`parse_port_mappings`] that turn a
 //! docker inspect response into the shared [`ContainerInfo`] and
-//! [`PortMapping`] shapes used by both natmap and auto-discover.
+//! [`PortMapping`] shapes used by natmap.
 
 use std::collections::HashMap;
 use std::net::IpAddr;

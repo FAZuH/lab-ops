@@ -17,7 +17,6 @@ sudo cp target/release/lab-ops /usr/local/bin/
 | `cf2ansible` | Convert BIND DNS zone files to Ansible Cloudflare DNS tasks |
 | `cf2terra` | Convert BIND DNS zone files to Terraform Cloudflare DNS resources |
 | `natmap` | Manage iptables NAT rules (static VMs & dynamic Docker mappings) |
-| `auto-discover` | Service discovery daemon with Consul integration |
 | `completions` | Generate shell completion scripts |
 
 ---

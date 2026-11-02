@@ -39,7 +39,7 @@ src/
     └── dockernet.rs
 ```
 
-Workspace crates (`natmap`, `auto-discover`) keep their full CLI definitions inside their own `src/` and are integrated into the root CLI via `#[command(flatten)]`.
+`natmap` keeps its full CLI definition inside its own `src/` and is integrated into the root CLI via `#[command(flatten)]`.
 
 ### 2.3. File Naming
 
@@ -119,7 +119,7 @@ build_consul_service_udp_check
 
 **Every crate in the workspace must use `color_eyre`.** There are no custom error enums in this project. The root `main.rs` calls `color_eyre::install()?` at startup.
 
-> **Exception — typed client errors**: `crates/natmap/src/utils.rs` defines `NatmapError` (hand-implemented `Display` + `std::error::Error`, no `thiserror`). It exists so natmap's public `client` module and auto-discover can match daemon status codes (`BadRequest`/`NotFound`/`Conflict`/`Unavailable`, etc.) without parsing error strings. `request_json` returns `Result<T, NatmapError>`; library code converts via `?` (color_eyre `Report: From<E: StdError>`). This is the one deliberate exception to §4.1/§4.2 — internal code paths still use `color_eyre::Result`.
+> **Exception — typed client errors**: `crates/natmap/src/utils.rs` defines `NatmapError` (hand-implemented `Display` + `std::error::Error`, no `thiserror`). It exists so natmap's public `client` module and `apply` can match daemon status codes (`BadRequest`/`NotFound`/`Conflict`/`Unavailable`, etc.) without parsing error strings. `request_json` returns `Result<T, NatmapError>`; library code converts via `?` (color_eyre `Report: From<E: StdError>`). This is the one deliberate exception to §4.1/§4.2 — internal code paths still use `color_eyre::Result`.
 
 ```rust
 use color_eyre::eyre::Result;
@@ -135,7 +135,7 @@ fn example() -> Result<()> {
 
 ### 4.2. Custom Error Types → Delete
 
-Replace custom error enums (`ConfigError`, `DaemonError`, `ConsulError`, etc.) in `auto-discover` with `color_eyre::Result` and `bail!()` / `eyre!()`.
+Replace custom error enums (`ConfigError`, `DaemonError`, `ConsulError`, etc.) with `color_eyre::Result` and `bail!()` / `eyre!()`.
 
 ### 4.3. No `unwrap()` / `expect()` / `process::exit()`
 
@@ -387,19 +387,7 @@ Standard field names:
 
 ### 9.5. Span Hierarchy
 
-Every async function that handles a Docker event, processes a Consul operation, or applies an iptables rule MUST be wrapped in a span using `#[instrument(skip_all, fields(...))]` or `.instrument(span)`.
-
-**auto-discover hierarchy:**
-```
-event_loop              ← long-lived, fields: daemon="auto-discover"
-  handle_container_start  ← per-event, fields: container.id, event.action, compose.project
-    register_consul         ← fields: consul.svc_id, consul.addr
-    add_natmap_mapping      ← fields: host.port, container.port, proto
-  handle_container_die    ← per-event, fields: container.id, event.action
-    deregister_consul       ← fields: consul.svc_id
-  sync_forwarding_rules   ← fields: rule.count
-  sync_nginx_configs      ← fields: config.count
-```
+Every async function that handles a Docker event or applies an iptables rule MUST be wrapped in a span using `#[instrument(skip_all, fields(...))]` or `.instrument(span)`.
 
 **natmap hierarchy:**
 ```
@@ -409,6 +397,7 @@ daemon                  ← long-lived, fields: daemon="natmap", socket.path
   reload                  ← fields: mappings.count, dnats.count
   add_dnat / remove_dnat  ← fields: ext.ip, int.ip, ports, proto
   add_mapping             ← fields: host.addr, container.addr, proto, container.id
+  apply_service           ← fields: service.id_prefix, host.port, container.port
 ```
 
 ## 10. Dependency Management

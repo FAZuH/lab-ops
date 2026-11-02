@@ -26,30 +26,26 @@ export OPENSSL_INCLUDE_DIR=/nix/store/0la6k2nj90y1716c1znhdm713ia1qgx8-openssl-3
 ```
 
 - `OPENSSL_DIR` alone is **not** enough: the `-dev` store path has the headers, the other has the `.so` files, and `openssl-sys` rejects a libdir without them.
-- `cargo test -p lab-ops_auto-discover` additionally needs
-  `LD_LIBRARY_PATH=/nix/store/7fr737xfi9qw3fzvdsqmnbqid56knndp-openssl-3.6.4/lib`
-  or the test binary dies with `libssl.so.3: cannot open shared object file`. The other three crates do not need it.
 - Do not "fix" this in `Cargo.toml` — it is the environment, not the code.
 
 ## Test Strategy ⚠️
 
-- **Run targeted tests first.** After a change, run the specific test/crate, not the whole suite — it is faster and most changes do not touch the Docker paths. E.g. `cargo test -p lab-ops_natmap`, `cargo test -p lab-ops_auto-discover`.
+- **Run targeted tests first.** After a change, run the specific test/crate, not the whole suite — it is faster and most changes do not touch the Docker paths. E.g. `cargo test -p lab-ops_natmap`, `cargo test -p lab-ops_lab-lib`.
 - **If a test fails, fix and rerun only that test.** Use `cargo test <test_name> -p <crate>`.
-- **⚠️ The full suite may be run without asking.** `./dev.sh all` / `./dev.sh test` run the FULL suite including the Docker integration tests (122+ tests, ~2-3 min) — run them before calling work verified when a change touches the Docker harness, the iptables path, the natmap state file, or the auto_discover bootstrap.
+- **⚠️ The full suite may be run without asking.** `./dev.sh all` / `./dev.sh test` run the FULL suite including the Docker integration tests (122+ tests, ~2-3 min) — run them before calling work verified when a change touches the Docker harness, the iptables path, the natmap state file, or the mapping apply path.
 - **Nothing enforces `--test-threads=1`.** `.cargo/config.toml` sets only `rustflags`, so the Docker suites run with cargo's default parallelism. Pass `-- --test-threads=1` yourself when you need determinism; they are currently flaky under parallel execution (#54). Each test spins up a privileged Ubuntu container with iptables.
 
 ### Quick Test Commands
 
 ```bash
+cargo test -p lab-ops_lab-lib                    # lab-lib unit tests only
 cargo test -p lab-ops_natmap                     # natmap unit tests only
-cargo test -p lab-ops_auto-discover              # auto-discover unit tests only
 cargo test -p lab-ops --all-features --test natmap_docker   # natmap Docker integration tests
-cargo test -p lab-ops --all-features --test auto_discover   # auto-discover Docker integration tests
 cargo test test_name -p crate_name                 # single test
 ```
 
-Package names carry the `lab-ops_` prefix (`lab-ops_natmap`,
-`lab-ops_auto-discover`). `cargo test -p natmap` fails — the directory is
+Package names carry the `lab-ops_` prefix (`lab-ops_lab-lib`,
+`lab-ops_natmap`). `cargo test -p natmap` fails — the directory is
 `crates/natmap/` but the package is not `natmap`.
 
 ## Key Conventions
@@ -60,7 +56,7 @@ From `docs/dev/standards.md`:
 - **No `unwrap()`/`expect()`** outside `LazyLock<Regex>` statics.
 - **No glob imports** (`use crate::foo::*`), no redundant module paths (`use crate::foo` + `use crate::foo::Bar`).
 - **No `process::exit()` in library code** — only `main.rs`.
-- **Workspace `run_cli`** returns `Result<()>`. `natmap::cli::run_cli(cli, use_color)` takes `use_color: bool`, `auto_discover::cli::run_cli(cli)` does not.
+- **Workspace `run_cli`** returns `Result<()>`. `natmap::cli::run_cli(cli, use_color)` takes `use_color: bool`.
 - **Tracing subscriber initialized ONCE** in root `main.rs`. Workspace crates never init tracing.
 - **Root `main.rs` owns the tokio runtime** — workspace crates are `async fn`, no `#[tokio::main]`.
 - **Edition 2024** — all crates must set `edition = "2024"`.
@@ -73,15 +69,14 @@ From `docs/dev/standards.md`:
 | Root CLI | `src/` → `main.rs` | `Cli::parse()`, dispatches to commands |
 | Root cmds | `src/cmd/` | `cf2ansible`, `cf2terra`, `dockernet` |
 | natmap | `crates/natmap/` → `cli.rs:run_cli()` | iptables NAT daemon + CLI over Unix socket |
-| auto-discover | `crates/auto-discover/` → `cli.rs:run_cli()` | Service discovery (Docker + Consul + forwarding) |
-| lab-lib | `crates/lab-lib/` | Shared types: `TransportProtocol`, `PortAllocator`, Docker helpers |
+| lab-lib | `crates/lab-lib/` | Shared types: `TransportProtocol`, `discovery.yaml` model, `PortAllocator`, Docker helpers |
 
-**natmap modules**: `api.rs` (HTTP handlers), `cli.rs` (CLI parsing), `command.rs` (handler functions), `daemon.rs` (state + lifecycle), `iptables.rs` (rule CRUD), `models.rs` (data types), `policy_route.rs` (ip rule/route management).
+**natmap modules**: `api.rs` (HTTP handlers), `apply.rs` (applies a resolved `discovery.yaml` service: mapping + policy route), `cli.rs` (CLI parsing), `command.rs` (handler functions), `daemon.rs` (state + lifecycle), `iptables.rs` (rule CRUD), `models.rs` (data types), `policy_route.rs` (ip rule/route management).
 
 - **natmap daemon**: central authority for the NAT rules it creates. CLI commands talk Unix socket (`/run/natmap.sock`). State in `/var/lib/natmap/state.json`. `natmap install` creates systemd service. Live rules exposed read-only via `GET /rules`; rule reconciliation stays with each daemon (see `docs/adr/0001-daemon-reports-rules-forwarding-reconciles.md`).
-- **auto-discover daemon**: runs discovery and forwarding as concurrent tokio tasks. Component flags: `--no-discovery`, `--no-forwarding`.
-- **`policy-route` subcommand** (natmap): manages `ip rule`/`ip route` policy routing for source IP preservation. Used by auto-discover when `preserve_src_ip: true`. API: `POST/DELETE /policy-route`.
-- **`DnatConfig.preserve_src_ip`** (renamed from `no_masquerade`; glossary term in `CONTEXT.md`): metadata flag (no iptables change) signaling intent to skip MASQUERADE. Passed through from auto-discover's forwarding sync.
+- **`policy-route` subcommand** (natmap): manages `ip rule`/`ip route` policy routing for source IP preservation. Used by `natmap::apply` when a service sets `preserve_src_ip: true`. API: `POST/DELETE /policy-route`.
+- **`DnatConfig.preserve_src_ip`** (renamed from `no_masquerade`; glossary term in `CONTEXT.md`): metadata flag (no iptables change) signaling intent to skip MASQUERADE. Set from a resolved discovery service.
+- **Loopback DNAT destinations**: a rule whose destination is on this host (`127.0.0.1`, `::1`) is delivered locally, so its accept rule goes in `filter/INPUT` (not `FORWARD`) and the daemon holds no userspace port reservation for it. A forwarded destination keeps the `FORWARD`/`NATMAP` path and its reservation. The kernel also needs `route_localnet=1` on the ingress interface; natmap does not set sysctls.
 
 ## Global CLI Flags
 
@@ -96,7 +91,6 @@ From `docs/dev/standards.md`:
 | Changed | Update |
 |---|---|
 | natmap crate | `docs/natmap/usage.md` |
-| auto-discover crate | `docs/auto-discover/usage.md` |
 | Root CLI | `docs/lab-ops/usage.md` |
 | Code structure | `docs/dev/modules.md` |
 | Conventions | `docs/dev/standards.md` |

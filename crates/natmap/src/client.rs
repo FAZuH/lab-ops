@@ -6,7 +6,7 @@
 //! endpoints directly.
 //!
 //! The client speaks the same HTTP-over-Unix-socket protocol as the CLI's
-//! `request_json`, so auto-discover can talk to the daemon without building
+//! `request_json`, so callers can talk to the daemon without building
 //! `cli::Cli` values.
 
 use std::path::PathBuf;

@@ -18,10 +18,6 @@ categories = ["command-line-utilities", "network-programming", "virtualization"]
 [features]
 docker-tests = []
 
-[[test]]
-name = "auto_discover"
-path = "tests/auto_discover/mod.rs"
-
 [workspace.package]
 description = "Personal utility tools for my homelab"
 license = "MIT"
@@ -29,12 +25,11 @@ authors = ["FAZuH <mail@fazuh.com>"]
 repository = "https://github.com/FAZuH/lab-ops"
 
 [workspace]
-members = ["crates/natmap", "crates/auto-discover", "crates/lab-lib"]
+members = ["crates/natmap", "crates/lab-lib"]
 
 [workspace.dependencies]
 lab-ops_lab-lib = { path = "./crates/lab-lib", version = "0.1.8" }
 lab-ops_natmap = { path = "./crates/natmap", version = "0.1.13" }
-lab-ops_auto-discover = { path = "./crates/auto-discover", version = "0.1.12" }
 proptest = "1"
 bollard = "0.21.0"
 tokio = "1"
@@ -63,7 +58,6 @@ tokio = { workspace = true, features = ["rt"] }
 tracing-subscriber = { workspace = true }
 lab-ops_lab-lib = { workspace = true }
 lab-ops_natmap = { workspace = true }
-lab-ops_auto-discover = { workspace = true }
 
 [dev-dependencies]
 serde = { workspace = true }

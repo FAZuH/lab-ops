@@ -2,7 +2,7 @@
 
 - **natmap daemon**: Central authority for ALL iptables NAT rules. Installs DNAT rules in the `NATMAP` chain, manages port reservations, persists state to `/var/lib/natmap/state.json`
 - **natmap CLI**: Communicates with the daemon via Unix socket (`/run/natmap.sock`) for all rule management commands
-- **DNAT**: Destination NAT — forwards traffic from an external IP:port to an internal host. Creates PREROUTING and FORWARD rules
+- **DNAT**: Destination NAT — forwards traffic from an external IP:port to an internal host. Creates a PREROUTING DNAT plus an accept rule: `FORWARD` for a forwarded destination, `INPUT` for a locally delivered one (loopback)
 - **SNAT**: Source NAT — rewrites source IP of outgoing traffic from internal hosts. Creates POSTROUTING rules
 - **Hairpin NAT**: Allows internal hosts to reach themselves via the external IP. Creates PREROUTING DNAT + POSTROUTING MASQUERADE rules
 - **Docker mapping**: Dynamic port remapping managed by natmap — maps a host port to a container port without restarting the container
@@ -103,7 +103,7 @@ The `clear` command removes all daemon-managed rules (static DNAT, SNAT, hairpin
 
 ### Policy Routing
 
-Manage Linux policy routing rules for source IP preservation. When `preserve_src_ip: true` is configured in auto-discover, the service node needs a policy route so return traffic routes back through the proxy gateway instead of directly to the client. This preserves the real sender IP end-to-end.
+Manage Linux policy routing rules for source IP preservation. When a discovery service sets `preserve_src_ip: true`, the service node needs a policy route so return traffic routes back through the proxy gateway instead of directly to the client. This preserves the real sender IP end-to-end.
 
 The daemon also clones non-default, non-local routes from the main routing table into the policy table (e.g., Docker bridge subnets) so local traffic uses the correct interface instead of the proxy gateway.
 
@@ -121,7 +121,7 @@ The `policy-route` command talks to the natmap daemon via Unix socket. It requir
 
 #### DNAT (Destination NAT)
 
-Forward traffic from an external IP/port to an internal host. Creates PREROUTING and FORWARD rules.
+Forward traffic from an external IP/port to an internal host. Creates a PREROUTING DNAT and an accept rule in `FORWARD`, or in `INPUT` when the internal address is on this host (`127.0.0.1`, `::1`).
 
 ```bash
 # Forward ports 25 and 465
@@ -152,7 +152,14 @@ lab-ops natmap dnat \
   --delete
 ```
 
-**Port reservation:** The daemon binds each port to `0.0.0.0` before creating iptables rules, preventing other services from claiming the port.
+**Port reservation:** The daemon binds each port on the external address before creating iptables rules, preventing other services from claiming it. A loopback destination is the exception: the kernel rule alone services it, so no userspace listener is opened (a listener would accept locally delivered traffic itself instead of forwarding it). Docker and local-service mappings keep their reservation — the daemon allocates and arbitrates that host port through it.
+
+**Forwarding to a host service on loopback:** `--int-ip 127.0.0.1` (or `::1`) forwards to a service listening on this host. The kernel must also allow the delivery: `net.ipv4.conf.<ingress>.route_localnet=1` for IPv4 (NixOS leaves it `0`), and an IPv6 destination is installed with `ip6tables`. The DNAT rule's counters increment either way, so a silent drop is a `route_localnet` problem, not a rule problem.
+
+```bash
+# tailnet 9100 -> node-exporter on 127.0.0.1:9100
+lab-ops natmap dnat --ext-ip 100.64.0.10 --int-ip 127.0.0.1 --ports 9100
+```
 
 #### SNAT (Source NAT)
 
@@ -265,7 +272,7 @@ lab-ops natmap docker add 8080:127.0.0.1:80 --name my-local-service
 lab-ops natmap docker add my-nginx 8080
 ```
 
-Re-adding an existing mapping (same container, container port, protocol, and host IP) is idempotent: the daemon returns the live mapping with its host port unchanged and installs no duplicate rule. If the container's address changed, the rule is rewritten in place. This keeps repeated `auto-discover sync` passes on a stable host port. Requesting a *different* explicit host port creates a second mapping for the same container port.
+Re-adding an existing mapping (same container, container port, protocol, and host IP) is idempotent: the daemon returns the live mapping with its host port unchanged and installs no duplicate rule. If the container's address changed, the rule is rewritten in place. This keeps repeated `apply` passes on a stable host port. Requesting a *different* explicit host port creates a second mapping for the same container port.
 
 #### Removing a Mapping
 

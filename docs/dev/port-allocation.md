@@ -65,15 +65,15 @@ place, keeping the host port and mapping id. Re-registering with a *different*
 explicit host port still creates a second mapping, so one container port can be
 exposed on several host ports.
 
-This is what keeps repeated `auto-discover sync` passes stable: they all send
-`host_port: 0`, and each one gets the same live host port back for its Consul
-registration instead of accumulating a fresh ephemeral mapping per pass.
+This is what keeps repeated `apply` passes stable: each one sends
+`host_port: 0` and gets the same live host port back instead of accumulating a
+fresh ephemeral mapping per pass.
 
 ## Which Rules Reserve Ports?
 
 | Rule Type | Reserves Port? | Reason |
 |-----------|---------------|--------|
-| DNAT | Yes | Directs incoming traffic to internal host |
+| DNAT | Yes (no for a loopback destination) | Directs incoming traffic to internal host; a locally delivered destination is serviced by the kernel rule alone |
 | Hairpin | Yes | Allows internal host to reach itself via external IP |
 | Docker add | Yes | Redirects host port to container |
 | Docker remap | Yes (new port) | Changes existing mapping's host port |

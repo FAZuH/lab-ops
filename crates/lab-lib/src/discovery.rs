@@ -1,12 +1,21 @@
 //! `discovery.yaml` schema: node identity, defaults, and per-service definitions.
+//!
+//! A `discovery.yaml` declares what a node publishes. The model stays
+//! declarative: [`DiscoveryConfig::resolve_all`] expands it into one
+//! [`ResolvedService`] per port registration with defaults applied, and
+//! [`ServiceConfig::matches_container`] decides which running containers a
+//! Docker service covers. Applying a resolved service to the firewall lives in
+//! `lab_ops_natmap::apply`.
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use color_eyre::Result;
-use lab_ops_lab_lib::TransportProtocol;
 use serde::Deserialize;
 use serde::Serialize;
+
+use crate::docker::ContainerInfo;
+use crate::protocol::TransportProtocol;
 
 /// Root of `discovery.yaml`: this node's identity, the defaults every
 /// service inherits, and the per-service map.
@@ -93,6 +102,47 @@ pub struct MatchConfig {
     pub project: Option<String>,
     pub container: Option<String>,
     pub container_regex: Option<String>,
+}
+
+impl MatchConfig {
+    /// Whether `container` satisfies every criterion set in this block.
+    ///
+    /// An invalid `container_regex` matches nothing, so a typo cannot silently
+    /// publish an unrelated container.
+    pub fn matches(&self, container: &ContainerInfo) -> bool {
+        if let Some(project) = &self.project
+            && container.compose_project.as_deref() != Some(project.as_str())
+        {
+            return false;
+        }
+        if let Some(name) = &self.container
+            && container.name != *name
+        {
+            return false;
+        }
+        if let Some(pattern) = &self.container_regex {
+            let Ok(regex) = regex::Regex::new(pattern) else {
+                tracing::warn!(pattern = %pattern, "invalid container_regex, matching nothing");
+                return false;
+            };
+            if !regex.is_match(&container.name) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl ServiceConfig {
+    /// Whether a running container is covered by this service definition.
+    ///
+    /// A service without a `match` block covers every container.
+    pub fn matches_container(&self, container: &ContainerInfo) -> bool {
+        match &self.match_cfg {
+            Some(match_cfg) => match_cfg.matches(container),
+            None => true,
+        }
+    }
 }
 
 /// A Consul environment-variable registration for a local service.
@@ -305,9 +355,9 @@ impl DiscoveryConfig {
                     .or_else(|| self.defaults.proxy_on.clone());
                 if proxy_on.is_none() {
                     tracing::warn!(
-                        "rproxyremote entry for {} port {} has no proxy_on (required for remote proxy), skipping",
-                        service_id_prefix,
-                        rp.port
+                        service.id_prefix = %service_id_prefix,
+                        port = rp.port,
+                        "rproxyremote entry has no proxy_on (required for remote proxy), skipping"
                     );
                     continue;
                 }
@@ -635,5 +685,78 @@ services:
         let cfg: DiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.services["api"].forwardlocal[0].port, 65535);
         assert_eq!(cfg.services["api"].forwardlocal[0].bind_port, Some(0));
+    }
+
+    fn make_container(name: &str, project: Option<&str>) -> ContainerInfo {
+        ContainerInfo {
+            id: format!("{name}-id"),
+            name: name.to_string(),
+            compose_project: project.map(str::to_string),
+            ip: None,
+            networks: vec![],
+        }
+    }
+
+    fn service_with_match(match_cfg: Option<MatchConfig>) -> ServiceConfig {
+        ServiceConfig {
+            service_type: ServiceType::Docker,
+            match_cfg,
+            address: None,
+            bind_ip: None,
+            bind_interface: None,
+            rproxylocal: vec![],
+            rproxyremote: vec![],
+            forwardlocal: vec![],
+            forwardremote: vec![],
+            extra: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn service_config_matches_any_container_without_match_block() {
+        let service = service_with_match(None);
+        assert!(service.matches_container(&make_container("web", Some("proj"))));
+        assert!(service.matches_container(&make_container("db", None)));
+    }
+
+    #[test]
+    fn match_config_rejects_a_different_compose_project() {
+        let service = service_with_match(Some(MatchConfig {
+            project: Some("web".into()),
+            ..Default::default()
+        }));
+        assert!(service.matches_container(&make_container("api", Some("web"))));
+        assert!(!service.matches_container(&make_container("api", Some("db"))));
+        assert!(!service.matches_container(&make_container("api", None)));
+    }
+
+    #[test]
+    fn match_config_requires_every_criterion() {
+        let service = service_with_match(Some(MatchConfig {
+            project: Some("web".into()),
+            container: Some("api".into()),
+            ..Default::default()
+        }));
+        assert!(service.matches_container(&make_container("api", Some("web"))));
+        assert!(!service.matches_container(&make_container("db", Some("web"))));
+    }
+
+    #[test]
+    fn match_config_regex_filters_by_container_name() {
+        let service = service_with_match(Some(MatchConfig {
+            container_regex: Some(r"^api-\d+$".into()),
+            ..Default::default()
+        }));
+        assert!(service.matches_container(&make_container("api-1", None)));
+        assert!(!service.matches_container(&make_container("api-one", None)));
+    }
+
+    #[test]
+    fn match_config_invalid_regex_matches_nothing() {
+        let service = service_with_match(Some(MatchConfig {
+            container_regex: Some("(unclosed".into()),
+            ..Default::default()
+        }));
+        assert!(!service.matches_container(&make_container("api", None)));
     }
 }

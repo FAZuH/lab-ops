@@ -164,6 +164,20 @@ impl DnatConfig {
     pub fn rule_comment(&self) -> String {
         format!("natmap:dnat:{}:{}", self.ext_ip, self.ports)
     }
+
+    /// Whether the DNAT destination is an address on this host.
+    ///
+    /// A loopback destination (`127.0.0.1`, `::1`) is always delivered
+    /// locally after DNAT, so its accept rule belongs in `input`, never
+    /// `forward` — and the kernel rule alone services the mapping, so the
+    /// daemon must not hold a userspace port reservation on the external
+    /// address.
+    pub fn targets_local_delivery(&self) -> bool {
+        self.int_ip
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+    }
 }
 
 /// A static SNAT (source NAT) rule configuration.
