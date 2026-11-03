@@ -4,7 +4,7 @@ name = "lab-ops"
 # Avoid modifying version manually or it will break CI
 
 
-version = "0.2.2"
+version = "0.3.0"
 
 
 edition = "2024"
@@ -28,8 +28,8 @@ repository = "https://github.com/FAZuH/lab-ops"
 members = ["crates/natmap", "crates/lab-lib"]
 
 [workspace.dependencies]
-lab-ops_lab-lib = { path = "./crates/lab-lib", version = "0.1.8" }
-lab-ops_natmap = { path = "./crates/natmap", version = "0.1.13" }
+lab-ops_lab-lib = { path = "./crates/lab-lib", version = "0.1.9" }
+lab-ops_natmap = { path = "./crates/natmap", version = "0.1.14" }
 proptest = "1"
 bollard = "0.21.0"
 tokio = "1"
