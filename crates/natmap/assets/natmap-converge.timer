@@ -1,0 +1,11 @@
+[Unit]
+Description=natmap — converge this node to its discovery declaration
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec={interval}
+AccuracySec=1s
+Unit=natmap-converge.service
+
+[Install]
+WantedBy=timers.target

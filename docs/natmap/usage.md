@@ -10,6 +10,7 @@
 - **Ownership ledger**: The `owner` the daemon records on every mapping an apply created, saying which service owns the port. A mapping with no owner was added by hand
 - **Covered port**: A declared port whose service already answers on the node's tailnet address (or on every address), so it needs no mapping
 - **Drift**: Anything the daemon holds that disagrees with the declaration. `plan` reports it and exits non-zero
+- **Converge tick**: One run of `apply` against a declaration, the way the timer runs it: read the file, converge, log what changed. A tick on a converged node writes nothing at all
 
 ## Declarative apply
 
@@ -114,6 +115,64 @@ and the requesting service — and then fails with the same two names.
 The `conflict` row and the `conflicts` JSON field are only non-empty for a
 refusal; a converged or merely drifting plan has none.
 
+## Converge on a timer
+
+A node converges on its own, so drift heals without a deploy and an edited
+declaration needs no manual command:
+
+```bash
+sudo lab-ops natmap install --from /etc/auto-discover/discovery.yaml
+sudo lab-ops natmap install --from /etc/auto-discover/discovery.yaml --interval 30
+```
+
+`install` writes two more units next to `natmap.service` and enables the timer:
+
+```ini
+# /etc/systemd/system/natmap-converge.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/lab-ops -v natmap apply --from /etc/auto-discover/discovery.yaml --prune
+```
+```ini
+# /etc/systemd/system/natmap-converge.timer
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=15s
+AccuracySec=1s
+Unit=natmap-converge.service
+```
+
+A tick is `apply`: it re-reads the declaration, diffs it against the daemon's
+mappings and writes only what differs. On a converged node it costs one read and
+nothing else — no mapping request, no iptables call, no state-file write. The
+tick logs one event: at `info` with the change counts when something changed,
+at `debug` when nothing did, so a converged node does not fill the journal.
+
+Decisions worth knowing:
+
+- **The schedule is systemd's, not a loop in natmap.** One process per tick,
+  `Type=oneshot`, so a tick can never overlap the previous one, restarts need no
+  bookkeeping, and there is no cursor or "last applied" file that could disagree
+  with the daemon's mappings. A tick therefore needs no store of its own.
+- **`--prune` is on.** A service removed from the declaration releases its port;
+  a mapping this node did not create is still never pruned (it has no owner).
+- **A declaration that cannot be read is an error and writes nothing.** A wrong
+  path or a half-written file is not an empty declaration: the tick fails, the
+  unit shows failed, and nothing is pruned.
+- **A tick repairs what a reload or a crash lost.** Whatever the daemon's state
+  says, the next tick converges the declaration again, so a Docker reconnect
+  and the timer cannot leave a standing disagreement.
+- **Interval, not a watcher.** Change detection is the next tick: 15 s by
+  default, `--interval` to change it. That is a whole dependency and a
+  long-lived process fewer than an inotify watcher, and a converged tick is a
+  single read.
+
+Turn it off without touching the daemon:
+
+```bash
+sudo systemctl disable --now natmap-converge.timer
+```
+
 ## Daemon
 
 The natmap daemon is the central authority for all iptables NAT rules. All rule management commands (`dnat`, `snat`, `hairpin`, `docker add`, `docker rm`, `docker remap`) require the daemon to be running. The daemon handles port reservation, state persistence, and iptables rule management.
@@ -145,6 +204,10 @@ This command:
 2. Creates a `natmap` system group and adds your user to it
 3. Writes `/etc/systemd/system/natmap.service`
 4. Runs `systemctl daemon-reload` and `systemctl enable --now natmap`
+
+With `--from <file>` it also writes `natmap-converge.service` and
+`natmap-converge.timer` and enables the timer — see
+[Converge on a timer](#converge-on-a-timer).
 
 After re-login (for group membership), you can use `lab-ops natmap ...` without `sudo`.
 

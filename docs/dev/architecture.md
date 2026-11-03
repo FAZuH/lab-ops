@@ -31,6 +31,7 @@ lab-ops/
 │   │   ├── cli.rs            # Command enum + CLI dispatch
 │   │   ├── client.rs         # Typed NatmapClient (HTTP over Unix socket)
 │   │   ├── command.rs        # Handler functions for all subcommands
+│   │   ├── converge.rs       # One convergence pass: the tick `apply` and the timer run
 │   │       ├── daemon.rs         # Axum API server, state management
 │   │       ├── models.rs         # Data types (configs, requests, state)
 │   │       ├── iptables.rs       # IptablesManager (rule CRUD)

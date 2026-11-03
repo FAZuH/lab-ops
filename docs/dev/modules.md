@@ -113,6 +113,16 @@ Two entry points over one daemon seam, with no Consul involvement:
 - `apply_service(apply, resolved, target) -> Result<u16>` — decide the port, create the mapping (returning the daemon-reported host port), then install the `preserve_src_ip` policy route when the service sets one. An explicit port survives a `Conflict`, `NotFound`, or `Unavailable` response; a rejected dynamic request fails
 - `resolve_interface_ip(iface)` — first IPv4 address from `ip -j -4 addr show`
 
+### `converge.rs` — One Convergence Pass
+
+The tick `apply` runs, and the timer runs through it:
+
+- `tick(apply, declaration, options) -> Result<Tick>` — re-reads the declaration from disk (the file a tick must never cache), converges through the same `apply::converge`, and logs one event. A declaration that cannot be read is an error and writes nothing
+- `Tick { declaration, converged }` — what the pass read and did. `plan()` and `was_converged()` are the accessors the CLI prints from
+- `record(tick, dry_run)` — one canonical log line: at `info` with the change counts when something changed, at `debug` when nothing did
+
+No loop, cursor, or "last applied" marker lives here: scheduling is systemd's (`natmap-converge.timer`), and the daemon's mappings are the only state a tick reads.
+
 ### `client.rs` — Typed Client
 
 `pub struct NatmapClient { socket: PathBuf }` — one typed method per daemon operation, speaking the same HTTP-over-Unix-socket protocol as the CLI's `request_json`:
@@ -137,7 +147,7 @@ pub enum Command {
     Save,
     Fwd,
     Daemon { state_dir, socket, socket_group },
-    Install { group, binary },
+    Install { group, binary, from, interval },
 }
 
 pub enum DockerCommand {
@@ -155,10 +165,11 @@ Each subcommand has a handler function. Handlers for rule management (`handle_dn
 
 The `handle_list()` function combines raw `iptables-save` output with daemon-managed state for a complete view.
 
-`handle_plan` and `handle_apply` read the declaration named by `--from`, run
-`apply::converge` against the daemon, and print the resulting `Plan` as a table
-(or JSON with `--json`) through `print_plan`. `plan` and `apply --dry-run` return
-`apply::Drift` after printing, which the binary entrypoint maps to exit 1.
+`handle_plan` and `handle_apply` run `converge::tick` — the module the timer
+also runs, so the CLI and the timer cannot diverge — and print the resulting
+`Plan` as a table (or JSON with `--json`) through `print_plan`. `plan` and
+`apply --dry-run` return `apply::Drift` after printing, which the binary
+entrypoint maps to exit 1; a refusal prints first and then fails.
 
 ### `daemon.rs` — API Server & State
 
@@ -222,6 +233,7 @@ Wraps the `bollard` Docker API crate:
 1. Copies the binary to the target path
 2. Creates a `natmap` system group
 3. Renders the systemd service template (substitutes `{binary}`, `{state_dir}`, `{group}`)
+4. With a declaration, also writes `natmap-converge.service` + `natmap-converge.timer` and enables the timer. `render_converge_units(binary, declaration, interval)` is the pure renderer; `DEFAULT_CONVERGE_INTERVAL_SECS` is the default tick interval
 4. Writes `/etc/systemd/system/natmap.service`
 5. Runs `systemctl daemon-reload` and `systemctl enable --now natmap`
 

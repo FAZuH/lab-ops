@@ -192,3 +192,25 @@ fn apply_prints_the_conflict_row_before_refusing_it() {
         "the refusal must name both services: {stderr}"
     );
 }
+
+#[test]
+fn apply_writes_nothing_when_the_node_already_converged() {
+    let daemon = FakeDaemon::start(DECLARED_MAPPING);
+    let from = declaration(&daemon.dir, "fazuh-uptime", 39001);
+
+    let output = run(
+        &daemon.socket,
+        &["apply", "--from", from.to_str().unwrap(), "--prune"],
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    assert_eq!(output.status.code(), Some(0), "stdout: {stdout}");
+    assert!(stdout.contains("converged"), "{stdout}");
+    let requests = daemon.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "a converged apply must only read: {requests:?}"
+    );
+    assert!(requests[0].starts_with("GET "), "{requests:?}");
+}

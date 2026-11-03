@@ -30,7 +30,9 @@ Located in `#[cfg(test)] mod tests { }` blocks within source files.
 | `crates/natmap/src/api.rs` | 50 | HTTP handlers, `parse_socket_addrs`, port-reservation decisions for local vs forwarded DNAT |
 | `crates/natmap/src/apply.rs` | 43 | Declared-mapping derivation, ownership refusal, prune safety, apply ordering; port decisions, mapping/`target_ip` wiring, policy-route fallbacks, daemon-error tolerance |
 | `crates/natmap/src/client.rs` | 11 | Typed client over a real Unix-socket daemon: owner round-trip, mapping removal |
+| `crates/natmap/src/converge.rs` | 9 | One tick against a real daemon: create, no writes when converged (request, iptables and state-file counts), declaration edits, post-reload idempotence, repair after a lost mapping, prune safety, logging |
 | `crates/natmap/src/daemon.rs` | 49 | State, reload reconciliation (container and declared entries), Docker event handling, span fields |
+| `crates/natmap/src/install.rs` | 3 | Converge service and timer unit rendering, zero interval |
 | `crates/natmap/src/iptables.rs` | 11 | Exact argv for every rule builder, including the loopback accept hook |
 | `crates/natmap/src/models.rs` | 17 | Serialization, rule comments, IPv6 detection |
 | `crates/natmap/src/policy_route.rs` | 22 | `ip rule`/`ip route` parsing and flush behaviour |
@@ -51,7 +53,7 @@ test that reaches `allocate`.
 Per-file counts in this file are historical; the **totals** below are the measured source of truth, each with the exact command that produced it. `cargo test -p <crate>` is authoritative.
 
 
-**Total: 310 inline unit tests**, measured from the three lib test binaries (`cargo test -p lab-ops -p lab-ops_natmap -p lab-ops_lab-lib --lib --all-features`): 57 + 214 + 39. (Measured 2026-11-03.)
+**Total: 322 inline unit tests**, measured from the three lib test binaries (`cargo test -p lab-ops -p lab-ops_natmap -p lab-ops_lab-lib --lib --all-features`): 57 + 226 + 39. (Measured 2026-11-03.)
 
 ### Doc Tests
 
@@ -82,11 +84,11 @@ Located in `tests/` or `crates/*/tests/` directories.
 | File | Tests | Covers |
 |---|---|---|
 | `tests/cf2ansible.rs` | 12 | cf2ansible end-to-end (zone file → YAML output) |
-| `tests/natmap_plan.rs` | 4 | `natmap plan` / `apply --dry-run` through the real binary: exit code on drift, the conflict row before a refusal, reads only |
+| `tests/natmap_plan.rs` | 5 | `natmap plan` / `apply` through the real binary: exit code on drift, the conflict row before a refusal, a converged apply that only reads |
 | `crates/natmap/tests/cli.rs` | 21 | Port mapping string parsing via `parse_docker_mapping`, 8 proptest roundtrips, edge cases |
 | `crates/natmap/tests/model.rs` | 23 | Model serialization, rule comment, `output_dnat_destination` |
 
-**Total: 60 integration tests**: 12 (`tests/cf2ansible`) + 4 (`tests/natmap_plan`) + 21 (`crates/natmap/tests/cli.rs`) + 23 (`crates/natmap/tests/model.rs`).
+**Total: 61 integration tests**: 12 (`tests/cf2ansible`) + 5 (`tests/natmap_plan`) + 21 (`crates/natmap/tests/cli.rs`) + 23 (`crates/natmap/tests/model.rs`).
 
 ### Docker Integration Tests
 

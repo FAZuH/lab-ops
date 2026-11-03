@@ -1384,6 +1384,19 @@ pub(crate) mod tests {
         test_daemon_with_docker(state_path, iptables, ports, None)
     }
 
+    /// A daemon and a handle to the [`AppState`] it serves.
+    ///
+    /// The two share their state, so a test can serve the router over a socket
+    /// and still drive `reload` or inspect the state file.
+    pub(crate) fn test_daemon_and_state(
+        state_path: PathBuf,
+        iptables: Arc<dyn Iptables>,
+    ) -> (Daemon, AppState) {
+        let daemon = test_daemon_with(state_path, iptables, Arc::new(PortAllocator::new()));
+        let state = daemon.state.clone();
+        (daemon, state)
+    }
+
     /// Like [`test_daemon_with`], but with an explicit Docker client — pass
     /// `Some` with a handle pointing at a dead socket to exercise the
     /// not-yet-serving Docker paths.

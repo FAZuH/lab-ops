@@ -16,7 +16,7 @@
 
 /// HTTP handlers for the daemon's Unix-socket API.
 pub mod api;
-/// Applies a resolved `discovery.yaml` service to the daemon (mapping + policy route).
+/// Applies a node's `discovery.yaml`: the declarative diff, the per-service mapping and the policy route.
 pub mod apply;
 /// Argument parsing and dispatch for the `natmap` subcommand.
 pub mod cli;
@@ -28,6 +28,8 @@ pub mod command;
 pub mod completions;
 /// Socket, state-file, and package-name constants.
 pub mod consts;
+/// One convergence pass: the tick `apply` and the timer both run.
+pub mod converge;
 /// The daemon itself: state, lifecycle, and Docker events.
 pub mod daemon;
 /// Docker discovery of published container port mappings.

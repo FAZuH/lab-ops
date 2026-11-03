@@ -20,9 +20,9 @@ natmap owns application end to end. `natmap plan` and `natmap apply --from
 mapping state, and create, update and release mappings themselves.
 
 - **Ports are declared, never allocated.** A declared port is the port used, on
-  both sides of the DNAT. Ephemeral allocation stays only where it already was:
-  `forwardlocal` without `bind_port`, and rproxy container targets. The
-  declarative path never allocates.
+  both sides of the DNAT. Ephemeral allocation survives only in the retired
+  forwarding path (`forwardlocal` without `bind_port`, rproxy container
+  targets); the declarative path never allocates.
 - **The mapping set is the ownership ledger.** Each mapping records the service
   that owns its port. An apply refuses a port owned by another service, naming
   both, and releases a port only in the apply that removes its owner.
@@ -52,8 +52,18 @@ state natmap owns.
 - One publishing path. A port cannot change owner without an apply that says so.
 - A restart is not a re-publish: the declaration's mappings come back from state
   before anything asks about them, so `plan` after a restart reports converged.
-- Drift heals only when something runs `apply`; scheduling that is a separate
-  decision, not a second reconciler.
+- Drift heals on a timer that runs `apply`, not from a loop inside natmap:
+  `natmap install --from` writes a systemd timer whose oneshot unit runs
+  `natmap apply --from <file> --prune`. The schedule is systemd's, so there is no
+  second reconciler, no cursor and no "last applied" file that could disagree
+  with the daemon's mappings — and a converged tick writes nothing at all.
+- **Forwarding is retired, deliberately.** With auto-discover gone, no component
+  turns "service on node X" into "public port on node Y": the
+  `forwardlocal`/`forwardremote` blocks and the hairpin rules they produced are
+  gone from the declarations and will not come back. Public non-HTTP ingress is
+  either a rendered nginx `stream:` block on the fronting node, or a mapping
+  applied locally on the node that owns the address. A node publishes only the
+  ports it owns, and nothing allocates one on its behalf.
 - A node whose declaration is absent or empty converges to nothing, and prunes
   every mapping this node created. Deploying a node's declaration is therefore
   part of publishing on it.

@@ -191,7 +191,8 @@ pub enum Command {
         #[arg(long, default_value = PKG_NAME)]
         socket_group: String,
     },
-    /// Installs the natmap daemon as a systemd service.
+    /// Installs the natmap daemon as a systemd service, and optionally a
+    /// converge timer for a node's declaration.
     #[command(name = "install")]
     Install {
         /// Unix group for daemon access.
@@ -200,6 +201,12 @@ pub enum Command {
         /// Path to the binary to install.
         #[arg(long, default_value = lab_ops_lab_lib::consts::LABOPS_BIN)]
         binary: String,
+        /// Also install a timer that converges this node to this declaration.
+        #[arg(long, value_name = "FILE")]
+        from: Option<PathBuf>,
+        /// Seconds between converge ticks.
+        #[arg(long, default_value_t = crate::install::DEFAULT_CONVERGE_INTERVAL_SECS)]
+        interval: u64,
     },
 }
 
@@ -384,8 +391,13 @@ pub async fn run_cli(cli: Cli, use_color: bool) -> Result<()> {
                 .run()
                 .await?;
         }
-        Command::Install { binary, group } => {
-            crate::install::install_systemd(&binary, &group)?;
+        Command::Install {
+            binary,
+            group,
+            from,
+            interval,
+        } => {
+            crate::install::install_systemd(&binary, &group, from.as_deref(), interval)?;
         }
     }
     Ok(())

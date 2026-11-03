@@ -8,7 +8,6 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use color_eyre::eyre::Result;
-use color_eyre::eyre::WrapErr;
 use color_eyre::eyre::bail;
 use comfy_table::Attribute;
 use comfy_table::Color;
@@ -20,8 +19,8 @@ use crate::apply::ConvergeOptions;
 use crate::apply::Converged;
 use crate::apply::Drift;
 use crate::apply::Plan;
-use crate::apply::converge;
 use crate::client::NatmapClient;
+use crate::converge;
 use crate::models::DnatConfig;
 use crate::models::DockerAddMapRequest;
 use crate::models::DockerPortMap;
@@ -291,24 +290,21 @@ pub async fn handle_plan(
     use_color: bool,
     socket: impl AsRef<Path>,
 ) -> Result<()> {
-    let config = load_declaration(&from)?;
     let client = NatmapClient::new(socket.as_ref());
-    // A refusal is still the answer to "what would change": it is drift, and
-    // the plan names the services that disagree.
-    let plan = match converge(
+    let tick = converge::tick(
         &client,
-        &config,
+        &from,
         ConvergeOptions {
             prune,
             dry_run: true,
         },
     )
-    .await?
-    {
-        Converged::Applied(plan) | Converged::Refused(plan) => plan,
-    };
-    print_plan(&config, &plan, true, json, use_color)?;
-    if plan.drift_message().is_some() {
+    .await?;
+    print_plan(&tick.declaration, tick.plan(), true, json, use_color)?;
+
+    // A refusal is still the answer to "what would change": it is drift, and
+    // the plan names the services that disagree.
+    if tick.plan().drift_message().is_some() {
         return Err(Drift.into());
     }
     Ok(())
@@ -319,6 +315,9 @@ pub async fn handle_plan(
 /// `--dry-run` prints the plan and writes nothing, and exits non-zero when
 /// there is drift, exactly like `plan`. A refusal prints the plan — conflicts
 /// included — and then fails, naming the services that disagree.
+///
+/// This is what a timer tick runs: one read of the declaration, one converge,
+/// and no write when the node already matches.
 pub async fn handle_apply(
     from: PathBuf,
     prune: bool,
@@ -327,30 +326,20 @@ pub async fn handle_apply(
     use_color: bool,
     socket: impl AsRef<Path>,
 ) -> Result<()> {
-    let config = load_declaration(&from)?;
     let client = NatmapClient::new(socket.as_ref());
-    let converged = converge(&client, &config, ConvergeOptions { prune, dry_run }).await?;
-    let plan = match &converged {
-        Converged::Applied(plan) | Converged::Refused(plan) => plan,
-    };
-    print_plan(&config, plan, dry_run, json, use_color)?;
+    let tick = converge::tick(&client, &from, ConvergeOptions { prune, dry_run }).await?;
+    print_plan(&tick.declaration, tick.plan(), dry_run, json, use_color)?;
 
-    if let Converged::Refused(plan) = &converged {
+    if let Converged::Refused(plan) = &tick.converged {
         let message = plan
             .conflict_message()
             .unwrap_or_else(|| "a declared port is held elsewhere".to_string());
         bail!("{message}");
     }
-    if dry_run && plan.drift_message().is_some() {
+    if dry_run && tick.plan().drift_message().is_some() {
         return Err(Drift.into());
     }
     Ok(())
-}
-
-/// Reads and parses a node's declaration, naming the file when it will not load.
-fn load_declaration(from: &Path) -> Result<DiscoveryConfig> {
-    DiscoveryConfig::load(from)
-        .wrap_err_with(|| format!("cannot read the declaration {}", from.display()))
 }
 
 /// Prints one plan as a table, or as JSON.
