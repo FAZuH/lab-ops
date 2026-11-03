@@ -5,7 +5,7 @@
 //! iptables NAT rules. It handles:
 //!
 //! - **Static DNAT/SNAT/hairpin rules** for VMs with persistent configuration
-//! - **Dynamic Docker port mappings** that auto-discover published ports at
+//! - **Dynamic Docker port mappings** that discover published ports at
 //!   container start and allow host-port remapping without restarting containers
 //! - **Crash recovery** by persisting state to disk and flushing stale rules on
 //!   restart
@@ -16,9 +16,11 @@
 
 /// HTTP handlers for the daemon's Unix-socket API.
 pub mod api;
+/// Applies a node's `discovery.yaml`: the declarative diff, the per-service mapping and the policy route.
+pub mod apply;
 /// Argument parsing and dispatch for the `natmap` subcommand.
 pub mod cli;
-/// Typed client for the daemon API, used by auto-discover.
+/// Typed client for the daemon API, used by [`apply`] and other callers.
 pub mod client;
 /// CLI command handlers and the Docker mapping parser.
 pub mod command;
@@ -26,6 +28,8 @@ pub mod command;
 pub mod completions;
 /// Socket, state-file, and package-name constants.
 pub mod consts;
+/// One convergence pass: the tick `apply` and the timer both run.
+pub mod converge;
 /// The daemon itself: state, lifecycle, and Docker events.
 pub mod daemon;
 /// Docker discovery of published container port mappings.

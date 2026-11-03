@@ -4,6 +4,7 @@
 //! daemon's Unix socket API and formats the response for display.
 
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 
 use color_eyre::eyre::Result;
@@ -12,7 +13,14 @@ use comfy_table::Attribute;
 use comfy_table::Color;
 use hyper::Method;
 use lab_ops_lab_lib::TransportProtocol;
+use lab_ops_lab_lib::discovery::DiscoveryConfig;
 
+use crate::apply::ConvergeOptions;
+use crate::apply::Converged;
+use crate::apply::Drift;
+use crate::apply::Plan;
+use crate::client::NatmapClient;
+use crate::converge;
 use crate::models::DnatConfig;
 use crate::models::DockerAddMapRequest;
 use crate::models::DockerPortMap;
@@ -269,6 +277,170 @@ pub async fn handle_clear(socket: impl AsRef<Path>) -> Result<()> {
     Ok(())
 }
 
+// --- Declarative apply ---
+
+/// Shows what applying a declaration would change, and fails when it would
+/// change anything.
+///
+/// Writes nothing: the daemon's mappings are only read.
+pub async fn handle_plan(
+    from: PathBuf,
+    prune: bool,
+    json: bool,
+    use_color: bool,
+    socket: impl AsRef<Path>,
+) -> Result<()> {
+    let client = NatmapClient::new(socket.as_ref());
+    let tick = converge::tick(
+        &client,
+        &from,
+        ConvergeOptions {
+            prune,
+            dry_run: true,
+        },
+    )
+    .await?;
+    print_plan(&tick.declaration, tick.plan(), true, json, use_color)?;
+
+    // A refusal is still the answer to "what would change": it is drift, and
+    // the plan names the services that disagree.
+    if tick.plan().drift_message().is_some() {
+        return Err(Drift.into());
+    }
+    Ok(())
+}
+
+/// Converges this node's mappings to the ones its declaration names.
+///
+/// `--dry-run` prints the plan and writes nothing, and exits non-zero when
+/// there is drift, exactly like `plan`. A refusal prints the plan — conflicts
+/// included — and then fails, naming the services that disagree.
+///
+/// This is what a timer tick runs: one read of the declaration, one converge,
+/// and no write when the node already matches.
+pub async fn handle_apply(
+    from: PathBuf,
+    prune: bool,
+    dry_run: bool,
+    json: bool,
+    use_color: bool,
+    socket: impl AsRef<Path>,
+) -> Result<()> {
+    let client = NatmapClient::new(socket.as_ref());
+    let tick = converge::tick(&client, &from, ConvergeOptions { prune, dry_run }).await?;
+    print_plan(&tick.declaration, tick.plan(), dry_run, json, use_color)?;
+
+    if let Converged::Refused(plan) = &tick.converged {
+        let message = plan
+            .conflict_message()
+            .unwrap_or_else(|| "a declared port is held elsewhere".to_string());
+        bail!("{message}");
+    }
+    if dry_run && tick.plan().drift_message().is_some() {
+        return Err(Drift.into());
+    }
+    Ok(())
+}
+
+/// Prints one plan as a table, or as JSON.
+fn print_plan(
+    config: &DiscoveryConfig,
+    plan: &Plan,
+    dry_run: bool,
+    json: bool,
+    use_color: bool,
+) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(plan)?);
+        return Ok(());
+    }
+
+    let title = if dry_run { "plan" } else { "apply" };
+    println!("── {title}: {} ──", config.node.name);
+
+    let mut table = comfy_table::Table::new();
+    table.set_header(header(&["CHANGE", "HOST", "TARGET", "SERVICE"], use_color));
+    let mut rows = 0;
+
+    for mapping in &plan.create {
+        table.add_row(vec![
+            "create".to_string(),
+            format!("{}:{}", mapping.host_ip, mapping.port),
+            format!("{}:{}", mapping.target_ip, mapping.port),
+            mapping.service.clone(),
+        ]);
+        rows += 1;
+    }
+    for update in &plan.update {
+        table.add_row(vec![
+            "update".to_string(),
+            format!("{}:{}", update.wanted.host_ip, update.wanted.port),
+            format!("{}:{}", update.wanted.target_ip, update.wanted.port),
+            update.wanted.service.clone(),
+        ]);
+        rows += 1;
+    }
+    for mapping in &plan.remove {
+        table.add_row(vec![
+            "release".to_string(),
+            format!("{}:{}", mapping.host_ip, mapping.host_port),
+            format!("{}:{}", mapping.target_ip, mapping.target_port),
+            mapping.owner.clone().unwrap_or_else(|| "-".to_string()),
+        ]);
+        rows += 1;
+    }
+    for mapping in &plan.stale {
+        table.add_row(vec![
+            "stale".to_string(),
+            format!("{}:{}", mapping.host_ip, mapping.host_port),
+            format!("{}:{}", mapping.target_ip, mapping.target_port),
+            mapping.owner.clone().unwrap_or_else(|| "-".to_string()),
+        ]);
+        rows += 1;
+    }
+    for mapping in &plan.keep {
+        table.add_row(vec![
+            "keep".to_string(),
+            format!("{}:{}", mapping.host_ip, mapping.host_port),
+            format!("{}:{}", mapping.target_ip, mapping.target_port),
+            "hand-added".to_string(),
+        ]);
+        rows += 1;
+    }
+    for port in &plan.covered {
+        table.add_row(vec![
+            "covered".to_string(),
+            "-".to_string(),
+            format!("{}:{}", port.address, port.port),
+            port.service.clone(),
+        ]);
+        rows += 1;
+    }
+    for conflict in &plan.conflicts {
+        table.add_row(vec![
+            "conflict".to_string(),
+            format!("port {}", conflict.port),
+            conflict
+                .owner
+                .clone()
+                .unwrap_or_else(|| "hand-added".into()),
+            conflict.service.clone(),
+        ]);
+        rows += 1;
+    }
+
+    if rows == 0 {
+        println!("  converged: nothing to do");
+    } else {
+        println!("{table}");
+    }
+    if let Some(message) = plan.drift_message() {
+        println!("{message}");
+    }
+
+    Ok(())
+}
+
 // --- Docker mapping handlers ---
 
 /// Remaps a container's host port to a new port without restarting the container.
@@ -374,6 +546,7 @@ pub fn parse_docker_mapping(mapping: &str) -> Result<DockerAddMapRequest> {
         container_port,
         target_ip,
         proto,
+        owner: None,
     })
 }
 

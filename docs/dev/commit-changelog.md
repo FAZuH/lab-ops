@@ -109,7 +109,7 @@ sections.
 ```
 ## Bump
 natmap: minor
-auto-discover: patch
+lab-lib: patch
 ```
 
 Each line sets one member's bump type. The format is

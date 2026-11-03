@@ -6,7 +6,7 @@
 //! endpoints directly.
 //!
 //! The client speaks the same HTTP-over-Unix-socket protocol as the CLI's
-//! `request_json`, so auto-discover can talk to the daemon without building
+//! `request_json`, so callers can talk to the daemon without building
 //! `cli::Cli` values.
 
 use std::path::PathBuf;
@@ -17,6 +17,7 @@ use crate::models::DnatConfig;
 use crate::models::DockerAddMapRequest;
 use crate::models::DockerPortMap;
 use crate::models::HairpinConfig;
+use crate::models::ListResponse;
 use crate::models::LiveRule;
 use crate::models::PolicyRouteConfig;
 /// Re-exported so callers need only the `client` path.
@@ -118,6 +119,25 @@ impl NatmapClient {
         request_json(&self.socket, Method::POST, &uri, Some(req)).await
     }
 
+    /// Lists the mappings the daemon holds, as persisted state.
+    pub async fn mappings(&self) -> Result<Vec<DockerPortMap>, NatmapError> {
+        let response: ListResponse =
+            request_json(&self.socket, Method::GET, "/mappings", None::<()>).await?;
+        Ok(response.docker)
+    }
+
+    /// Removes one mapping by the ID it was registered under and its host port.
+    ///
+    /// A mapping the daemon no longer holds is already released, so `NotFound`
+    /// is not an error.
+    pub async fn remove_mapping(&self, container_id: &str, port: u16) -> Result<(), NatmapError> {
+        let uri = format!("/mapping/{container_id}/{port}");
+        match request_json::<(), ()>(&self.socket, Method::DELETE, &uri, None).await {
+            Ok(()) | Err(NatmapError::NotFound(_)) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Lists all live NAT rules currently installed in iptables, parsed from
     /// `iptables-save` — what the daemon actually installed, not its
     /// persisted state.
@@ -143,6 +163,7 @@ mod tests {
     use crate::daemon::AppState;
     use crate::daemon::build_router;
     use crate::daemon::tests::FakeIptables;
+    use crate::daemon::tests::spawn_daemon;
     use crate::daemon::tests::test_app_state_with;
     use crate::daemon::tests::test_port;
     use crate::models::DockerAddMapRequest;
@@ -155,34 +176,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = test_app_state_with(&dir, Arc::new(FakeIptables::default()));
         (dir, state)
-    }
-
-    /// Serves the daemon router over a real Unix socket in a background task.
-    ///
-    /// Returns the socket path (and the temp dir that keeps it alive) the
-    /// client should connect to.
-    async fn spawn_daemon(state: AppState) -> (tempfile::TempDir, PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("natmap-test.sock");
-        let app = build_router(state);
-
-        let listener = UnixListener::bind(&socket_path).unwrap();
-        tokio::spawn(async move {
-            loop {
-                let (stream, _) = listener.accept().await.unwrap();
-                let app = app.clone();
-                tokio::spawn(async move {
-                    let io = TokioIo::new(stream);
-                    let srv = hyper::service::service_fn(
-                        move |req: hyper::Request<hyper::body::Incoming>| app.clone().call(req),
-                    );
-                    let _ = Builder::new(TokioExecutor::new())
-                        .serve_connection_with_upgrades(io, srv)
-                        .await;
-                });
-            }
-        });
-        (dir, socket_path)
     }
 
     fn dnat_config(ports: &str) -> DnatConfig {
@@ -258,6 +251,7 @@ mod tests {
             container_port: 80,
             target_ip: None,
             proto: TransportProtocol::Tcp,
+            owner: None,
         };
         let result = client.add_mapping("test123", req).await;
         assert!(matches!(result, Err(NatmapError::Unavailable(_))));
@@ -276,6 +270,7 @@ mod tests {
             container_port: 80,
             target_ip: Some("10.0.0.2".into()),
             proto: TransportProtocol::Tcp,
+            owner: None,
         };
         let mapping = client.add_mapping("c1", req).await.unwrap();
 
@@ -287,6 +282,60 @@ mod tests {
             "daemon must report the allocated port, got {}",
             mapping.request.host_addr.port()
         );
+    }
+
+    #[tokio::test]
+    async fn add_mapping_records_the_owner_it_is_given() {
+        let fake = Arc::new(FakeIptables::default());
+        let dir = tempfile::tempdir().unwrap();
+        let (_dir, socket) = spawn_daemon(test_app_state_with(&dir, fake)).await;
+        let client = NatmapClient::new(socket);
+
+        let req = DockerAddMapRequest {
+            host_ip: "127.0.0.3".into(),
+            host_port: test_port(),
+            container_port: 3001,
+            target_ip: Some("127.0.0.1".into()),
+            proto: TransportProtocol::Tcp,
+            owner: Some("fazuh-uptime".into()),
+        };
+        client.add_mapping("fazuh-uptime", req).await.unwrap();
+
+        let mappings = client.mappings().await.unwrap();
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].owner.as_deref(), Some("fazuh-uptime"));
+    }
+
+    #[tokio::test]
+    async fn remove_mapping_releases_the_registered_port() {
+        let fake = Arc::new(FakeIptables::default());
+        let dir = tempfile::tempdir().unwrap();
+        let (_dir, socket) = spawn_daemon(test_app_state_with(&dir, fake)).await;
+        let client = NatmapClient::new(socket);
+
+        let port = test_port();
+        let req = DockerAddMapRequest {
+            host_ip: "127.0.0.3".into(),
+            host_port: port,
+            container_port: 3001,
+            target_ip: Some("127.0.0.1".into()),
+            proto: TransportProtocol::Tcp,
+            owner: Some("fazuh-uptime".into()),
+        };
+        client.add_mapping("fazuh-uptime", req).await.unwrap();
+
+        client.remove_mapping("fazuh-uptime", port).await.unwrap();
+
+        assert!(client.mappings().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn remove_mapping_of_an_absent_mapping_is_not_an_error() {
+        let (_app_dir, state) = test_app_state();
+        let (_dir, socket) = spawn_daemon(state).await;
+        let client = NatmapClient::new(socket);
+
+        assert!(client.remove_mapping("absent", 3001).await.is_ok());
     }
 
     #[tokio::test]

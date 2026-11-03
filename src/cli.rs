@@ -6,7 +6,6 @@ use clap::Parser;
 use clap::Subcommand;
 use clap::ValueEnum;
 
-use crate::consts::CMD_AUTO_DISCOVER;
 use crate::consts::CMD_CF2ANSIBLE;
 use crate::consts::CMD_CF2TERRA;
 use crate::consts::CMD_COMPLETIONS;
@@ -75,13 +74,6 @@ pub enum Command {
     NatMap {
         #[command(flatten)]
         args: lab_ops_natmap::cli::Cli,
-    },
-    /// Service discovery daemon: watches Docker events, manages port forwarding,
-    /// registers services with Consul, and generates nginx configs.
-    #[command(name = CMD_AUTO_DISCOVER)]
-    AutoDiscover {
-        #[command(flatten)]
-        args: lab_ops_auto_discover::cli::Cli,
     },
     /// Generate shell completion scripts.
     #[command(name = CMD_COMPLETIONS)]

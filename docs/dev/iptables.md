@@ -12,10 +12,14 @@ The natmap daemon sets up custom chains to isolate its rules from Docker's nativ
 FORWARD
   └─→ DOCKER-USER (Docker's chain, always present)
         └─→ NATMAP ← natmap's jump rule (all natmap FORWARD rules go here)
+
+INPUT
+  └─→ accept rules for locally delivered DNAT targets (direct)
 ```
 
 - **DOCKER-USER**: Created by Docker. Rules here take priority over Docker's own rules.
-- **NATMAP**: Created by natmap. Contains all natmap's FORWARD ACCEPT rules.
+- **NATMAP**: Created by natmap. Contains natmap's accept rules for forwarded traffic.
+- **INPUT**: natmap adds accept rules here when a DNAT destination is on this host (loopback). A locally delivered packet never traverses `FORWARD`, so its accept must be here.
 
 ### `nat` table
 
@@ -42,8 +46,12 @@ POSTROUTING
 - Hairpin NAT DNAT rules
 
 ### NATMAP (filter table)
-- Docker port mapping FORWARD ACCEPT rules (`-d 172.17.0.2 -p tcp --dport 80 -j ACCEPT`)
-- Static DNAT FORWARD ACCEPT rules
+- Docker port mapping accept rules for forwarded targets (`-d 172.17.0.2 -p tcp --dport 80 -j ACCEPT`)
+- Static DNAT accept rules for forwarded targets
+
+### INPUT (filter table)
+- Docker port mapping accept rules for loopback targets (`-d 127.0.0.1 -p tcp --dport 9100 -j ACCEPT`)
+- Static DNAT accept rules for loopback targets
 
 ### PREROUTING (nat table)
 - Static DNAT rules (directly in PREROUTING, not via NATMAP chain)
@@ -75,5 +83,6 @@ On crash recovery (`reload()`), the daemon calls `iptables.flush_all_natmap()`:
 2. `iptables -t nat -X NATMAP` — delete the nat NATMAP chain
 3. `iptables -t filter -F NATMAP` — flush all rules from the filter NATMAP chain
 4. `iptables -t filter -X NATMAP` — delete the filter NATMAP chain
+5. delete every `natmap:`-commented rule from `filter INPUT`, `filter FORWARD`, `nat POSTROUTING`, and `nat OUTPUT` (loopback accepts live outside the chains)
 
 After flushing, `iptables.setup()` is called to recreate the chains and jump rules, then rules are reinstalled from the state file.

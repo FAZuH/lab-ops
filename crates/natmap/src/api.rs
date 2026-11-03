@@ -14,6 +14,7 @@ use lab_ops_lab_lib::port::PortAllocator;
 
 use crate::daemon::AppState;
 use crate::daemon::ErrorResponse;
+use crate::daemon::reserve_mapping_addr;
 use crate::models::DnatConfig;
 use crate::models::DockerAddMapRequest;
 use crate::models::DockerPortMap;
@@ -26,6 +27,7 @@ use crate::models::PolicyRouteConfig;
 use crate::models::RuleKind;
 use crate::models::SnatConfig;
 use crate::models::TransportProtocol;
+use crate::models::is_locally_delivered;
 
 // --- Read handlers ---
 
@@ -92,15 +94,23 @@ pub async fn add_dnat(
         }
     }
 
-    bind_ports(
-        state.ports.clone(),
-        &config.ext_ip,
-        &config.ports,
-        config.proto,
-    )
-    .await?;
+    // A loopback destination is reached through the kernel rule alone: the
+    // daemon holds no userspace listener for it, because such a listener would
+    // accept locally delivered traffic itself instead of forwarding it.
+    let kernel_only = config.targets_local_delivery();
+    if !kernel_only {
+        bind_ports(
+            state.ports.clone(),
+            &config.ext_ip,
+            &config.ports,
+            config.proto,
+        )
+        .await?;
+    }
     if let Err(e) = state.iptables.install_dnat(&config) {
-        unbind_ports(state.ports, &config.ext_ip, &config.ports).await;
+        if !kernel_only {
+            unbind_ports(state.ports, &config.ext_ip, &config.ports).await;
+        }
         return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
     }
     state.daemon_state.write().await.dnats.push(config.clone());
@@ -320,16 +330,20 @@ pub async fn remap_port(
         let mut new_req = old.request.clone();
         new_req.host_addr.set_port(req.new_host_port);
         let id = state.allocate_id();
-        let new_mapping = DockerPortMap::new(
+        let mut new_mapping = DockerPortMap::new(
             id,
             new_req,
             container_id.clone(),
             old.container_name.clone(),
         );
-        if let Err(e) = state
-            .ports
-            .allocate(new_mapping.request.host_addr, old.request.proto)
-            .await
+        new_mapping.owner = old.owner.clone();
+        if let Err(e) = reserve_mapping_addr(
+            &state.ports,
+            new_mapping.request.host_addr,
+            new_mapping.request.container_addr,
+            old.request.proto,
+        )
+        .await
         {
             return Err(err(StatusCode::CONFLICT, e.to_string()));
         }
@@ -350,6 +364,10 @@ pub async fn remap_port(
 }
 
 /// `POST /mapping/:container_id` — Adds a new port mapping.
+///
+/// A mapping to a locally delivered destination holds a claim on its host
+/// address rather than a listener, so the kernel rule alone services it (see
+/// [`is_locally_delivered`]). The claim still answers the conflict gate.
 ///
 /// Span fields: `host.addr`, `container.addr`, `proto`, `container.id`.
 #[tracing::instrument(skip_all, fields(
@@ -458,6 +476,17 @@ pub async fn add_mapping(
                 );
                 updated_in_place = true;
             }
+            // Only now, with every fallible step behind us, record the owner:
+            // an early return above must not leave the ledger naming a service
+            // for a rule that was never rewritten. Only the declarative apply
+            // sends an owner, and it has already refused a port owned by
+            // another service.
+            if let Some(owner) = &req.owner
+                && existing.owner.as_deref() != Some(owner.as_str())
+            {
+                existing.owner = Some(owner.clone());
+                updated_in_place = true;
+            }
             let mapping = existing.clone();
             let span = tracing::Span::current();
             span.record(
@@ -476,13 +505,12 @@ pub async fn add_mapping(
         }
     }
 
+    let kernel_only = is_locally_delivered(container_addr.ip());
     let host_addr = if req.host_port == 0 {
-        allocate_free_port(&state.ports, host_ip, proto).await?
+        allocate_free_port(&state.ports, host_ip, proto, kernel_only).await?
     } else {
         let addr = SocketAddr::new(host_ip, req.host_port);
-        state
-            .ports
-            .allocate(addr, proto)
+        reserve_mapping_addr(&state.ports, addr, container_addr, proto)
             .await
             .map_err(|e| err(StatusCode::CONFLICT, e.to_string()))?;
         addr
@@ -498,7 +526,8 @@ pub async fn add_mapping(
         proto,
     };
     let id = state.allocate_id();
-    let mapping = DockerPortMap::new(id, request, container_id.clone(), container_name);
+    let mut mapping = DockerPortMap::new(id, request, container_id.clone(), container_name);
+    mapping.owner = req.owner.clone();
 
     if let Err(e) = state.iptables.install_dockermap(&mapping) {
         state.ports.deallocate(host_addr).await;
@@ -636,16 +665,24 @@ pub(crate) const EPHEMERAL_PORT_END: u16 = 61000;
 /// Reserves the first free host port on `host_ip` from the ephemeral range.
 ///
 /// Each candidate is reserved directly so a concurrent claim of the same port
-/// is detected by the bind itself; on success the port is held by the caller
-/// until it deallocates it.
+/// is detected by the reservation itself; on success the port is held by the
+/// caller until it deallocates it. `kernel_only` reserves without a listener
+/// for a locally delivered destination, exactly as
+/// [`crate::daemon::reserve_mapping_addr`] does.
 async fn allocate_free_port(
     ports: &PortAllocator,
     host_ip: IpAddr,
     proto: TransportProtocol,
+    kernel_only: bool,
 ) -> Result<SocketAddr, (StatusCode, Json<ErrorResponse>)> {
     for port in EPHEMERAL_PORT_START..=EPHEMERAL_PORT_END {
         let addr = SocketAddr::new(host_ip, port);
-        if ports.allocate(addr, proto).await.is_ok() {
+        let reserved = if kernel_only {
+            ports.claim(addr).await
+        } else {
+            ports.allocate(addr, proto).await
+        };
+        if reserved.is_ok() {
             return Ok(addr);
         }
     }
@@ -996,6 +1033,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn add_dnat_loopback_destination_holds_no_port_reservation() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Arc::new(FakeIptables::default());
+        let state = test_app_state_with(&dir, fake.clone());
+        let port = test_port();
+        let addr = SocketAddr::new(IpAddr::from_str("127.0.0.1").unwrap(), port);
+        let req = DnatConfig {
+            ext_ip: "127.0.0.1".into(),
+            int_ip: "127.0.0.1".into(),
+            ports: port.to_string(),
+            proto: TransportProtocol::Tcp,
+            ext_if: None,
+            preserve_src_ip: false,
+        };
+
+        let _ = add_dnat(State(state.clone()), Json(req.clone()))
+            .await
+            .unwrap();
+
+        assert_eq!(fake.installed_dnats(), vec![req]);
+        assert!(
+            !state.ports.is_allocated(addr).await,
+            "the kernel rule alone services a loopback destination; a userspace listener would compete with it"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_dnat_forwarded_destination_still_reserves_the_external_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Arc::new(FakeIptables::default());
+        let state = test_app_state_with(&dir, fake.clone());
+        let port = test_port();
+        let addr = SocketAddr::new(IpAddr::from_str("127.0.0.1").unwrap(), port);
+        let req = DnatConfig {
+            ext_ip: "127.0.0.1".into(),
+            int_ip: "10.0.0.1".into(),
+            ports: port.to_string(),
+            proto: TransportProtocol::Tcp,
+            ext_if: None,
+            preserve_src_ip: false,
+        };
+
+        let _ = add_dnat(State(state.clone()), Json(req)).await.unwrap();
+
+        assert!(
+            state.ports.is_allocated(addr).await,
+            "a forwarded destination keeps the external port reserved"
+        );
+    }
+
+    #[tokio::test]
     async fn remove_dnat_not_found_still_returns_ok() {
         let (_dir, state) = test_app_state();
         let req = DnatConfig {
@@ -1063,6 +1151,7 @@ mod tests {
             container_port: 80,
             target_ip: Some("10.0.0.2".into()),
             proto: TransportProtocol::Tcp,
+            owner: None,
         };
         let result = add_mapping(State(state), Path("test123".into()), Json(req)).await;
         assert!(result.is_err());
@@ -1080,6 +1169,7 @@ mod tests {
             container_port: 80,
             target_ip: Some("10.0.0.2".into()),
             proto: TransportProtocol::Tcp,
+            owner: None,
         };
         let mapping = add_mapping(State(state.clone()), Path("test123".into()), Json(req))
             .await
@@ -1109,6 +1199,7 @@ mod tests {
             container_port: 80,
             target_ip: Some("10.0.0.2".into()),
             proto: TransportProtocol::Tcp,
+            owner: None,
         };
 
         let result = add_mapping(State(state.clone()), Path("c1".into()), Json(req)).await;
@@ -1138,6 +1229,7 @@ mod tests {
             container_port: 80,
             target_ip: Some("10.0.0.2".into()),
             proto: TransportProtocol::Tcp,
+            owner: None,
         };
 
         let first = add_mapping(State(state.clone()), Path("c1".into()), Json(req.clone()))
@@ -1186,6 +1278,7 @@ mod tests {
             container_port: 80,
             target_ip: Some(target.to_string()),
             proto: TransportProtocol::Tcp,
+            owner: None,
         };
 
         let first = add_mapping(
@@ -1249,6 +1342,7 @@ mod tests {
             container_port: 80,
             target_ip: Some(target.to_string()),
             proto: TransportProtocol::Tcp,
+            owner: None,
         };
 
         let _first = add_mapping(
@@ -1294,6 +1388,7 @@ mod tests {
             container_port: 80,
             target_ip: Some(target.to_string()),
             proto: TransportProtocol::Tcp,
+            owner: None,
         };
 
         let first = add_mapping(
@@ -1353,6 +1448,7 @@ mod tests {
             container_port: 80,
             target_ip: Some("10.0.0.2".into()),
             proto: TransportProtocol::Tcp,
+            owner: None,
         };
 
         let result = add_mapping(State(state.clone()), Path("c1".into()), Json(req)).await;
@@ -1373,6 +1469,7 @@ mod tests {
             container_port: 80,
             target_ip: Some("10.0.0.2".into()),
             proto: TransportProtocol::Tcp,
+            owner: None,
         };
 
         let result = add_mapping(State(state.clone()), Path("c1".into()), Json(req.clone())).await;
@@ -1425,6 +1522,7 @@ mod tests {
             container_port: 80,
             target_ip: Some("10.0.0.2".into()),
             proto: TransportProtocol::Tcp,
+            owner: None,
         };
 
         let result = add_mapping(State(state.clone()), Path("c1".into()), Json(req.clone())).await;
@@ -1641,5 +1739,157 @@ mod tests {
         assert_eq!(res.0[0].kind, RuleKind::Dnat);
         assert_eq!(res.0[0].ext_ip, "203.0.113.50");
         assert_eq!(res.0[0].int_ip, "10.0.0.99");
+    }
+
+    // --- Loopback mapping targets (B2) ---
+
+    /// Builds a mapping request for a loopback target, against host `127.0.0.5`.
+    fn loopback_mapping_request(host_port: u16, container_port: u16) -> DockerAddMapRequest {
+        DockerAddMapRequest {
+            host_ip: "127.0.0.5".into(),
+            host_port,
+            container_port,
+            target_ip: Some("127.0.0.1".into()),
+            proto: TransportProtocol::Tcp,
+            owner: Some("fazuh-uptime".into()),
+        }
+    }
+
+    /// B2: a mapping whose destination is delivered locally is serviced by its
+    /// kernel rule alone. A listener on the host address would compete with
+    /// that rule — and here it would collide with the service holding the very
+    /// port being forwarded to.
+    #[tokio::test]
+    async fn add_mapping_to_a_loopback_target_holds_no_listener() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_app_state_with(&dir, Arc::new(FakeIptables::default()));
+        let port = test_port();
+        let key = crate::models::service_mapping_key("fazuh-uptime");
+
+        add_mapping(
+            State(state.clone()),
+            Path(key.clone()),
+            Json(loopback_mapping_request(port, port)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(state.daemon_state.read().await.mapping[&key].len(), 1);
+        let bound =
+            std::net::TcpListener::bind(SocketAddr::new(IpAddr::from([127, 0, 0, 5]), port));
+        assert!(
+            bound.is_ok(),
+            "a loopback mapping must hold no listener: {bound:?}"
+        );
+    }
+
+    /// The claim still gates explicit ports: a second mapping of the same host
+    /// port is a 409, not a silent second rule.
+    #[tokio::test]
+    async fn add_mapping_to_a_loopback_target_still_refuses_a_taken_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_app_state_with(&dir, Arc::new(FakeIptables::default()));
+        let port = test_port();
+        add_mapping(
+            State(state.clone()),
+            Path("service:fazuh-uptime".into()),
+            Json(loopback_mapping_request(port, port)),
+        )
+        .await
+        .unwrap();
+
+        let second = add_mapping(
+            State(state),
+            Path("service:fazuh-grafana".into()),
+            Json(loopback_mapping_request(port, port + 1)),
+        )
+        .await;
+
+        assert!(
+            matches!(second, Err((StatusCode::CONFLICT, _))),
+            "the claimed port must answer 409: {second:?}"
+        );
+    }
+
+    /// The contrast that keeps the rule honest: a container target is forwarded,
+    /// not delivered locally, so its host port stays reserved by a listener.
+    #[tokio::test]
+    async fn add_mapping_to_a_container_target_holds_a_listener() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_app_state_with(&dir, Arc::new(FakeIptables::default()));
+        let port = test_port();
+        let req = DockerAddMapRequest {
+            host_ip: "127.0.0.5".into(),
+            host_port: port,
+            container_port: 8080,
+            target_ip: Some("10.0.0.2".into()),
+            proto: TransportProtocol::Tcp,
+            owner: None,
+        };
+
+        add_mapping(State(state.clone()), Path("abc123".into()), Json(req))
+            .await
+            .unwrap();
+
+        let bound =
+            std::net::TcpListener::bind(SocketAddr::new(IpAddr::from([127, 0, 0, 5]), port));
+        assert!(
+            bound.is_err(),
+            "a forwarded mapping must keep its reservation"
+        );
+    }
+
+    // --- Ledger integrity (S4) ---
+
+    /// A re-register that adopts an owner must not record it when the rule
+    /// rewrite fails: the ledger would name a service for a rule that was never
+    /// put in place.
+    #[tokio::test]
+    async fn add_mapping_records_no_owner_when_the_rewrite_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Arc::new(FakeIptables::default());
+        let state = test_app_state_with(&dir, fake.clone());
+        let port = test_port();
+        let key = crate::models::service_mapping_key("fazuh-uptime");
+        let stored = DockerPortMap::new(
+            1,
+            DockerPortMapRequest {
+                host_addr: SocketAddr::new(IpAddr::from([127, 0, 0, 1]), port),
+                container_addr: "127.0.0.1:3001".parse().unwrap(),
+                proto: TransportProtocol::Tcp,
+            },
+            key.clone(),
+            "fazuh-uptime".to_string(),
+        );
+        state
+            .daemon_state
+            .write()
+            .await
+            .mapping
+            .insert(key.clone(), vec![stored.clone()]);
+        fake.set_fail_dockermap(true);
+
+        let result = add_mapping(
+            State(state.clone()),
+            Path(key.clone()),
+            Json(DockerAddMapRequest {
+                host_ip: "127.0.0.1".into(),
+                host_port: port,
+                container_port: 3001,
+                target_ip: Some("10.0.0.9".into()),
+                proto: TransportProtocol::Tcp,
+                owner: Some("fazuh-uptime".into()),
+            }),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let lock = state.daemon_state.read().await;
+        let after = &lock.mapping[&key][0];
+        assert_eq!(
+            after.owner, None,
+            "an owner must not be recorded for a rule that was never rewritten"
+        );
+        assert_eq!(after.request.container_addr, stored.request.container_addr);
     }
 }

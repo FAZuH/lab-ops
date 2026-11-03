@@ -4,12 +4,25 @@
 //! enums used across the CLI, daemon, and iptables modules.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::net::SocketAddr;
 
 /// Re-exported so callers need only the `lab_ops_natmap::models` path.
 pub use lab_ops_lab_lib::TransportProtocol;
 use serde::Deserialize;
 use serde::Serialize;
+
+/// Whether a DNAT destination is an address on this host.
+///
+/// A packet to such an address is delivered locally after DNAT: it traverses
+/// the `input` hook, never `forward`, and the kernel rule alone services it. So
+/// the accept rule belongs in `input`, and the daemon must hold no userspace
+/// listener on the external address — that listener would compete with the
+/// rule, and for a mapping to a loopback target it would collide with the
+/// service holding the very port being forwarded to.
+pub fn is_locally_delivered(addr: IpAddr) -> bool {
+    addr.is_loopback()
+}
 
 /// Describes the desired port mapping between a host and a container.
 ///
@@ -37,6 +50,14 @@ impl DockerPortMapRequest {
     pub fn is_ipv6(&self) -> bool {
         self.host_addr.is_ipv6()
     }
+
+    /// Whether this mapping ends on an address on this host.
+    ///
+    /// See [`is_locally_delivered`]. Such a mapping is serviced by its kernel
+    /// rule alone and holds no listener on the host address.
+    pub fn targets_local_delivery(&self) -> bool {
+        is_locally_delivered(self.container_addr.ip())
+    }
 }
 
 /// An active port mapping that has been installed in iptables.
@@ -52,6 +73,10 @@ pub struct DockerPortMap {
     pub container_name: String,
     /// iptables comment used to identify this mapping's rules.
     pub rule_comment: String,
+    /// Service that owns the host port. `None` for a mapping added by hand,
+    /// which no apply will prune.
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 impl DockerPortMap {
@@ -86,6 +111,7 @@ impl DockerPortMap {
             container_id,
             container_name,
             rule_comment,
+            owner: None,
         }
     }
 }
@@ -119,6 +145,10 @@ pub struct DockerAddMapRequest {
     /// Transport protocol (`tcp` or `udp`, defaults to `tcp`).
     #[serde(default = "default_proto")]
     pub proto: TransportProtocol,
+    /// Service that owns the host port. Set by the declarative apply path; a
+    /// mapping without an owner was added by hand and is never pruned.
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 fn default_host_ip() -> String {
@@ -163,6 +193,16 @@ impl DnatConfig {
     /// iptables comment used to identify this DNAT rule's rules.
     pub fn rule_comment(&self) -> String {
         format!("natmap:dnat:{}:{}", self.ext_ip, self.ports)
+    }
+
+    /// Whether the DNAT destination is an address on this host.
+    ///
+    /// See [`is_locally_delivered`] for what that implies.
+    pub fn targets_local_delivery(&self) -> bool {
+        self.int_ip
+            .parse::<IpAddr>()
+            .map(is_locally_delivered)
+            .unwrap_or(false)
     }
 }
 
@@ -247,6 +287,24 @@ pub struct LiveRule {
 }
 
 // --- Persisted daemon state ---
+
+/// Prefix of a mapping-state key that names a declared service, not a container.
+///
+/// A container's mappings are keyed by its id, and a container event, a
+/// reload's liveness check and a container stop all act on those keys. A
+/// mapping this node's declaration owns answers on an address of its own and
+/// outlives every container, so it gets a key nothing can mistake for one.
+pub const SERVICE_KEY_PREFIX: &str = "service:";
+
+/// The key a declared service's mappings are stored under.
+pub fn service_mapping_key(service: &str) -> String {
+    format!("{SERVICE_KEY_PREFIX}{service}")
+}
+
+/// Whether a mapping-state key names a declared service rather than a container.
+pub fn is_service_mapping_key(key: &str) -> bool {
+    key.starts_with(SERVICE_KEY_PREFIX)
+}
 
 /// The complete persisted state of the natmap daemon.
 ///
@@ -361,6 +419,42 @@ mod tests {
         let m = DockerPortMap::new(0, req, "id-zero".into(), "zero-port".into());
         assert_eq!(m.id, 0);
         assert_eq!(m.rule_comment, "natmap:id-zero:0");
+    }
+
+    #[test]
+    fn docker_port_map_without_an_owner_loads_as_unowned() {
+        let state = r#"{
+            "id": 7,
+            "request": {
+                "host_addr": "127.0.0.1:8080",
+                "container_addr": "10.0.0.2:80",
+                "proto": "tcp"
+            },
+            "container_id": "abc123",
+            "container_name": "my-nginx",
+            "rule_comment": "natmap:abc123:8080"
+        }"#;
+
+        let mapping: DockerPortMap = serde_json::from_str(state).unwrap();
+
+        assert_eq!(mapping.owner, None);
+    }
+
+    #[test]
+    fn add_mapping_request_round_trips_its_owner() {
+        let req = DockerAddMapRequest {
+            host_ip: "100.64.0.17".into(),
+            host_port: 3001,
+            container_port: 3001,
+            target_ip: Some("127.0.0.1".into()),
+            proto: TransportProtocol::Tcp,
+            owner: Some("fazuh-uptime".into()),
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let back: DockerAddMapRequest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(back.owner.as_deref(), Some("fazuh-uptime"));
     }
 
     #[test]

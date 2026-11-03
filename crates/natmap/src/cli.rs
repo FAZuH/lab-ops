@@ -12,10 +12,12 @@ use clap_complete::engine::ArgValueCompleter;
 use color_eyre::Result;
 
 use crate::command::add;
+use crate::command::handle_apply;
 use crate::command::handle_clear;
 use crate::command::handle_dnat;
 use crate::command::handle_hairpin;
 use crate::command::handle_list;
+use crate::command::handle_plan;
 use crate::command::handle_policy_route;
 use crate::command::handle_snat;
 use crate::command::remap;
@@ -138,6 +140,29 @@ pub enum Command {
         )]
         container_id: Option<String>,
     },
+    /// Shows the mappings a declaration asks for that this node does not have.
+    #[command(name = "plan")]
+    Plan {
+        /// Path to the node's `discovery.yaml`.
+        #[arg(long, value_name = "FILE")]
+        from: PathBuf,
+        /// Also count the mappings this node created that the declaration dropped.
+        #[arg(long)]
+        prune: bool,
+    },
+    /// Converges this node's mappings to the ones its declaration names.
+    #[command(name = "apply")]
+    Apply {
+        /// Path to the node's `discovery.yaml`.
+        #[arg(long, value_name = "FILE")]
+        from: PathBuf,
+        /// Release the mappings this node created that the declaration no longer names.
+        #[arg(long)]
+        prune: bool,
+        /// Report the plan without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Removes all managed NAT rules and resets daemon state.
     #[command(name = "clear")]
     Clear,
@@ -166,7 +191,8 @@ pub enum Command {
         #[arg(long, default_value = PKG_NAME)]
         socket_group: String,
     },
-    /// Installs the natmap daemon as a systemd service.
+    /// Installs the natmap daemon as a systemd service, and optionally a
+    /// converge timer for a node's declaration.
     #[command(name = "install")]
     Install {
         /// Unix group for daemon access.
@@ -175,6 +201,12 @@ pub enum Command {
         /// Path to the binary to install.
         #[arg(long, default_value = lab_ops_lab_lib::consts::LABOPS_BIN)]
         binary: String,
+        /// Also install a timer that converges this node to this declaration.
+        #[arg(long, value_name = "FILE")]
+        from: Option<PathBuf>,
+        /// Seconds between converge ticks.
+        #[arg(long, default_value_t = crate::install::DEFAULT_CONVERGE_INTERVAL_SECS)]
+        interval: u64,
     },
 }
 
@@ -297,6 +329,16 @@ pub async fn run_cli(cli: Cli, use_color: bool) -> Result<()> {
         Command::List { container_id } => {
             handle_list(&socket, container_id, json, use_color).await?;
         }
+        Command::Plan { from, prune } => {
+            handle_plan(from, prune, json, use_color, &socket).await?;
+        }
+        Command::Apply {
+            from,
+            prune,
+            dry_run,
+        } => {
+            handle_apply(from, prune, dry_run, json, use_color, &socket).await?;
+        }
         Command::Clear => {
             handle_clear(&socket).await?;
         }
@@ -349,8 +391,13 @@ pub async fn run_cli(cli: Cli, use_color: bool) -> Result<()> {
                 .run()
                 .await?;
         }
-        Command::Install { binary, group } => {
-            crate::install::install_systemd(&binary, &group)?;
+        Command::Install {
+            binary,
+            group,
+            from,
+            interval,
+        } => {
+            crate::install::install_systemd(&binary, &group, from.as_deref(), interval)?;
         }
     }
     Ok(())

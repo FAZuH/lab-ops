@@ -4,6 +4,10 @@
 //! in the `nat` table and `DOCKER-USER` in the `filter` table). This keeps
 //! natmap rules separate from Docker's own rules and ensures clean crash
 //! recovery via chain flush.
+//!
+//! The one exception is a rule whose DNAT destination is on this host
+//! (loopback): such a packet is delivered locally, so its accept goes in the
+//! `filter` table's `INPUT` chain instead of `FORWARD`/`NATMAP`.
 
 use std::ffi::OsStr;
 use std::process::Command;
@@ -63,16 +67,16 @@ pub trait Iptables: Send + Sync {
     /// Flushes and deletes the `NATMAP` chains and removes all natmap-commented rules.
     fn flush_all_natmap(&self) -> Result<()>;
 
-    /// Installs DNAT, FORWARD ACCEPT, MASQUERADE, and OUTPUT DNAT rules for a Docker mapping.
+    /// Installs DNAT, accept, MASQUERADE, and OUTPUT DNAT rules for a Docker mapping.
     fn install_dockermap(&self, map: &DockerPortMap) -> Result<()>;
 
     /// Removes all iptables rules associated with a Docker mapping by its rule comment.
     fn remove_mapping(&self, map: &DockerPortMap) -> Result<()>;
 
-    /// Installs a static DNAT rule (PREROUTING + FORWARD ACCEPT).
+    /// Installs a static DNAT rule (PREROUTING + accept).
     fn install_dnat(&self, config: &DnatConfig) -> Result<()>;
 
-    /// Removes a static DNAT rule (PREROUTING + FORWARD ACCEPT).
+    /// Removes a static DNAT rule (PREROUTING + accept).
     fn remove_dnat(&self, config: &DnatConfig) -> Result<()>;
 
     /// Installs a static SNAT (source NAT) rule in the POSTROUTING chain.
@@ -141,14 +145,20 @@ fn build_dnat_rule_args(map: &DockerPortMap) -> Vec<String> {
     args
 }
 
-/// Builds iptables args for a docker mapping FORWARD ACCEPT rule (filter/NATMAP).
-fn build_forward_accept_args(map: &DockerPortMap) -> Vec<String> {
+/// Builds iptables args for a docker mapping's accept rule (filter table).
+///
+/// The accept matches the post-DNAT destination. A loopback target is
+/// delivered locally and never traverses `forward`, so it is accepted in
+/// `INPUT`; everything else goes through natmap's `FORWARD` sub-chain.
+fn build_mapping_accept_args(map: &DockerPortMap) -> Vec<String> {
     let req = &map.request;
-    vec![
-        "-t".into(),
-        "filter".into(),
-        "-A".into(),
-        NATMAP.into(),
+    let mut args: Vec<String> = vec!["-t".into(), "filter".into(), "-A".into()];
+    if req.container_addr.ip().is_loopback() {
+        args.push("INPUT".into());
+    } else {
+        args.push(NATMAP.into());
+    }
+    args.extend([
         "-d".into(),
         req.container_addr.ip().to_string(),
         "-p".into(),
@@ -161,7 +171,8 @@ fn build_forward_accept_args(map: &DockerPortMap) -> Vec<String> {
         "comment".into(),
         "--comment".into(),
         map.rule_comment.clone(),
-    ]
+    ]);
+    args
 }
 
 /// Builds iptables args for a docker mapping POSTROUTING MASQUERADE rule.
@@ -274,10 +285,18 @@ fn build_static_dnat_prerouting_args(config: &DnatConfig) -> Vec<String> {
     args
 }
 
-/// Builds iptables args for a static DNAT FORWARD ACCEPT rule.
-fn build_static_dnat_forward_args(config: &DnatConfig) -> Vec<String> {
+/// Builds iptables args for a static DNAT accept rule.
+///
+/// A loopback destination is delivered locally after DNAT, so its accept
+/// belongs in `INPUT`; a forwarded destination is accepted in `FORWARD`.
+fn build_static_dnat_accept_args(config: &DnatConfig) -> Vec<String> {
     let comment = config.rule_comment();
-    let mut args: Vec<String> = vec!["-A".into(), "FORWARD".into()];
+    let chain = if config.targets_local_delivery() {
+        "INPUT"
+    } else {
+        "FORWARD"
+    };
+    let mut args: Vec<String> = vec!["-A".into(), chain.into()];
     args.push("-p".into());
     args.push(config.proto.to_string());
     args.push("-d".into());
@@ -363,6 +382,17 @@ fn build_hairpin_postrouting_args(config: &HairpinConfig) -> Vec<String> {
     args
 }
 
+/// Selects the iptables binary for a static DNAT rule.
+///
+/// A DNAT pair shares one address family, and the destination address is what
+/// makes a rule locally delivered, so the internal address decides the family.
+fn dnat_cmd(config: &DnatConfig) -> &'static str {
+    match config.int_ip.parse::<std::net::IpAddr>() {
+        Ok(ip) if ip.is_ipv6() => "ip6tables",
+        _ => "iptables",
+    }
+}
+
 impl IptablesManager {
     pub fn new() -> Self {
         Self
@@ -383,7 +413,8 @@ impl IptablesManager {
                 self.run_success(cmd, ["-t", "filter", "-I", "FORWARD", "-j", "DOCKER-USER"])?;
             }
 
-            // DNAT rules land in nat/NATMAP, FORWARD ACCEPT in filter/NATMAP.
+            // DNAT rules land in nat/NATMAP; accepts land in filter/NATMAP,
+            // or in filter/INPUT when the DNAT destination is on this host.
             if !self.chain_exists(cmd, "nat", NATMAP) {
                 self.run_success(cmd, ["-t", "nat", "-N", NATMAP])?;
             }
@@ -404,13 +435,13 @@ impl IptablesManager {
         Ok(())
     }
 
-    /// Installs DNAT, FORWARD ACCEPT, MASQUERADE, and OUTPUT DNAT rules for a Docker mapping.
+    /// Installs DNAT, accept, MASQUERADE, and OUTPUT DNAT rules for a Docker mapping.
     pub fn install_dockermap(&self, map: &DockerPortMap) -> Result<()> {
         tracing::debug!(mapping = ?map, "installing mapping");
         let cmd = self.cmd_for(map.request.is_ipv6());
 
         self.run(cmd, build_dnat_rule_args(map))?;
-        self.run(cmd, build_forward_accept_args(map))?;
+        self.run(cmd, build_mapping_accept_args(map))?;
         self.run(cmd, build_masquerade_args(map))?;
 
         let output_dst = output_dnat_destination(map.request.host_addr.ip(), map.request.is_ipv6());
@@ -424,8 +455,8 @@ impl IptablesManager {
     }
 
     /// Flushes and deletes the `NATMAP` chains and removes all natmap-commented
-    /// rules from `POSTROUTING`, `OUTPUT`, `PREROUTING`, and `FORWARD` in both
-    /// `iptables` (IPv4) and `ip6tables` (IPv6).
+    /// rules from `POSTROUTING`, `OUTPUT`, `PREROUTING`, `FORWARD`, and
+    /// `INPUT` in both `iptables` (IPv4) and `ip6tables` (IPv6).
     ///
     /// Used during crash recovery and clean shutdown to reset all natmap-managed rules.
     pub fn flush_all_natmap(&self) -> Result<()> {
@@ -438,24 +469,33 @@ impl IptablesManager {
             let _ = self.delete_all_natmap(cmd, "nat", "OUTPUT");
             let _ = self.delete_all_natmap(cmd, "nat", "PREROUTING");
             let _ = self.delete_all_natmap(cmd, "filter", "FORWARD");
+            let _ = self.delete_all_natmap(cmd, "filter", "INPUT");
         }
         Ok(())
     }
 
-    /// Installs a static DNAT rule (PREROUTING + FORWARD ACCEPT).
+    /// Installs a static DNAT rule (PREROUTING + accept).
+    ///
+    /// The accept lands in `INPUT` when the destination is on this host
+    /// (loopback), and in `FORWARD` otherwise.
     pub fn install_dnat(&self, config: &DnatConfig) -> Result<()> {
-        self.run_success("iptables", build_static_dnat_prerouting_args(config))?;
-        self.run_success("iptables", build_static_dnat_forward_args(config))?;
+        let cmd = dnat_cmd(config);
+        self.run_success(cmd, build_static_dnat_prerouting_args(config))?;
+        self.run_success(cmd, build_static_dnat_accept_args(config))?;
         Ok(())
     }
 
-    /// Removes a static DNAT rule (PREROUTING + FORWARD ACCEPT).
+    /// Removes a static DNAT rule (PREROUTING + accept).
     ///
-    /// Uses the rule comment to find and delete matching rules.
+    /// Uses the rule comment to find and delete matching rules. Both accept
+    /// hooks are swept so a rule installed before the hook was family-aware
+    /// (or a destination that changed classification) leaves nothing behind.
     pub fn remove_dnat(&self, config: &DnatConfig) -> Result<()> {
         let comment = config.rule_comment();
-        self.delete_all_matching("iptables", "nat", "PREROUTING", &comment)?;
-        self.delete_all_matching("iptables", "filter", "FORWARD", &comment)?;
+        let cmd = dnat_cmd(config);
+        self.delete_all_matching(cmd, "nat", "PREROUTING", &comment)?;
+        self.delete_all_matching(cmd, "filter", "FORWARD", &comment)?;
+        self.delete_all_matching(cmd, "filter", "INPUT", &comment)?;
         Ok(())
     }
 
@@ -535,6 +575,8 @@ impl IptablesManager {
 
         self.delete_all_matching(cmd, "nat", NATMAP, comment)?;
         self.delete_all_matching(cmd, "filter", NATMAP, comment)?;
+        // A loopback target's accept lands in INPUT, outside NATMAP.
+        self.delete_all_matching(cmd, "filter", "INPUT", comment)?;
         self.delete_all_matching(cmd, "nat", "POSTROUTING", comment)?;
         // OUTPUT carries the localhost DNAT rule.
         self.delete_all_matching(cmd, "nat", "OUTPUT", comment)?;
@@ -829,14 +871,32 @@ mod tests {
     }
 
     #[test]
-    fn build_forward_accept_args_exact_argv() {
+    fn build_mapping_accept_args_exact_argv() {
         assert_argv(
-            build_forward_accept_args,
-            &[(
-                "matches the container address, not the host one",
-                make_dockermap("0.0.0.0", 80, "172.17.0.3", 8080, TransportProtocol::Tcp),
-                "-t filter -A NATMAP -d 172.17.0.3 -p tcp --dport 8080 -j ACCEPT -m comment --comment natmap:c1:80",
-            )],
+            build_mapping_accept_args,
+            &[
+                (
+                    "matches the container address, not the host one",
+                    make_dockermap("0.0.0.0", 80, "172.17.0.3", 8080, TransportProtocol::Tcp),
+                    "-t filter -A NATMAP -d 172.17.0.3 -p tcp --dport 8080 -j ACCEPT -m comment --comment natmap:c1:80",
+                ),
+                (
+                    "a loopback target is delivered locally, so it is accepted in INPUT",
+                    make_dockermap(
+                        "100.64.0.10",
+                        9100,
+                        "127.0.0.1",
+                        9100,
+                        TransportProtocol::Tcp,
+                    ),
+                    "-t filter -A INPUT -d 127.0.0.1 -p tcp --dport 9100 -j ACCEPT -m comment --comment natmap:c1:9100",
+                ),
+                (
+                    "an ipv6 loopback target is accepted in INPUT",
+                    make_dockermap("::", 9100, "::1", 9100, TransportProtocol::Tcp),
+                    "-t filter -A INPUT -d ::1 -p tcp --dport 9100 -j ACCEPT -m comment --comment natmap:c1:9100",
+                ),
+            ],
         );
     }
 
@@ -958,9 +1018,9 @@ mod tests {
     }
 
     #[test]
-    fn build_static_dnat_forward_args_exact_argv() {
+    fn build_static_dnat_accept_args_exact_argv() {
         assert_argv(
-            build_static_dnat_forward_args,
+            build_static_dnat_accept_args,
             &[
                 (
                     "single port",
@@ -983,6 +1043,22 @@ mod tests {
                         None,
                     ),
                     "-A FORWARD -p tcp -d 10.0.0.99 -m multiport --dports 3000,3001,3002 -j ACCEPT -m comment --comment natmap:dnat:203.0.113.50:3000,3001,3002",
+                ),
+                (
+                    "a loopback destination is delivered locally, so it is accepted in INPUT",
+                    make_dnat(
+                        "100.64.0.10",
+                        "127.0.0.1",
+                        "9100",
+                        TransportProtocol::Tcp,
+                        None,
+                    ),
+                    "-A INPUT -p tcp -d 127.0.0.1 --dport 9100 -j ACCEPT -m comment --comment natmap:dnat:100.64.0.10:9100",
+                ),
+                (
+                    "an ipv6 loopback destination is accepted in INPUT",
+                    make_dnat("::", "::1", "9100", TransportProtocol::Tcp, None),
+                    "-A INPUT -p tcp -d ::1 --dport 9100 -j ACCEPT -m comment --comment natmap:dnat::::9100",
                 ),
             ],
         );
