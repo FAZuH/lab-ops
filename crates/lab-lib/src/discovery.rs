@@ -106,9 +106,19 @@ pub struct ServiceConfig {
     /// The host ports this service owns, and the address each answers on.
     ///
     /// This is the ownership ledger: a port listed here belongs to this
-    /// service, and nothing else may be published on it.
+    /// service, and nothing else may be published on it. It says nothing about
+    /// reachability beyond this node — see [`Self::publish`].
     #[serde(default)]
     pub ports: Vec<PortClaim>,
+
+    /// The ports among [`Self::ports`] this node fronts on its tailnet address.
+    ///
+    /// A port here gets a DNAT rule from `node.tailnet_ip` to the address its
+    /// claim names. Empty means the service is reachable on this node only.
+    /// Naming a port this service does not own is a declaration error, so the
+    /// renderer and the firewall cannot disagree about what exists.
+    #[serde(default)]
+    pub publish: Vec<u16>,
 
     #[serde(default)]
     pub rproxylocal: Vec<RProxyLocalConfig>,
@@ -340,6 +350,31 @@ impl DiscoveryConfig {
         claims
     }
 
+    /// The claim for `port` on `service`, when that service owns it.
+    pub fn port_claim(&self, service: &str, port: u16) -> Option<&PortClaim> {
+        self.services
+            .get(service)?
+            .ports
+            .iter()
+            .find(|claim| claim.port == port)
+    }
+
+    /// Every publish entry as `(service, port)`, ordered by port then service.
+    pub fn published_ports(&self) -> Vec<(&str, u16)> {
+        let mut published: Vec<(&str, u16)> = self
+            .services
+            .iter()
+            .flat_map(|(service, config)| {
+                config
+                    .publish
+                    .iter()
+                    .map(move |port| (service.as_str(), *port))
+            })
+            .collect();
+        published.sort_unstable_by(|a, b| (a.1, a.0).cmp(&(b.1, b.0)));
+        published
+    }
+
     fn resolve_binding(
         &self,
         svc_ip: Option<&String>,
@@ -519,6 +554,7 @@ mod tests {
             bind_ip: None,
             bind_interface: None,
             ports: vec![],
+            publish: vec![],
             rproxylocal: vec![],
             rproxyremote: vec![],
             forwardlocal: vec![],
@@ -717,6 +753,93 @@ services:
     }
 
     #[test]
+    fn discovery_config_parses_the_publish_subset() {
+        let yaml = r#"
+node:
+  name: fazuh-sg-2
+  tailnet_ip: 100.64.0.17
+services:
+  fazuh-uptime:
+    type: docker
+    ports:
+      - port: 3001
+        bind_ip: 127.0.0.1
+      - port: 3002
+    publish: [3001]
+  rclone-serve-restic:
+    type: local
+    address: 127.0.0.1
+    ports:
+      - port: 9091
+"#;
+        let cfg: DiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
+
+        assert_eq!(cfg.services["fazuh-uptime"].publish, vec![3001]);
+        assert!(cfg.services["rclone-serve-restic"].publish.is_empty());
+        assert_eq!(
+            cfg.published_ports(),
+            vec![("fazuh-uptime", 3001)],
+            "only a publish entry is published, never a bare claim"
+        );
+    }
+
+    #[test]
+    fn published_ports_are_ordered_by_port_then_service() {
+        let yaml = r#"
+node:
+  name: abi-id-1
+services:
+  zulu:
+    type: docker
+    ports:
+      - port: 18090
+      - port: 18080
+    publish: [18090, 18080]
+  alpha:
+    type: docker
+    ports:
+      - port: 18085
+    publish: [18085]
+"#;
+        let cfg: DiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
+
+        assert_eq!(
+            cfg.published_ports(),
+            vec![("zulu", 18080), ("alpha", 18085), ("zulu", 18090)]
+        );
+    }
+
+    #[test]
+    fn port_claim_finds_only_a_port_the_service_owns() {
+        let yaml = r#"
+node:
+  name: fazuh-sg-2
+services:
+  fazuh-uptime:
+    type: docker
+    ports:
+      - port: 3001
+        bind_ip: 127.0.0.1
+  fazuh-grafana:
+    type: docker
+    ports:
+      - port: 3000
+"#;
+        let cfg: DiscoveryConfig = serde_yaml::from_str(yaml).unwrap();
+
+        assert_eq!(
+            cfg.port_claim("fazuh-uptime", 3001)
+                .and_then(|claim| claim.bind_ip.as_deref()),
+            Some("127.0.0.1")
+        );
+        assert!(
+            cfg.port_claim("fazuh-uptime", 3000).is_none(),
+            "another service's port is not this service's claim"
+        );
+        assert!(cfg.port_claim("absent", 3001).is_none());
+    }
+
+    #[test]
     fn discovery_config_ignores_a_block_it_does_not_model() {
         let yaml = r#"
 node:
@@ -844,6 +967,7 @@ services:
             bind_ip: None,
             bind_interface: None,
             ports: vec![],
+            publish: vec![],
             rproxylocal: vec![],
             rproxyremote: vec![],
             forwardlocal: vec![],

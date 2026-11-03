@@ -6,9 +6,9 @@
 - **SNAT**: Source NAT — rewrites source IP of outgoing traffic from internal hosts. Creates POSTROUTING rules
 - **Hairpin NAT**: Allows internal hosts to reach themselves via the external IP. Creates PREROUTING DNAT + POSTROUTING MASQUERADE rules
 - **Docker mapping**: Dynamic port remapping managed by natmap — maps a host port to a container port without restarting the container
-- **Declaration**: A node's `discovery.yaml` — the host ports each service owns (`ports:`), and the address each answers on. natmap never allocates a port for a declared service: the declared port is the port used
+- **Declaration**: A node's `discovery.yaml` — the host ports each service owns (`ports:`), the address each answers on, and the subset this node fronts on its tailnet address (`publish:`). natmap never allocates a port: a published port is the port used
 - **Ownership ledger**: The `owner` the daemon records on every mapping an apply created, saying which service owns the port. A mapping with no owner was added by hand
-- **Covered port**: A declared port whose service already answers on the node's tailnet address (or on every address), so it needs no mapping
+- **Covered port**: A published port whose service already answers on the node's tailnet address (or on every address), so it needs no mapping
 - **Drift**: Anything the daemon holds that disagrees with the declaration. `plan` reports it and exits non-zero
 - **Converge tick**: One run of `apply` against a declaration, the way the timer runs it: read the file, converge, log what changed. A tick on a converged node writes nothing at all
 
@@ -28,26 +28,59 @@ defaults:
 services:
   fazuh-uptime:
     type: docker
-    ports:                     # the ledger: ports this service owns
+    ports:                     # ownership: what this service answers on
       - port: 3001
+        bind_ip: 127.0.0.1     # the address nginx may point at
+    publish: [3001]            # the subset natmap fronts on the tailnet
+  rclone-serve-restic:
+    type: local
+    address: 127.0.0.1
+    ports:
+      - port: 9091             # owned, validated, rendered — never fronted
   fazuh-grafana:
     type: docker
     ports:
       - port: 3000
         bind_ip: 10.0.0.5      # this one answers on a concrete address
+    publish: [3000]
     nginx:                     # not natmap's business; ignored
       target: nodes/fazuh-sg-2/fazuh-grafana/nginx.conf
       context: http
 ```
 
-One declared port produces one mapping: the node's `tailnet_ip` on that port,
-forwarded to the address the port names (`bind_ip`, else `defaults.bind_ip`,
-else `127.0.0.1`). The port is the same on both sides — nothing is allocated.
+`ports` and `publish` answer two different questions, and one field cannot say
+both:
 
-A port whose address is the tailnet IP, or a wildcard (`0.0.0.0` / `::`), is
-already reachable there and is reported as **covered** instead of mapped. That
-is the migration path: a container that still publishes on the tailnet address
-needs no mapping, and one moved to loopback gets its mapping on the next apply.
+- `ports` — **ownership**: the host ports this service owns and the address each
+  *answers* on. The nginx renderer resolves upstream references against it, so
+  it is what nginx is allowed to point at. Owning a port publishes nothing.
+- `publish` — **reachability**: the subset of those ports this node fronts on
+  `node.tailnet_ip`, so another node can reach them over the tailnet. Absent or
+  empty means local only.
+
+One published port produces one mapping: the node's `tailnet_ip` on that port,
+forwarded to the address its claim names (`bind_ip`, else `defaults.bind_ip`,
+else `127.0.0.1`). A service published from loopback becomes
+`100.64.0.17:3001 → 127.0.0.1:3001`. The port is the same on both sides, and
+nothing is allocated.
+
+Publishing a port the service does not own is a declaration error — the same
+pairing the renderer enforces, so the two readers cannot disagree:
+
+```
+service "fazuh-uptime" publishes port 9099, which its ports do not own (declared: 3001)
+```
+
+A declaration written before this split has no `publish`, so it fronts
+nothing: add `publish:` to the ports other nodes must reach *before* the
+converge timer runs with `--prune`, or its first tick releases the mappings the
+previous version created.
+
+A published port whose address is already the tailnet IP, or a wildcard
+(`0.0.0.0` / `::`), is reachable there without help and is reported as
+**covered** instead of mapped. That is the migration path: a container that
+still binds the tailnet address needs no mapping, and one moved to loopback
+gains its mapping on the next apply.
 
 ### `plan`
 
@@ -90,22 +123,22 @@ mapping set is the ledger:
   apply; a plain `apply` refuses a port transfer and says so.
 - Only a mapping an apply created is pruned. A mapping added by hand
   (`natmap docker add`) has no owner and survives every prune. If a hand-added
-  mapping sits on a declared port, apply refuses rather than adopt it — remove
+  mapping sits on a published port, apply refuses rather than adopt it — remove
   it, then apply.
 - A port claimed by two services in one declaration is a declaration error,
-  naming both.
+  naming both; so is a `publish` entry a service does not own.
 
-A declared port whose service answers on loopback — the normal case — needs no
+A published port whose service answers on loopback — the normal case — needs no
 userspace listener: the kernel rule alone services it, and the daemon holds only
 a claim on the address. The claim is what answers 409 to a second mapping of the
 same port, so the conflict gate survives without a socket competing with the
 rule (or with the service holding the port being forwarded to). A mapping to a
 container address is forwarded, not delivered locally, and keeps its listener.
 
-Declared mappings are stored under a `service:` key, not the service name, and a
+Published mappings are stored under a `service:` key, not the service name, and a
 reload replays them from their stored addresses whatever Docker reports: they
 answer on an address this node owns, so no container id matches them and no
-inspect can retarget them. Only an apply that stops declaring the port removes
+inspect can retarget them. Only an apply that stops publishing the port removes
 one.
 
 `apply` exits zero once it converged everything it was allowed to touch. A

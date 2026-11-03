@@ -24,11 +24,11 @@ Located in `#[cfg(test)] mod tests { }` blocks within source files.
 | `src/cmd/cf2ansible.rs` | 4 | DNS zone parsing, record extraction, YAML output |
 | `src/cmd/cf2terra.rs` | 1 | Terraform HCL output |
 | `src/cmd/dockernet.rs` | 8 | IP formatting and port bind parsing |
-| `crates/lab-lib/src/discovery.rs` | 21 | `discovery.yaml` parsing, defaults propagation, `resolve_all`, container matching |
+| `crates/lab-lib/src/discovery.rs` | 24 | `discovery.yaml` parsing, defaults propagation, `resolve_all`, port claims and the publish subset, container matching |
 | `crates/lab-lib/src/docker.rs` | 8 | Inspect parsing, primary-IP selection, port-mapping parsing |
 | `crates/lab-lib/src/port.rs` | 10 | Port reservation lifecycle, conflict detection, UDP binding, listener-free claims |
 | `crates/natmap/src/api.rs` | 50 | HTTP handlers, `parse_socket_addrs`, port-reservation decisions for local vs forwarded DNAT |
-| `crates/natmap/src/apply.rs` | 43 | Declared-mapping derivation, ownership refusal, prune safety, apply ordering; port decisions, mapping/`target_ip` wiring, policy-route fallbacks, daemon-error tolerance |
+| `crates/natmap/src/apply.rs` | 49 | Declared-mapping derivation, ownership refusal, prune safety, apply ordering; port decisions, mapping/`target_ip` wiring, policy-route fallbacks, daemon-error tolerance |
 | `crates/natmap/src/client.rs` | 11 | Typed client over a real Unix-socket daemon: owner round-trip, mapping removal |
 | `crates/natmap/src/converge.rs` | 9 | One tick against a real daemon: create, no writes when converged (request, iptables and state-file counts), declaration edits, post-reload idempotence, repair after a lost mapping, prune safety, logging |
 | `crates/natmap/src/daemon.rs` | 49 | State, reload reconciliation (container and declared entries), Docker event handling, span fields |
@@ -53,7 +53,7 @@ test that reaches `allocate`.
 Per-file counts in this file are historical; the **totals** below are the measured source of truth, each with the exact command that produced it. `cargo test -p <crate>` is authoritative.
 
 
-**Total: 322 inline unit tests**, measured from the three lib test binaries (`cargo test -p lab-ops -p lab-ops_natmap -p lab-ops_lab-lib --lib --all-features`): 57 + 226 + 39. (Measured 2026-11-03.)
+**Total: 331 inline unit tests**, measured from the three lib test binaries (`cargo test -p lab-ops -p lab-ops_natmap -p lab-ops_lab-lib --lib --all-features`): 57 + 232 + 42. (Measured 2026-11-03.)
 
 ### Doc Tests
 

@@ -111,7 +111,7 @@ fn declaration(dir: &tempfile::TempDir, service: &str, port: u16) -> PathBuf {
         &path,
         format!(
             "node:\n  name: test-node\n  tailnet_ip: 100.64.0.17\n\
-             services:\n  {service}:\n    type: docker\n    ports:\n      - port: {port}\n"
+             services:\n  {service}:\n    type: docker\n    ports:\n      - port: {port}\n    publish: [{port}]\n"
         ),
     )
     .unwrap();

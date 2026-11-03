@@ -46,10 +46,12 @@ The declaration model for a node's published services, consumed by
 - `DiscoveryConfig {node, defaults, services}` — root of the file. `load(path)` reads and deserializes it. Unknown keys are ignored, so a declaration may carry blocks this model does not know (`nginx:`) and still load
 - `NodeConfig {name, tailnet_ip}` — the node's name and the address other nodes reach it on
 - `Defaults` — values a service inherits when it does not set them (`proxy_on`, `proxy_ip`, `bind_ip`, `bind_interface`, `preserve_src_ip*`)
-- `ServiceConfig` — one `services:` entry: `type` (`docker` / `local`), optional `match` block, `address`, `bind_ip`, `bind_interface`, the owned ports (`ports`, the ownership ledger), and the port registrations (`rproxylocal`, `rproxyremote`, `forwardlocal`, `forwardremote`)
+- `ServiceConfig` — one `services:` entry: `type` (`docker` / `local`), optional `match` block, `address`, `bind_ip`, `bind_interface`, the owned ports (`ports`, the ownership ledger), the subset this node fronts (`publish`), and the port registrations (`rproxylocal`, `rproxyremote`, `forwardlocal`, `forwardremote`)
 - `PortClaim {port, bind_ip}` — one host port a service owns, and the address it answers on
 - `default_bind_ip()` — `defaults.bind_ip`, else `DEFAULT_BIND_IP` (`127.0.0.1`); the consumer renderer carries the same default
 - `port_claims() -> Vec<(&str, &PortClaim)>` — every owned port with its service, in port order
+- `port_claim(service, port) -> Option<&PortClaim>` — the claim for one port, when that service owns it
+- `published_ports() -> Vec<(&str, u16)>` — every `publish` entry with its service, in port order. A bare claim is never published
 - `MatchConfig` — container criteria. `matches(container)` requires every criterion set; an invalid `container_regex` matches nothing
 - `ServiceConfig::matches_container(container)` — a service without a `match` block covers every container
 - `resolve_all() -> Vec<ResolvedService>` — expands every service into one resolved registration per port, with defaults applied
@@ -99,7 +101,7 @@ Two entry points over one daemon seam, with no Consul involvement:
 **Declarative apply** (`natmap plan` / `natmap apply`):
 
 - `NatmapApply` — seam over the daemon's `add_mapping`, `list_mappings`, `remove_mapping` and `policy_route`; `NatmapClient` is the production implementation, tests fake it
-- `declared_mappings(config) -> (Vec<DeclaredMapping>, Vec<CoveredPort>)` — one mapping per declared port, from the node's tailnet address to the address the port answers on. A port already on the tailnet address or on a wildcard is covered instead. Refuses a missing `tailnet_ip`, a port claimed twice, and port 0
+- `declared_mappings(config) -> (Vec<DeclaredMapping>, Vec<CoveredPort>)` — one mapping per **published** port, from the node's tailnet address to the address its claim answers on. A published port already on the tailnet address or on a wildcard is covered instead. Refuses port 0, a port claimed twice, a claim on something that is not an address, a published port the service does not own, and a missing `tailnet_ip` when anything is published
 - `plan(declared, covered, live, prune) -> Plan` — the diff: `create`, `update`, `remove`, `keep` (hand-added, never pruned), `stale` (owned, left without `--prune`), `covered`, `conflicts`. `Plan::drift_message()` / `conflict_message()` word the report
 - `converge(apply, config, options) -> Result<Converged>` — refuses conflicts before writing (`Converged::Refused(plan)`, nothing written), then releases handed-over ports, creates and updates, then releases the stale ones (`Converged::Applied(plan)`). `ConvergeOptions {prune, dry_run}`. A declared mapping is written under `service_mapping_key(service)`, never under the bare service name
 - `Drift` — the marker `plan` and `apply --dry-run` return when the node does not match; `main.rs` turns it into exit 1 without an error report

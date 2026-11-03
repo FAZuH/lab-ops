@@ -225,18 +225,23 @@ mod tests {
             }
         }
 
-        /// Writes a declaration for `service` owning `ports`, and returns its path.
+        /// Writes a declaration for `service` owning `ports`, all published.
         fn declaration(&self, service: &str, ports: &[u16]) -> PathBuf {
             let claims: String = ports
                 .iter()
                 .map(|port| format!("      - port: {port}\n"))
                 .collect();
+            let published: String = ports
+                .iter()
+                .map(|port| format!("{port}, "))
+                .collect::<String>();
             let path = self.dir.path().join("discovery.yaml");
             fs::write(
                 &path,
                 format!(
                     "node:\n  name: test-node\n  tailnet_ip: 100.64.0.17\n\
-                     services:\n  {service}:\n    type: docker\n    ports:\n{claims}"
+                     services:\n  {service}:\n    type: docker\n    ports:\n{claims}    publish: [{}]\n",
+                    published.trim_end_matches(", ")
                 ),
             )
             .unwrap();

@@ -28,6 +28,8 @@
 //! - only a mapping an apply created is ever pruned. A mapping without an owner
 //!   was added by hand and survives, forever.
 
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::future::Future;
 use std::net::IpAddr;
 use std::pin::Pin;
@@ -516,33 +518,30 @@ impl Plan {
 
 /// Expands a declaration into the mappings natmap must own.
 ///
-/// One mapping per declared port that needs one: the node's tailnet address at
-/// the declared port, forwarded to the address the service answers on. A port
-/// whose service already answers on the tailnet address — or on every address —
-/// is returned as covered instead. No port is ever allocated here: the port a
-/// mapping uses is the port the declaration names.
+/// Ownership and publication are separate facts. `ports` says what a service
+/// answers on and who owns the port; `publish` names the subset this node
+/// fronts on its tailnet address. Only a published port produces a mapping, and
+/// it is always `node.tailnet_ip:<port>` forwarded to the address the matching
+/// claim names — for a service published from loopback, that is
+/// `100.64.0.17:3001 → 127.0.0.1:3001`.
+///
+/// A published port whose service already answers on the tailnet address — or on
+/// every address — needs no mapping and is returned as covered instead. No port
+/// is ever allocated here: the port a mapping uses is the port the declaration
+/// publishes.
+///
+/// Refused before anything is mapped: a port claimed by two services, a port
+/// claimed on an address that is not an address, and a port published by a
+/// service that does not own it. That last one is the pairing the nginx
+/// renderer also enforces, so the two readers cannot disagree.
 pub fn declared_mappings(
     config: &DiscoveryConfig,
 ) -> Result<(Vec<DeclaredMapping>, Vec<CoveredPort>)> {
-    let claims = config.port_claims();
-    if claims.is_empty() {
-        return Ok((Vec::new(), Vec::new()));
-    }
-
-    let tailnet_ip = config
-        .node
-        .tailnet_ip
-        .as_deref()
-        .ok_or_else(|| eyre!("node.tailnet_ip is required to publish a declared port"))?;
-    let tailnet_ip = IpAddr::from_str(tailnet_ip)
-        .wrap_err_with(|| format!("node.tailnet_ip {tailnet_ip:?} is not an address"))?;
-
+    // Ownership is validated whatever is published: a broken claim is broken
+    // even when nothing fronts it.
     let default_bind = config.default_bind_ip();
-    let mut declared = Vec::new();
-    let mut covered = Vec::new();
-    let mut claimed_by: std::collections::HashMap<u16, &str> = std::collections::HashMap::new();
-
-    for (service, claim) in claims {
+    let mut claimed_by: HashMap<u16, &str> = HashMap::new();
+    for (service, claim) in config.port_claims() {
         if claim.port == 0 {
             bail!("service {service:?} declares port 0, which it cannot own");
         }
@@ -552,25 +551,50 @@ pub fn declared_mappings(
                 claim.port
             );
         }
-
         let bind = claim.bind_ip.as_deref().unwrap_or(default_bind);
-        let address = IpAddr::from_str(bind).wrap_err_with(|| {
-            format!(
-                "service {service:?} declares port {} on {bind:?}, which is not an address",
-                claim.port
+        parse_bind(service, claim.port, bind)?;
+    }
+
+    let published = config.published_ports();
+    if published.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    let tailnet_ip = config
+        .node
+        .tailnet_ip
+        .as_deref()
+        .ok_or_else(|| eyre!("node.tailnet_ip is required to publish a port"))?;
+    let tailnet_ip = IpAddr::from_str(tailnet_ip)
+        .wrap_err_with(|| format!("node.tailnet_ip {tailnet_ip:?} is not an address"))?;
+
+    let mut declared = Vec::new();
+    let mut covered = Vec::new();
+    let mut seen: HashSet<u16> = HashSet::new();
+    for (service, port) in published {
+        let claim = config.port_claim(service, port).ok_or_else(|| {
+            eyre!(
+                "service {service:?} publishes port {port}, which its ports do not own (declared: {})",
+                owned_ports(config, service)
             )
         })?;
+        if !seen.insert(port) {
+            bail!("service {service:?} publishes port {port} more than once");
+        }
+        let bind = claim.bind_ip.as_deref().unwrap_or(default_bind);
+        let address = parse_bind(service, port, bind)?;
+
         if address.is_unspecified() || address == tailnet_ip {
             covered.push(CoveredPort {
                 service: service.to_string(),
-                port: claim.port,
+                port,
                 address: bind.to_string(),
             });
         } else {
             declared.push(DeclaredMapping {
                 service: service.to_string(),
                 host_ip: tailnet_ip.to_string(),
-                port: claim.port,
+                port,
                 target_ip: bind.to_string(),
                 proto: TransportProtocol::Tcp,
             });
@@ -578,6 +602,34 @@ pub fn declared_mappings(
     }
 
     Ok((declared, covered))
+}
+
+/// Parses a claim's answering address, naming the service and port when it is not one.
+fn parse_bind(service: &str, port: u16, bind: &str) -> Result<IpAddr> {
+    IpAddr::from_str(bind).wrap_err_with(|| {
+        format!("service {service:?} declares port {port} on {bind:?}, which is not an address")
+    })
+}
+
+/// The ports a service owns, for a declaration error that has to name them.
+fn owned_ports(config: &DiscoveryConfig, service: &str) -> String {
+    let mut ports: Vec<String> = config
+        .services
+        .get(service)
+        .map(|config| {
+            config
+                .ports
+                .iter()
+                .map(|claim| claim.port.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    ports.sort();
+    if ports.is_empty() {
+        "none".to_string()
+    } else {
+        ports.join(", ")
+    }
 }
 
 /// Whether a live mapping answers on the address a declaration names.
@@ -1278,10 +1330,27 @@ mod tests {
         }
     }
 
+    /// A declaration whose services publish every port they claim — the shape
+    /// most tests want. [`config_publishing`] names the subset explicitly.
     fn config(services: &[(&str, Vec<PortClaim>)]) -> DiscoveryConfig {
-        let services = services
+        let published: Vec<(&str, Vec<PortClaim>, Vec<u16>)> = services
             .iter()
             .map(|(name, ports)| {
+                (
+                    *name,
+                    ports.clone(),
+                    ports.iter().map(|claim| claim.port).collect(),
+                )
+            })
+            .collect();
+        config_publishing(&published)
+    }
+
+    /// A declaration with an explicit ownership set and publish subset.
+    fn config_publishing(services: &[(&str, Vec<PortClaim>, Vec<u16>)]) -> DiscoveryConfig {
+        let services = services
+            .iter()
+            .map(|(name, ports, publish)| {
                 (
                     name.to_string(),
                     ServiceConfig {
@@ -1291,6 +1360,7 @@ mod tests {
                         bind_ip: None,
                         bind_interface: None,
                         ports: ports.clone(),
+                        publish: publish.clone(),
                         rproxylocal: vec![],
                         rproxyremote: vec![],
                         forwardlocal: vec![],
@@ -1405,23 +1475,6 @@ mod tests {
     }
 
     #[test]
-    fn declared_mappings_covers_a_port_already_on_the_tailnet_address() {
-        let cfg = config(&[("fazuh-uptime", vec![claim(3001, Some(TAILNET))])]);
-
-        let (declared, covered) = declared_mappings(&cfg).unwrap();
-
-        assert!(declared.is_empty());
-        assert_eq!(
-            covered,
-            vec![CoveredPort {
-                service: "fazuh-uptime".into(),
-                port: 3001,
-                address: TAILNET.into(),
-            }]
-        );
-    }
-
-    #[test]
     fn declared_mappings_covers_a_port_bound_to_every_address() {
         let cfg = config(&[("fazuh-mail", vec![claim(443, Some("0.0.0.0"))])]);
 
@@ -1446,7 +1499,7 @@ mod tests {
     }
 
     #[test]
-    fn declared_mappings_requires_a_tailnet_ip_when_a_port_is_declared() {
+    fn declared_mappings_requires_a_tailnet_ip_when_a_port_is_published() {
         let mut cfg = config(&[("fazuh-uptime", vec![claim(3001, None)])]);
         cfg.node.tailnet_ip = None;
 
@@ -1456,14 +1509,136 @@ mod tests {
     }
 
     #[test]
-    fn declared_mappings_needs_no_tailnet_ip_without_a_declared_port() {
-        let mut cfg = config(&[("fazuh-uptime", vec![])]);
+    fn declared_mappings_needs_no_tailnet_ip_when_nothing_is_published() {
+        let mut cfg = config_publishing(&[("fazuh-uptime", vec![claim(3001, None)], vec![])]);
         cfg.node.tailnet_ip = None;
 
         let (declared, covered) = declared_mappings(&cfg).unwrap();
 
         assert!(declared.is_empty());
         assert!(covered.is_empty());
+    }
+
+    #[test]
+    fn declared_mappings_publishes_only_the_published_subset() {
+        let cfg = config_publishing(&[(
+            "fazuh-uptime",
+            vec![claim(3001, None), claim(3002, None), claim(9091, None)],
+            vec![3001],
+        )]);
+
+        let (declared, covered) = declared_mappings(&cfg).unwrap();
+
+        assert_eq!(
+            declared,
+            vec![DeclaredMapping {
+                service: "fazuh-uptime".into(),
+                host_ip: TAILNET.into(),
+                port: 3001,
+                target_ip: "127.0.0.1".into(),
+                proto: TransportProtocol::Tcp,
+            }],
+            "an owned but unpublished port must not be fronted"
+        );
+        assert!(covered.is_empty());
+    }
+
+    #[test]
+    fn declared_mappings_publishes_nothing_when_publish_is_empty() {
+        let cfg = config_publishing(&[(
+            "rclone-serve-restic",
+            vec![claim(9091, None), claim(9082, None)],
+            vec![],
+        )]);
+
+        let (declared, covered) = declared_mappings(&cfg).unwrap();
+
+        assert!(declared.is_empty(), "{declared:?}");
+        assert!(covered.is_empty());
+    }
+
+    #[test]
+    fn declared_mappings_refuses_publishing_a_port_the_service_does_not_own() {
+        let cfg = config_publishing(&[(
+            "fazuh-uptime",
+            vec![claim(3001, None), claim(3002, None)],
+            vec![3001, 9099],
+        )]);
+
+        let error = declared_mappings(&cfg).unwrap_err().to_string();
+
+        assert!(
+            error.contains("service \"fazuh-uptime\" publishes port 9099"),
+            "{error}"
+        );
+        assert!(error.contains("declared: 3001, 3002"), "{error}");
+    }
+
+    #[test]
+    fn declared_mappings_refuses_publishing_a_port_twice() {
+        let cfg = config_publishing(&[("fazuh-uptime", vec![claim(3001, None)], vec![3001, 3001])]);
+
+        let error = declared_mappings(&cfg).unwrap_err().to_string();
+
+        assert!(
+            error.contains("service \"fazuh-uptime\" publishes port 3001 more than once"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn declared_mappings_refuses_publishing_a_port_no_service_owns() {
+        let cfg = config_publishing(&[
+            ("fazuh-uptime", vec![claim(3001, None)], vec![3001]),
+            ("fazuh-grafana", vec![], vec![3000]),
+        ]);
+
+        let error = declared_mappings(&cfg).unwrap_err().to_string();
+
+        assert!(
+            error.contains("service \"fazuh-grafana\" publishes port 3000"),
+            "{error}"
+        );
+        assert!(error.contains("declared: none"), "{error}");
+    }
+
+    #[test]
+    fn declared_mappings_targets_the_answering_address_on_loopback() {
+        let cfg = config_publishing(&[(
+            "fazuh-uptime",
+            vec![
+                claim(3001, Some("127.0.0.1")),
+                claim(3000, Some("10.0.0.5")),
+            ],
+            vec![3001, 3000],
+        )]);
+
+        let (declared, covered) = declared_mappings(&cfg).unwrap();
+
+        assert_eq!(declared[0].port, 3000, "published ports are port ordered");
+        assert_eq!(declared[0].target_ip, "10.0.0.5");
+        assert_eq!(declared[1].port, 3001);
+        assert_eq!(declared[1].target_ip, "127.0.0.1");
+        assert_eq!(declared[1].host_ip, TAILNET);
+        assert!(covered.is_empty());
+    }
+
+    #[test]
+    fn declared_mappings_covers_a_published_port_already_on_the_tailnet_address() {
+        let cfg =
+            config_publishing(&[("fazuh-uptime", vec![claim(3001, Some(TAILNET))], vec![3001])]);
+
+        let (declared, covered) = declared_mappings(&cfg).unwrap();
+
+        assert!(declared.is_empty());
+        assert_eq!(
+            covered,
+            vec![CoveredPort {
+                service: "fazuh-uptime".into(),
+                port: 3001,
+                address: TAILNET.into(),
+            }]
+        );
     }
 
     #[test]
