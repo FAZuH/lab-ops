@@ -1,3 +1,24 @@
+## [Unreleased]
+
+### Changed (breaking)
+
+- A published port now DNATs to the address the service answers on, which is normally loopback.
+- Ports and publication are separate facts. `ports` names what a service answers on; `publish`
+  names the subset the node fronts on its tailnet address. A declaration with `ports` and no
+  `publish` creates no mapping, where it previously created one per declared port.
+- A published port must be owned by the service that publishes it and may be published once.
+  `node.tailnet_ip` is required only when `publish` is non-empty.
+
+### Added
+
+- `natmap apply --from <declaration> [--prune]`, recording the owning service per port.
+- `natmap-converge.timer`, converging a node to its declaration every 15 seconds.
+
+### Fixed
+
+- A declared mapping is replayed from state after a daemon restart.
+- A loopback target no longer opens a competing userspace listener.
+
 ## 0.2.2 (2026-10-15)
 
 ## 0.2.1 (2026-10-11)
