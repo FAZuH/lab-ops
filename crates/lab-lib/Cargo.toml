@@ -12,6 +12,8 @@ bollard = { workspace = true }
 color-eyre = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = "0.9"
+regex = { workspace = true }
 socket2 = "0.6.3"
 tokio = { workspace = true, features = ["sync", "net"] }
 tracing = { workspace = true }

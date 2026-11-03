@@ -20,15 +20,18 @@ lab-ops/
 │   │   └── src/
 │   │       ├── lib.rs             # Module declarations
 │   │       ├── consts.rs          # Shared constants (NATMAP_SOCKET, etc.)
+│   │       ├── discovery.rs       # discovery.yaml model: parse, defaults, resolve, container match
 │   │       ├── docker.rs          # Docker client + shared inspect: parse_container_inspect → ContainerInfo, parse_port_mappings → PortMapping
 │   │       ├── port.rs            # Port availability checking (SO_REUSEADDR, IP_FREEBIND)
 │   │       └── protocol.rs        # TransportProtocol enum (TCP/UDP)
 │   ├── natmap/                   # NAT management crate
 │   │   └── src/
 │   │   ├── lib.rs            # Module declarations
+│   │   ├── apply.rs          # Declarative apply (plan/converge from discovery.yaml) + per-service mapping and policy route
 │   │   ├── cli.rs            # Command enum + CLI dispatch
 │   │   ├── client.rs         # Typed NatmapClient (HTTP over Unix socket)
 │   │   ├── command.rs        # Handler functions for all subcommands
+│   │   ├── converge.rs       # One convergence pass: the tick `apply` and the timer run
 │   │       ├── daemon.rs         # Axum API server, state management
 │   │       ├── models.rs         # Data types (configs, requests, state)
 │   │       ├── iptables.rs       # IptablesManager (rule CRUD)
@@ -36,16 +39,6 @@ lab-ops/
 │   │       ├── docker.rs         # Docker API client (bollard)
 │   │       ├── install.rs        # Systemd service installation
 │   │       └── utils.rs          # HTTP client for daemon communication
-│   └── auto-discover/            # Service discovery daemon
-│       └── src/
-│           ├── lib.rs            # Module declarations
-│           ├── cli.rs            # CLI definitions and dispatch
-│           ├── config.rs         # YAML config parsing
-│           ├── consul.rs         # Consul service registration
-│           ├── daemon.rs         # Core discovery daemon
-│           ├── forwarding.rs     # Proxy-side DNAT rule sync
-
-│           └── port.rs           # Port assignment persistence + allocation
 ├── tests/                        # Integration tests
 │   ├── integration.rs            # cf2ansible integration tests
 │   └── natmap_docker.rs          # Docker-based NAT integration tests
@@ -62,7 +55,7 @@ lab-ops/
 
 The `natmap` CLI operates in two modes depending on the subcommand:
 
-**Daemon-dependent commands** (`dnat`, `snat`, `hairpin`, `docker add/rm/remap`, `ls`):
+**Daemon-dependent commands** (`dnat`, `snat`, `hairpin`, `plan`, `apply`, `docker add/rm/remap`, `ls`):
 1. CLI parses arguments into a JSON request body
 2. Sends HTTP request to the daemon via Unix socket (`/run/natmap.sock`)
 3. Daemon performs port allocation, iptables management, and state persistence

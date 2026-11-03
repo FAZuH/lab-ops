@@ -44,23 +44,12 @@ Manage iptables NAT rules for static VMs and dynamic Docker port remapping. Runs
 ```bash
 lab-ops natmap daemon                   # Start the daemon
 sudo lab-ops natmap install             # Install as systemd service
+lab-ops natmap plan --from nodes/<node>/discovery.yaml   # What the declaration would change
+lab-ops natmap apply --from nodes/<node>/discovery.yaml  # Converge to the declaration
 lab-ops natmap dnat --ext-ip ... --int-ip ... --ports 80  # Static DNAT
 lab-ops natmap docker add nginx 8080:80 # Docker port mapping
 lab-ops natmap ls                       # List all rules
 lab-ops natmap clear                    # Remove all managed rules
-```
-
-### auto-discover
-
-`crates/auto-discover/` — Service discovery daemon that watches Docker events, manages port forwarding via `lab-ops natmap`, and registers services with Consul. See [docs/auto-discover/usage.md](docs/auto-discover/usage.md) for full documentation.
-
-```bash
-lab-ops auto-discover daemon                                 # Run unified daemon
-lab-ops auto-discover daemon --no-forwarding      # Discovery only
-lab-ops auto-discover daemon --no-discovery       # Forwarding only
-lab-ops auto-discover sync                                   # Single-sync pass
-lab-ops auto-discover check                                  # Validate config
-lab-ops auto-discover forwarding-sync [--consul-addr URL]    # One-shot DNAT sync
 ```
 
 ## Global Options

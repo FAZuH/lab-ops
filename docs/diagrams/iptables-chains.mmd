@@ -3,6 +3,7 @@ flowchart TD
         FORWARD["FORWARD chain"]
         DUSER["DOCKER-USER chain<br/>(Docker created)"]
         NMF["NATMAP chain<br/>(natmap created)"]
+        INPUT["INPUT chain<br/>(loopback accept rules)"]
         FORWARD -->|"-j DOCKER-USER"| DUSER
         DUSER -->|"-j NATMAP"| NMF
     end
@@ -18,7 +19,8 @@ flowchart TD
     end
 
     NMN -->|"DNAT to container:port"| NMN
-    NMF -->|"ACCEPT to container"| NMF
+    NMF -->|"ACCEPT to forwarded target"| NMF
+    INPUT -->|"ACCEPT to locally delivered target"| INPUT
 
     style NMF fill:#6cf,stroke:#333
     style NMN fill:#6cf,stroke:#333

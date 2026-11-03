@@ -1,6 +1,6 @@
 //! Transport protocol enum (TCP / UDP).
 //!
-//! Lives in lab-lib rather than natmap so auto-discover can use it without
+//! Lives in lab-lib rather than natmap so every crate can share it without
 //! depending on natmap.
 //!
 //! ```

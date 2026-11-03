@@ -2,10 +2,209 @@
 
 - **natmap daemon**: Central authority for ALL iptables NAT rules. Installs DNAT rules in the `NATMAP` chain, manages port reservations, persists state to `/var/lib/natmap/state.json`
 - **natmap CLI**: Communicates with the daemon via Unix socket (`/run/natmap.sock`) for all rule management commands
-- **DNAT**: Destination NAT — forwards traffic from an external IP:port to an internal host. Creates PREROUTING and FORWARD rules
+- **DNAT**: Destination NAT — forwards traffic from an external IP:port to an internal host. Creates a PREROUTING DNAT plus an accept rule: `FORWARD` for a forwarded destination, `INPUT` for a locally delivered one (loopback)
 - **SNAT**: Source NAT — rewrites source IP of outgoing traffic from internal hosts. Creates POSTROUTING rules
 - **Hairpin NAT**: Allows internal hosts to reach themselves via the external IP. Creates PREROUTING DNAT + POSTROUTING MASQUERADE rules
 - **Docker mapping**: Dynamic port remapping managed by natmap — maps a host port to a container port without restarting the container
+- **Declaration**: A node's `discovery.yaml` — the host ports each service owns (`ports:`), the address each answers on, and the subset this node fronts on its tailnet address (`publish:`). natmap never allocates a port: a published port is the port used
+- **Ownership ledger**: The `owner` the daemon records on every mapping an apply created, saying which service owns the port. A mapping with no owner was added by hand
+- **Covered port**: A published port whose service already answers on the node's tailnet address (or on every address), so it needs no mapping
+- **Drift**: Anything the daemon holds that disagrees with the declaration. `plan` reports it and exits non-zero
+- **Converge tick**: One run of `apply` against a declaration, the way the timer runs it: read the file, converge, log what changed. A tick on a converged node writes nothing at all
+
+## Declarative apply
+
+`natmap plan` and `natmap apply --from <file>` converge one node to the mappings
+its declaration names. The declaration is `nodes/<node>/discovery.yaml`:
+
+```yaml
+node:
+  name: fazuh-sg-2
+  tailnet_ip: 100.64.0.17    # how other nodes reach this one
+
+defaults:
+  bind_ip: 127.0.0.1         # where a declared port answers unless it says otherwise
+
+services:
+  fazuh-uptime:
+    type: docker
+    ports:                     # ownership: what this service answers on
+      - port: 3001
+        bind_ip: 127.0.0.1     # the address nginx may point at
+    publish: [3001]            # the subset natmap fronts on the tailnet
+  rclone-serve-restic:
+    type: local
+    address: 127.0.0.1
+    ports:
+      - port: 9091             # owned, validated, rendered — never fronted
+  fazuh-grafana:
+    type: docker
+    ports:
+      - port: 3000
+        bind_ip: 10.0.0.5      # this one answers on a concrete address
+    publish: [3000]
+    nginx:                     # not natmap's business; ignored
+      target: nodes/fazuh-sg-2/fazuh-grafana/nginx.conf
+      context: http
+```
+
+`ports` and `publish` answer two different questions, and one field cannot say
+both:
+
+- `ports` — **ownership**: the host ports this service owns and the address each
+  *answers* on. The nginx renderer resolves upstream references against it, so
+  it is what nginx is allowed to point at. Owning a port publishes nothing.
+- `publish` — **reachability**: the subset of those ports this node fronts on
+  `node.tailnet_ip`, so another node can reach them over the tailnet. Absent or
+  empty means local only.
+
+One published port produces one mapping: the node's `tailnet_ip` on that port,
+forwarded to the address its claim names (`bind_ip`, else `defaults.bind_ip`,
+else `127.0.0.1`). A service published from loopback becomes
+`100.64.0.17:3001 → 127.0.0.1:3001`. The port is the same on both sides, and
+nothing is allocated.
+
+Publishing a port the service does not own is a declaration error — the same
+pairing the renderer enforces, so the two readers cannot disagree:
+
+```
+service "fazuh-uptime" publishes port 9099, which its ports do not own (declared: 3001)
+```
+
+A declaration written before this split has no `publish`, so it fronts
+nothing: add `publish:` to the ports other nodes must reach *before* the
+converge timer runs with `--prune`, or its first tick releases the mappings the
+previous version created.
+
+A published port whose address is already the tailnet IP, or a wildcard
+(`0.0.0.0` / `::`), is reachable there without help and is reported as
+**covered** instead of mapped. That is the migration path: a container that
+still binds the tailnet address needs no mapping, and one moved to loopback
+gains its mapping on the next apply.
+
+### `plan`
+
+```bash
+lab-ops natmap plan --from nodes/fazuh-sg-2/discovery.yaml
+lab-ops natmap plan --from nodes/fazuh-sg-2/discovery.yaml --prune
+lab-ops natmap --json plan --from nodes/fazuh-sg-2/discovery.yaml
+```
+
+Prints what would change — `create`, `update`, `release`, `stale`, `keep`,
+`covered`, `conflict` — writes nothing, and exits non-zero when the node does
+not match the declaration. `--prune` changes what counts as drift: without it a
+mapping this node created that the declaration dropped is reported `stale` and
+kept.
+
+### `apply`
+
+```bash
+lab-ops natmap apply --from nodes/fazuh-sg-2/discovery.yaml            # converge
+lab-ops natmap apply --from nodes/fazuh-sg-2/discovery.yaml --prune    # also release
+lab-ops natmap apply --from nodes/fazuh-sg-2/discovery.yaml --dry-run  # plan, write nothing
+```
+
+`--dry-run` prints the plan, writes nothing, and exits non-zero on drift —
+identical to `plan`.
+
+Order is part of the contract: creates and updates first, then releases. A port
+this apply hands to another service is the one exception — that release runs
+first, because the daemon arbitrates the port and would answer 409 to the
+create.
+
+### Ownership
+
+The daemon records which service owns each port on the mapping itself, so the
+mapping set is the ledger:
+
+- A port is only ever handed to the service the declaration gives it to. A port
+  owned by another service is refused, naming both.
+- A port is released only by the apply that removes its owner. `--prune` is that
+  apply; a plain `apply` refuses a port transfer and says so.
+- Only a mapping an apply created is pruned. A mapping added by hand
+  (`natmap docker add`) has no owner and survives every prune. If a hand-added
+  mapping sits on a published port, apply refuses rather than adopt it — remove
+  it, then apply.
+- A port claimed by two services in one declaration is a declaration error,
+  naming both; so is a `publish` entry a service does not own.
+
+A published port whose service answers on loopback — the normal case — needs no
+userspace listener: the kernel rule alone services it, and the daemon holds only
+a claim on the address. The claim is what answers 409 to a second mapping of the
+same port, so the conflict gate survives without a socket competing with the
+rule (or with the service holding the port being forwarded to). A mapping to a
+container address is forwarded, not delivered locally, and keeps its listener.
+
+Published mappings are stored under a `service:` key, not the service name, and a
+reload replays them from their stored addresses whatever Docker reports: they
+answer on an address this node owns, so no container id matches them and no
+inspect can retarget them. Only an apply that stops publishing the port removes
+one.
+
+`apply` exits zero once it converged everything it was allowed to touch. A
+refusal prints the plan first — the `conflict` row names the port, the holder
+and the requesting service — and then fails with the same two names.
+
+The `conflict` row and the `conflicts` JSON field are only non-empty for a
+refusal; a converged or merely drifting plan has none.
+
+## Converge on a timer
+
+A node converges on its own, so drift heals without a deploy and an edited
+declaration needs no manual command:
+
+```bash
+sudo lab-ops natmap install --from /etc/auto-discover/discovery.yaml
+sudo lab-ops natmap install --from /etc/auto-discover/discovery.yaml --interval 30
+```
+
+`install` writes two more units next to `natmap.service` and enables the timer:
+
+```ini
+# /etc/systemd/system/natmap-converge.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/lab-ops -v natmap apply --from /etc/auto-discover/discovery.yaml --prune
+```
+```ini
+# /etc/systemd/system/natmap-converge.timer
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=15s
+AccuracySec=1s
+Unit=natmap-converge.service
+```
+
+A tick is `apply`: it re-reads the declaration, diffs it against the daemon's
+mappings and writes only what differs. On a converged node it costs one read and
+nothing else — no mapping request, no iptables call, no state-file write. The
+tick logs one event: at `info` with the change counts when something changed,
+at `debug` when nothing did, so a converged node does not fill the journal.
+
+Decisions worth knowing:
+
+- **The schedule is systemd's, not a loop in natmap.** One process per tick,
+  `Type=oneshot`, so a tick can never overlap the previous one, restarts need no
+  bookkeeping, and there is no cursor or "last applied" file that could disagree
+  with the daemon's mappings. A tick therefore needs no store of its own.
+- **`--prune` is on.** A service removed from the declaration releases its port;
+  a mapping this node did not create is still never pruned (it has no owner).
+- **A declaration that cannot be read is an error and writes nothing.** A wrong
+  path or a half-written file is not an empty declaration: the tick fails, the
+  unit shows failed, and nothing is pruned.
+- **A tick repairs what a reload or a crash lost.** Whatever the daemon's state
+  says, the next tick converges the declaration again, so a Docker reconnect
+  and the timer cannot leave a standing disagreement.
+- **Interval, not a watcher.** Change detection is the next tick: 15 s by
+  default, `--interval` to change it. That is a whole dependency and a
+  long-lived process fewer than an inotify watcher, and a converged tick is a
+  single read.
+
+Turn it off without touching the daemon:
+
+```bash
+sudo systemctl disable --now natmap-converge.timer
+```
 
 ## Daemon
 
@@ -39,6 +238,10 @@ This command:
 3. Writes `/etc/systemd/system/natmap.service`
 4. Runs `systemctl daemon-reload` and `systemctl enable --now natmap`
 
+With `--from <file>` it also writes `natmap-converge.service` and
+`natmap-converge.timer` and enables the timer — see
+[Converge on a timer](#converge-on-a-timer).
+
 After re-login (for group membership), you can use `lab-ops natmap ...` without `sudo`.
 
 ### Service Control
@@ -59,8 +262,11 @@ sudo systemctl restart natmap
 The daemon persists state to `/var/lib/natmap/state.json`. On restart or crash recovery, it:
 - Flushes all stale iptables rules
 - Releases all port reservations
-- Reads the state file and rebinds only rules whose ports are still available
-- Skips rules for ports taken by other services (logged as warnings)
+- Reads the state file and reinstalls rules whose ports are still available
+- Replays a declared mapping (`service:` key) from its stored addresses, and
+  keeps it whatever Docker reports
+- Drops a container mapping whose container is no longer running, and skips
+  rules for ports taken by other services (logged as warnings)
 
 A missing state file starts with empty state. A present but unparseable state file (including a truncated write) is fatal: the daemon refuses to start with an error naming the path and the parse failure, and leaves the file untouched for inspection.
 
@@ -103,7 +309,7 @@ The `clear` command removes all daemon-managed rules (static DNAT, SNAT, hairpin
 
 ### Policy Routing
 
-Manage Linux policy routing rules for source IP preservation. When `preserve_src_ip: true` is configured in auto-discover, the service node needs a policy route so return traffic routes back through the proxy gateway instead of directly to the client. This preserves the real sender IP end-to-end.
+Manage Linux policy routing rules for source IP preservation. When a discovery service sets `preserve_src_ip: true`, the service node needs a policy route so return traffic routes back through the proxy gateway instead of directly to the client. This preserves the real sender IP end-to-end.
 
 The daemon also clones non-default, non-local routes from the main routing table into the policy table (e.g., Docker bridge subnets) so local traffic uses the correct interface instead of the proxy gateway.
 
@@ -121,7 +327,7 @@ The `policy-route` command talks to the natmap daemon via Unix socket. It requir
 
 #### DNAT (Destination NAT)
 
-Forward traffic from an external IP/port to an internal host. Creates PREROUTING and FORWARD rules.
+Forward traffic from an external IP/port to an internal host. Creates a PREROUTING DNAT and an accept rule in `FORWARD`, or in `INPUT` when the internal address is on this host (`127.0.0.1`, `::1`).
 
 ```bash
 # Forward ports 25 and 465
@@ -152,7 +358,14 @@ lab-ops natmap dnat \
   --delete
 ```
 
-**Port reservation:** The daemon binds each port to `0.0.0.0` before creating iptables rules, preventing other services from claiming the port.
+**Port reservation:** The daemon binds each port on the external address before creating iptables rules, preventing other services from claiming it. A loopback destination is the exception: the kernel rule alone services it, so no userspace listener is opened (a listener would accept locally delivered traffic itself instead of forwarding it). Docker and local-service mappings keep their reservation — the daemon allocates and arbitrates that host port through it.
+
+**Forwarding to a host service on loopback:** `--int-ip 127.0.0.1` (or `::1`) forwards to a service listening on this host. The kernel must also allow the delivery: `net.ipv4.conf.<ingress>.route_localnet=1` for IPv4 (NixOS leaves it `0`), and an IPv6 destination is installed with `ip6tables`. The DNAT rule's counters increment either way, so a silent drop is a `route_localnet` problem, not a rule problem.
+
+```bash
+# tailnet 9100 -> node-exporter on 127.0.0.1:9100
+lab-ops natmap dnat --ext-ip 100.64.0.10 --int-ip 127.0.0.1 --ports 9100
+```
 
 #### SNAT (Source NAT)
 
@@ -265,7 +478,7 @@ lab-ops natmap docker add 8080:127.0.0.1:80 --name my-local-service
 lab-ops natmap docker add my-nginx 8080
 ```
 
-Re-adding an existing mapping (same container, container port, protocol, and host IP) is idempotent: the daemon returns the live mapping with its host port unchanged and installs no duplicate rule. If the container's address changed, the rule is rewritten in place. This keeps repeated `auto-discover sync` passes on a stable host port. Requesting a *different* explicit host port creates a second mapping for the same container port.
+Re-adding an existing mapping (same container, container port, protocol, and host IP) is idempotent: the daemon returns the live mapping with its host port unchanged and installs no duplicate rule. If the container's address changed, the rule is rewritten in place. This keeps repeated `apply` passes on a stable host port. Requesting a *different* explicit host port creates a second mapping for the same container port.
 
 #### Removing a Mapping
 

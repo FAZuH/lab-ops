@@ -1,0 +1,8 @@
+[Unit]
+Description=natmap — converge this node to its discovery declaration
+After=natmap.service
+Requires=natmap.service
+
+[Service]
+Type=oneshot
+ExecStart={binary} -v natmap apply --from {declaration} --prune
